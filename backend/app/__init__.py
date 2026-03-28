@@ -1,0 +1,1 @@
+"""PaperEasy backend application package."""
