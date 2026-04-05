@@ -1,0 +1,7 @@
+INFO:     Started server process [9832]
+INFO:     Waiting for application startup.
+2026-03-29 21:01:00,941 | INFO | papereasy.backend | Upload directory ready at D:\papereasy\backend\uploads
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+2026-03-29 21:01:13,211 | INFO | papereasy.backend | GET /health -> 200 (0.55 ms)
+2026-03-29 21:01:13,660 | INFO | papereasy.backend | GET /openapi.json -> 200 (35.75 ms)

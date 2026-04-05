@@ -1,0 +1,21 @@
+INFO:     Started server process [21828]
+INFO:     Waiting for application startup.
+2026-03-30 20:18:44,518 | INFO | papereasy.backend | Upload directory ready at D:\papereasy\backend\uploads
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)
+2026-03-30 20:18:58,768 | INFO | papereasy.backend | GET /health -> 200 (3.43 ms)
+2026-03-30 20:18:59,349 | INFO | papereasy.backend | GET /openapi.json -> 200 (43.40 ms)
+2026-03-30 20:19:56,129 | INFO | papereasy.backend | GET /health -> 200 (0.52 ms)
+2026-03-30 20:23:28,065 | INFO | papereasy.backend | GET /health -> 200 (0.45 ms)
+2026-03-30 20:23:38,058 | INFO | papereasy.backend | GET /health -> 200 (0.41 ms)
+2026-03-30 20:25:16,944 | INFO | papereasy.backend | GET /health -> 200 (0.53 ms)
+2026-03-30 22:30:39,236 | INFO | papereasy.backend | GET /health -> 200 (29.71 ms)
+2026-03-30 22:30:39,239 | INFO | papereasy.backend | GET /health -> 200 (29.25 ms)
+2026-03-30 22:38:15,230 | INFO | papereasy.backend | GET /health -> 200 (0.76 ms)
+2026-03-30 23:05:40,348 | INFO | papereasy.backend | GET /health -> 200 (1.00 ms)
+2026-03-30 23:06:09,153 | INFO | papereasy.backend.file_service | Stored upload .tmp-e2e-generate.docx as f8d1fa89-cf95-4208-8031-95aa4ff04141.docx (36765 bytes)
+2026-03-30 23:06:09,395 | INFO | papereasy.backend.extraction_service | Extracted text from f8d1fa89-cf95-4208-8031-95aa4ff04141.docx in 241.01 ms
+2026-03-30 23:06:09,396 | INFO | papereasy.backend | POST /upload -> 201 (330.46 ms)
+2026-03-30 23:06:09,403 | INFO | papereasy.backend | POST /generate -> 503 (1.51 ms)
+2026-03-30 23:10:05,365 | INFO | papereasy.backend | GET /health -> 200 (0.34 ms)
+2026-03-30 23:10:05,368 | INFO | papereasy.backend | GET /health -> 200 (0.26 ms)

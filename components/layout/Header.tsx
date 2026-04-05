@@ -31,12 +31,12 @@ export function Header() {
 
         <div className="flex items-center gap-3 cursor-pointer group">
           <div className="text-right hidden md:block">
-            <p className="text-sm font-medium text-white leading-none mb-1 group-hover:text-indigo-300 transition-colors">Dr. Sarah Jenkins</p>
-            <p className="text-xs text-indigo-400/70 leading-none tracking-wide">PRINCIPAL INVESTIGATOR</p>
+            <p className="text-sm font-medium text-white leading-none mb-1 group-hover:text-indigo-300 transition-colors">ResearchFlow Workspace</p>
+            <p className="text-xs text-indigo-400/70 leading-none tracking-wide">LIVE BACKEND CONNECTED</p>
           </div>
           <Avatar className="h-9 w-9 border border-indigo-500/30 ring-2 ring-transparent group-hover:ring-indigo-500/50 transition-all shadow-[0_0_15px_rgba(79,70,229,0.3)]">
-            <AvatarImage src="/avatar.jpg" alt="Dr. Jenkins" />
-            <AvatarFallback className="bg-indigo-950 text-indigo-200 text-xs font-bold">SJ</AvatarFallback>
+            <AvatarImage src="/avatar.jpg" alt="ResearchFlow workspace" />
+            <AvatarFallback className="bg-indigo-950 text-indigo-200 text-xs font-bold">RF</AvatarFallback>
           </Avatar>
         </div>
       </div>

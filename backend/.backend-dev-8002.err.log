@@ -1,0 +1,127 @@
+INFO:     Will watch for changes in these directories: ['D:\\papereasy\\backend']
+INFO:     Uvicorn running on http://127.0.0.1:8002 (Press CTRL+C to quit)
+INFO:     Started reloader process [18652] using WatchFiles
+INFO:     Started server process [16928]
+INFO:     Waiting for application startup.
+2026-04-03 11:11:38,118 | INFO | papereasy.backend | Upload directory ready at D:\papereasy\backend\uploads
+INFO:     Application startup complete.
+2026-04-03 11:11:46,328 | INFO | papereasy.backend | GET /health -> 200 (2.28 ms)
+2026-04-03 11:14:33,351 | INFO | papereasy.backend | GET /health -> 200 (0.77 ms)
+WARNING:  WatchFiles detected changes in 'models\project.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [16928]
+WARNING:  WatchFiles detected changes in 'app\schemas\__init__.py', 'app\schemas\project_schema.py', 'app\main.py', 'core\exceptions.py', 'app\api\routes\project.py', 'app\services\project_service.py', 'app\api\routes\save.py'. Reloading...
+Exception ignored in: <function BaseEventLoop.__del__ at 0x000001BF0CFC16C0>
+Traceback (most recent call last):
+  File "C:\Python313\Lib\asyncio\base_events.py", line 760, in __del__
+    self.close()
+  File "C:\Python313\Lib\asyncio\selector_events.py", line 104, in close
+    self._close_self_pipe()
+  File "C:\Python313\Lib\asyncio\selector_events.py", line 111, in _close_self_pipe
+    self._remove_reader(self._ssock.fileno())
+AttributeError: '_WindowsSelectorEventLoop' object has no attribute '_ssock'
+C:\Users\moham\AppData\Roaming\Python\Python313\site-packages\uvicorn\_subprocess.py:84: RuntimeWarning: coroutine 'Server.serve' was never awaited
+  pass
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+INFO:     Started server process [18372]
+INFO:     Waiting for application startup.
+2026-04-03 11:27:44,622 | INFO | papereasy.backend | Upload directory ready at D:\papereasy\backend\uploads
+INFO:     Application startup complete.
+2026-04-03 11:28:57,276 | INFO | papereasy.backend | POST /save -> 422 (2.64 ms)
+2026-04-03 11:33:02,346 | INFO | papereasy.backend | GET /health -> 200 (1.50 ms)
+2026-04-03 11:33:02,349 | INFO | papereasy.backend | GET /health -> 200 (0.55 ms)
+2026-04-03 11:33:07,047 | INFO | papereasy.backend | GET /health -> 200 (0.61 ms)
+2026-04-03 11:33:34,628 | INFO | papereasy.backend.file_service | Stored upload Abstrac1.docx as caa9c343-6d6b-4eed-9d5f-7d59a420f933.docx (19125 bytes)
+2026-04-03 11:33:35,038 | INFO | papereasy.backend.extraction_service | Extracted text from caa9c343-6d6b-4eed-9d5f-7d59a420f933.docx in 408.93 ms
+2026-04-03 11:33:35,040 | INFO | papereasy.backend | POST /upload -> 201 (416.99 ms)
+2026-04-03 11:33:35,238 | INFO | papereasy.backend | OPTIONS /generate -> 200 (0.28 ms)
+2026-04-03 11:33:35,244 | INFO | papereasy.backend | OPTIONS /generate -> 200 (0.77 ms)
+2026-04-03 11:33:35,250 | INFO | papereasy.backend.agent.structuring_agent | Agent structuring_agent received structure_document from pipeline
+2026-04-03 11:33:46,310 | ERROR | papereasy.backend.a2a | A2A message pipeline -> structuring_agent failed with application error on attempt 1 in 11060.20 ms
+Traceback (most recent call last):
+  File "D:\papereasy\backend\orchestration\a2a_manager.py", line 49, in dispatch
+    result_payload = await agent.receive_message(message)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\papereasy\backend\agents\base.py", line 38, in receive_message
+    return await self.process_task(message)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\papereasy\backend\agents\structuring_agent.py", line 40, in process_task
+    result = await self.client.generate_json(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "D:\papereasy\backend\core\vertex_client.py", line 82, in generate_json
+    credentials = self._build_credentials()
+  File "D:\papereasy\backend\core\vertex_client.py", line 40, in _build_credentials
+    raise GenerationConfigurationError(
+        "The configured Google service account file was not found. Set VERTEX_SERVICE_ACCOUNT_FILE or GOOGLE_APPLICATION_CREDENTIALS to an existing JSON file."
+    )
+core.exceptions.GenerationConfigurationError: The configured Google service account file was not found. Set VERTEX_SERVICE_ACCOUNT_FILE or GOOGLE_APPLICATION_CREDENTIALS to an existing JSON file.
+2026-04-03 11:33:46,318 | INFO | papereasy.backend | POST /generate -> 503 (11074.09 ms)
+2026-04-03 11:33:46,320 | INFO | papereasy.backend.agent.structuring_agent | Agent structuring_agent received structure_document from pipeline
+2026-04-03 11:33:46,321 | ERROR | papereasy.backend.a2a | A2A message pipeline -> structuring_agent failed with application error on attempt 1 in 1.45 ms
+Traceback (most recent call last):
+  File "D:\papereasy\backend\orchestration\a2a_manager.py", line 49, in dispatch
+    result_payload = await agent.receive_message(message)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\papereasy\backend\agents\base.py", line 38, in receive_message
+    return await self.process_task(message)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\papereasy\backend\agents\structuring_agent.py", line 40, in process_task
+    result = await self.client.generate_json(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "D:\papereasy\backend\core\vertex_client.py", line 82, in generate_json
+    credentials = self._build_credentials()
+  File "D:\papereasy\backend\core\vertex_client.py", line 40, in _build_credentials
+    raise GenerationConfigurationError(
+        "The configured Google service account file was not found. Set VERTEX_SERVICE_ACCOUNT_FILE or GOOGLE_APPLICATION_CREDENTIALS to an existing JSON file."
+    )
+core.exceptions.GenerationConfigurationError: The configured Google service account file was not found. Set VERTEX_SERVICE_ACCOUNT_FILE or GOOGLE_APPLICATION_CREDENTIALS to an existing JSON file.
+2026-04-03 11:33:46,323 | INFO | papereasy.backend | POST /generate -> 503 (11074.44 ms)
+WARNING:  WatchFiles detected changes in 'models\project.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [18372]
+WARNING:  WatchFiles detected changes in 'app\schemas\figure_schema.py', 'services\figure_service.py', 'app\schemas\project_schema.py', 'services\latex_service.py', 'app\api\routes\export.py', 'app\api\routes\figure.py', 'core\exceptions.py', 'services\__init__.py', 'core\config.py', 'services\export_service.py', 'app\services\project_service.py', 'app\schemas\export_schema.py'. Reloading...
+C:\Users\moham\AppData\Roaming\Python\Python313\site-packages\uvicorn\_subprocess.py:84: RuntimeWarning: coroutine 'Server.serve' was never awaited
+  pass
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+INFO:     Started server process [4908]
+INFO:     Waiting for application startup.
+2026-04-03 11:49:19,225 | INFO | papereasy.backend | Upload directory ready at D:\papereasy\backend\uploads
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\main.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [4908]
+WARNING:  WatchFiles detected changes in 'services\figure_service.py', 'services\export_service.py'. Reloading...
+Exception ignored in: <function BaseEventLoop.__del__ at 0x0000029C2A0356C0>
+Traceback (most recent call last):
+  File "C:\Python313\Lib\asyncio\base_events.py", line 760, in __del__
+    self.close()
+  File "C:\Python313\Lib\asyncio\selector_events.py", line 104, in close
+    self._close_self_pipe()
+  File "C:\Python313\Lib\asyncio\selector_events.py", line 111, in _close_self_pipe
+    self._remove_reader(self._ssock.fileno())
+AttributeError: '_WindowsSelectorEventLoop' object has no attribute '_ssock'
+C:\Users\moham\AppData\Roaming\Python\Python313\site-packages\uvicorn\_subprocess.py:84: RuntimeWarning: coroutine 'Server.serve' was never awaited
+  pass
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+INFO:     Started server process [19652]
+INFO:     Waiting for application startup.
+2026-04-03 11:54:20,658 | INFO | papereasy.backend | Upload directory ready at D:\papereasy\backend\uploads
+2026-04-03 11:54:20,659 | INFO | papereasy.backend | Figure directory ready at D:\papereasy\backend\static\figures
+2026-04-03 11:54:20,660 | INFO | papereasy.backend | Output directory ready at D:\papereasy\backend\outputs
+INFO:     Application startup complete.
+2026-04-04 00:47:16,675 | INFO | papereasy.backend | OPTIONS /generate -> 200 (2.79 ms)
+2026-04-04 00:47:16,723 | INFO | papereasy.backend | POST /generate -> 404 (39.25 ms)
+2026-04-04 00:47:24,790 | INFO | papereasy.backend | GET /health -> 200 (21.74 ms)
+2026-04-04 00:47:24,793 | INFO | papereasy.backend | GET /health -> 200 (0.70 ms)

@@ -1,0 +1,31 @@
+
+> papereasy@0.1.0 dev
+> next dev
+
+▲ Next.js 16.2.1 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://10.147.19.62:3000
+- Environments: .env.local
+✓ Ready in 1242ms
+Creating turbopack project { dir: 'D:\\papereasy', testMode: true }
+
+ GET / 200 in 1718ms (next.js: 637ms, application-code: 1081ms)
+ GET / 200 in 270ms (next.js: 16ms, application-code: 254ms)
+ GET /avatar.jpg 404 in 240ms (next.js: 73ms, application-code: 167ms)
+ GET /new 200 in 119ms (next.js: 51ms, application-code: 69ms)
+✓ Compiled in 356ms
+✓ Compiled in 950ms
+ GET /new 200 in 471ms (next.js: 98ms, application-code: 374ms)
+ GET /new 200 in 265ms (next.js: 59ms, application-code: 206ms)
+ GET /new 200 in 160ms (next.js: 8ms, application-code: 152ms)
+ GET /new 200 in 162ms (next.js: 52ms, application-code: 110ms)
+ GET /new 200 in 163ms (next.js: 102ms, application-code: 61ms)
+ GET / 200 in 153ms (next.js: 75ms, application-code: 78ms)
+ GET / 200 in 394ms (next.js: 5ms, application-code: 389ms)
+ GET /avatar.jpg 404 in 121ms (next.js: 19ms, application-code: 102ms)
+ GET /new 200 in 81ms (next.js: 23ms, application-code: 57ms)
+ GET /processing?projectId=caa9c343-6d6b-4eed-9d5f-7d59a420f933&title=ai+is+future 200 in 122ms (next.js: 61ms, application-code: 61ms)
+✓ Compiled in 318ms
+ GET /processing?projectId=caa9c343-6d6b-4eed-9d5f-7d59a420f933&title=ai+is+future 200 in 414ms (next.js: 52ms, application-code: 363ms)
+ GET /avatar.jpg 404 in 163ms (next.js: 15ms, application-code: 147ms)
+ GET / 200 in 114ms (next.js: 9ms, application-code: 105ms)

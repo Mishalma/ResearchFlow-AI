@@ -1,0 +1,13 @@
+INFO:     127.0.0.1:51860 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55480 - "GET /openapi.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60714 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60916 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60919 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59114 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65082 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61111 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57257 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52932 - "POST /upload HTTP/1.1" 201 Created
+INFO:     127.0.0.1:52932 - "POST /generate HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:58152 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50261 - "GET /health HTTP/1.1" 200 OK

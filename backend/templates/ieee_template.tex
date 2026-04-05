@@ -1,0 +1,69 @@
+\documentclass[conference]{IEEEtran}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{url}
+
+\title{ {{ title }} }
+\author{\IEEEauthorblockN{AI-Powered Research Paper Generator}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+{{ abstract }}
+{% for figure in figures.abstract %}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{ {{ figure.path }} }
+\caption{ {{ figure.caption }} }
+\label{fig:{{ figure.id }}}
+\end{figure}
+{% endfor %}
+\end{abstract}
+
+\section{Introduction}
+{{ introduction }}
+{% for figure in figures.introduction %}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{ {{ figure.path }} }
+\caption{ {{ figure.caption }} }
+\label{fig:{{ figure.id }}}
+\end{figure}
+{% endfor %}
+
+\section{Methodology}
+{{ methodology }}
+{% for figure in figures.methodology %}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{ {{ figure.path }} }
+\caption{ {{ figure.caption }} }
+\label{fig:{{ figure.id }}}
+\end{figure}
+{% endfor %}
+
+\section{Conclusion}
+{{ conclusion }}
+{% for figure in figures.conclusion %}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{ {{ figure.path }} }
+\caption{ {{ figure.caption }} }
+\label{fig:{{ figure.id }}}
+\end{figure}
+{% endfor %}
+
+\begin{thebibliography}{99}
+{% if references %}
+{% for reference in references %}
+\bibitem{ref{{ loop.index }}} {{ reference }}
+{% endfor %}
+{% else %}
+\bibitem{ref1} No references available.
+{% endif %}
+\end{thebibliography}
+
+\end{document}
