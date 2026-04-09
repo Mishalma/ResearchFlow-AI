@@ -2,7 +2,7 @@
 
 import { useRef } from "react";
 import { useFrame } from "@react-three/fiber";
-import { Icosahedron, MeshDistortMaterial, Sphere, Wireframe } from "@react-three/drei";
+import { Icosahedron, MeshDistortMaterial, Sphere } from "@react-three/drei";
 import * as THREE from "three";
 
 export function AICore({ fast = false }) {

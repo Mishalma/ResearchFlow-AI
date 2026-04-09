@@ -10,6 +10,11 @@ class AppError(Exception):
         self.status_code = status_code
 
 
+class AuthenticationRequiredError(AppError):
+    def __init__(self, message: str = "Authenticated user context is required."):
+        super().__init__(message, status.HTTP_401_UNAUTHORIZED)
+
+
 class InvalidUploadError(AppError):
     def __init__(self, message: str = "Uploaded file must include a file name."):
         super().__init__(message, status.HTTP_400_BAD_REQUEST)
@@ -73,6 +78,22 @@ class ProjectNotFoundError(AppError):
         )
 
 
+class FigureNotFoundError(AppError):
+    def __init__(self, project_id: str, figure_id: str):
+        super().__init__(
+            f"Figure '{figure_id}' was not found for project '{project_id}'.",
+            status.HTTP_404_NOT_FOUND,
+        )
+
+
+class ExportArtifactNotFoundError(AppError):
+    def __init__(self, project_id: str, export_id: str):
+        super().__init__(
+            f"Export '{export_id}' was not found for project '{project_id}'.",
+            status.HTTP_404_NOT_FOUND,
+        )
+
+
 class ProjectSectionsUnavailableError(AppError):
     def __init__(self, project_id: str):
         super().__init__(
@@ -82,11 +103,20 @@ class ProjectSectionsUnavailableError(AppError):
 
 
 class ProjectExportContentError(AppError):
-    def __init__(self, project_id: str):
+    def __init__(
+        self,
+        project_id: str,
+        message: str | None = None,
+    ):
         super().__init__(
-            f"Project '{project_id}' does not have formatted sections available for export.",
+            message or f"Project '{project_id}' does not have formatted sections available for export.",
             status.HTTP_422_UNPROCESSABLE_ENTITY,
         )
+
+
+class ProjectContentValidationError(AppError):
+    def __init__(self, message: str):
+        super().__init__(message, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
 
 class EmptyGenerationSourceError(AppError):
@@ -104,6 +134,22 @@ class GenerationConfigurationError(AppError):
 
 class GenerationError(AppError):
     def __init__(self, message: str = "Unable to generate structured paper"):
+        super().__init__(message, status.HTTP_502_BAD_GATEWAY)
+
+
+class PaperValidationError(GenerationError):
+    def __init__(self, agent_name: str, issues: list[str]):
+        joined = "; ".join(issues)
+        super().__init__(f"Agent '{agent_name}' returned an incomplete paper. {joined}")
+
+
+class PersistenceConfigurationError(AppError):
+    def __init__(self, message: str):
+        super().__init__(message, status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class PersistenceError(AppError):
+    def __init__(self, message: str = "Unable to persist project data"):
         super().__init__(message, status.HTTP_502_BAD_GATEWAY)
 
 

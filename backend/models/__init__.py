@@ -1,10 +1,11 @@
-from models.generation import GenerateRequest, GenerateResponse, GeneratedPaper, PaperSections
+from models.generation import GenerateRequest, GenerateResponse, GeneratedPaper, IEEESectionMap, ResearchPaperSchema
 from models.project import ProjectRecord
 
 __all__ = [
     "GenerateRequest",
     "GenerateResponse",
     "GeneratedPaper",
-    "PaperSections",
+    "IEEESectionMap",
+    "ResearchPaperSchema",
     "ProjectRecord",
 ]

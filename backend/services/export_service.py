@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,15 +12,15 @@ from uuid import uuid4
 
 from app.models.project import ExportArtifact, ExportFormat, ProjectRecord
 from app.services.project_service import (
-    get_effective_sections,
+    get_effective_paper,
     get_project,
-    get_project_references,
     get_project_title,
     record_export,
 )
 from core.config import get_settings
 from core.exceptions import ExportDependencyError, ExportError
-from services.latex_service import generate_latex
+from persistence import get_object_storage
+from services.latex_service import escape_latex, generate_latex
 
 logger = logging.getLogger("papereasy.backend.export")
 settings = get_settings()
@@ -31,18 +32,21 @@ MEDIA_TYPES: dict[ExportFormat, str] = {
 }
 
 SECTION_ORDER = (
-    ("Abstract", "abstract"),
     ("Introduction", "introduction"),
+    ("Related Work", "related_work"),
     ("Methodology", "methodology"),
+    ("Results", "results"),
+    ("Discussion", "discussion"),
     ("Conclusion", "conclusion"),
 )
+FIGURE_SECTION_KEYS = ("abstract", "introduction", "related_work", "methodology", "results", "discussion", "conclusion")
 
 
 @dataclass(frozen=True)
 class ExportedFile:
     artifact: ExportArtifact
-    file_path: Path
     media_type: str
+    content: bytes
 
 
 def _slugify(value: str) -> str:
@@ -50,43 +54,65 @@ def _slugify(value: str) -> str:
     return slug or "research-paper"
 
 
-def _relative_output_path(file_path: Path) -> str:
-    return file_path.relative_to(settings.outputs_dir.parent).as_posix()
+def _artifact_download_url(project_id: str, artifact_id: str) -> str:
+    return f"/export/{project_id}/{artifact_id}"
 
 
-def _download_url(file_path: Path) -> str:
-    return f"/{_relative_output_path(file_path)}"
-
-
-def _create_artifact(file_path: Path, export_format: ExportFormat) -> ExportArtifact:
+def _create_artifact(
+    *,
+    project_id: str,
+    artifact_id: str,
+    storage_key: str,
+    export_format: ExportFormat,
+    file_name: str,
+) -> ExportArtifact:
     return ExportArtifact(
-        id=str(uuid4()),
+        id=artifact_id,
         format=export_format,
-        file_name=file_path.name,
-        path=_relative_output_path(file_path),
-        download_url=_download_url(file_path),
+        file_name=file_name,
+        path=storage_key,
+        download_url=_artifact_download_url(project_id, artifact_id),
         created_at=datetime.now(timezone.utc),
     )
 
 
-def _iter_section_figures(project: ProjectRecord, section: str):
-    backend_root = Path(__file__).resolve().parents[1]
+def _create_work_dir(project_id: str) -> Path:
+    work_dir = settings.temp_dir / "exports" / project_id / str(uuid4())
+    work_dir.mkdir(parents=True, exist_ok=True)
+    return work_dir
+
+
+def _make_figure_label(figure_id: str, caption: str) -> str:
+    caption_slug = re.sub(r"[^a-zA-Z0-9]+", "-", caption).strip("-").lower()
+    base = caption_slug or figure_id
+    return f"{base}-{figure_id[:8]}"
+
+
+def _stage_figures(project: ProjectRecord, work_dir: Path):
+    object_storage = get_object_storage()
+    figures_by_section: dict[str, list[dict[str, str]]] = {
+        key: [] for key in FIGURE_SECTION_KEYS
+    }
+    figure_paths_by_id: dict[str, Path] = {}
+
     for figure in project.figures:
-        if figure.section != section:
-            continue
+        staged_path = work_dir / "figures" / figure.stored_file_name
+        staged_path.parent.mkdir(parents=True, exist_ok=True)
+        object_storage.download_to_path(figure.path, staged_path)
+        figure_paths_by_id[figure.id] = staged_path
+        figures_by_section.setdefault(figure.section, []).append(
+            {
+                "id": figure.id,
+                "caption": escape_latex(figure.caption),
+                "label": _make_figure_label(figure.id, figure.caption),
+                "path": staged_path.relative_to(work_dir).as_posix(),
+            }
+        )
 
-        figure_path = Path(figure.path)
-        if not figure_path.is_absolute():
-            figure_path = (backend_root / figure.path).resolve()
-
-        if not figure_path.exists():
-            logger.warning("Skipping missing figure %s during export", figure.id)
-            continue
-
-        yield figure, figure_path
+    return figures_by_section, figure_paths_by_id
 
 
-def _write_docx(project: ProjectRecord, output_dir: Path) -> Path:
+def _write_docx(project: ProjectRecord, output_dir: Path, figure_paths_by_id: dict[str, Path]) -> Path:
     try:
         from docx import Document
         from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -94,8 +120,7 @@ def _write_docx(project: ProjectRecord, output_dir: Path) -> Path:
     except ImportError as exc:
         raise ExportDependencyError("python-docx is required for DOCX export.") from exc
 
-    sections = get_effective_sections(project)
-    references = get_project_references(project)
+    paper = get_effective_paper(project)
     title = get_project_title(project)
     file_name = f"{_slugify(title)}.docx"
     output_path = output_dir / file_name
@@ -103,11 +128,26 @@ def _write_docx(project: ProjectRecord, output_dir: Path) -> Path:
     document = Document()
     document.add_heading(title, 0)
 
+    if project.authors:
+        authors_paragraph = document.add_paragraph("; ".join(project.authors))
+        authors_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    document.add_heading("Abstract", level=1)
+    document.add_paragraph(paper.abstract)
+
+    if paper.keywords:
+        document.add_paragraph(f"Index Terms: {', '.join(paper.keywords)}")
+
     for heading, key in SECTION_ORDER:
         document.add_heading(heading, level=1)
-        document.add_paragraph(getattr(sections, key))
+        document.add_paragraph(getattr(paper.sections, key))
 
-        for index, (figure, figure_path) in enumerate(_iter_section_figures(project, key), start=1):
+        section_figures = [figure for figure in project.figures if figure.section == key]
+        for index, figure in enumerate(section_figures, start=1):
+            figure_path = figure_paths_by_id.get(figure.id)
+            if figure_path is None:
+                continue
+
             try:
                 document.add_picture(str(figure_path), width=Inches(5.75))
             except Exception as exc:
@@ -121,11 +161,11 @@ def _write_docx(project: ProjectRecord, output_dir: Path) -> Path:
             run.italic = True
 
     document.add_heading("References", level=1)
-    if references:
-        for reference in references:
+    if paper.references:
+        for reference in paper.references:
             document.add_paragraph(reference)
     else:
-        document.add_paragraph("No references available.")
+        document.add_paragraph("[1] Reference curation pending author review.")
 
     document.save(output_path)
     return output_path
@@ -158,9 +198,9 @@ def _run_pdflatex(tex_path: Path) -> Path:
         raise ExportError("pdflatex timed out while generating the PDF export.") from exc
 
     if process.returncode != 0:
-        stderr = process.stderr.strip() or process.stdout.strip()
-        message = stderr.splitlines()[-1] if stderr else "pdflatex failed to compile the document."
-        raise ExportError(f"pdflatex failed: {message}")
+        compiler_output = (process.stderr.strip() or process.stdout.strip()).splitlines()
+        detail = compiler_output[-12:] if compiler_output else ["pdflatex failed to compile the document."]
+        raise ExportError("pdflatex failed: " + " | ".join(detail))
 
     pdf_path = tex_path.with_suffix(".pdf")
     if not pdf_path.exists():
@@ -174,35 +214,95 @@ def _run_pdflatex(tex_path: Path) -> Path:
     return pdf_path
 
 
-def export_project_latex(project_id: str) -> ExportedFile:
-    project = get_project(project_id)
-    build_result = generate_latex(project, settings.templates_dir, settings.outputs_dir)
-    artifact = _create_artifact(build_result.tex_path, "latex")
-    record_export(project_id, artifact)
+def _store_export(
+    *,
+    project: ProjectRecord,
+    owner_uid: str,
+    file_path: Path,
+    export_format: ExportFormat,
+    media_type: str,
+) -> ExportedFile:
+    artifact_id = str(uuid4())
+    storage_key = f"outputs/{project.id}/{artifact_id}/{file_path.name}"
+    object_storage = get_object_storage()
+    object_storage.upload_file(storage_key, file_path, content_type=media_type)
+    artifact = _create_artifact(
+        project_id=project.id,
+        artifact_id=artifact_id,
+        storage_key=storage_key,
+        export_format=export_format,
+        file_name=file_path.name,
+    )
+
+    try:
+        record_export(project.id, owner_uid, artifact)
+    except Exception:
+        object_storage.delete(storage_key)
+        raise
+
+    logger.info("Generated %s export for project %s at %s", export_format, project.id, storage_key)
     return ExportedFile(
         artifact=artifact,
-        file_path=build_result.tex_path,
-        media_type=MEDIA_TYPES["latex"],
+        media_type=media_type,
+        content=file_path.read_bytes(),
     )
 
 
-def export_project_docx(project_id: str) -> ExportedFile:
-    project = get_project(project_id)
-    get_effective_sections(project)
-    output_dir = settings.outputs_dir / project.id / str(uuid4())
-    output_dir.mkdir(parents=True, exist_ok=True)
-    file_path = _write_docx(project, output_dir)
-    artifact = _create_artifact(file_path, "docx")
-    record_export(project_id, artifact)
-    logger.info("Generated DOCX export for project %s at %s", project_id, file_path)
-    return ExportedFile(artifact=artifact, file_path=file_path, media_type=MEDIA_TYPES["docx"])
+def _cleanup_work_dir(work_dir: Path) -> None:
+    try:
+        shutil.rmtree(work_dir, ignore_errors=True)
+    except Exception:
+        logger.warning("Unable to clean temporary export directory %s", work_dir)
 
 
-def export_project_pdf(project_id: str) -> ExportedFile:
-    project = get_project(project_id)
-    build_result = generate_latex(project, settings.templates_dir, settings.outputs_dir)
-    pdf_path = _run_pdflatex(build_result.tex_path)
-    artifact = _create_artifact(pdf_path, "pdf")
-    record_export(project_id, artifact)
-    logger.info("Generated PDF export for project %s at %s", project_id, pdf_path)
-    return ExportedFile(artifact=artifact, file_path=pdf_path, media_type=MEDIA_TYPES["pdf"])
+def export_project_latex(project_id: str, owner_uid: str) -> ExportedFile:
+    project = get_project(project_id, owner_uid)
+    work_dir = _create_work_dir(project_id)
+    try:
+        figures_by_section, _ = _stage_figures(project, work_dir)
+        build_result = generate_latex(project, settings.templates_dir, work_dir, figures_by_section)
+        return _store_export(
+            project=project,
+            owner_uid=owner_uid,
+            file_path=build_result.tex_path,
+            export_format="latex",
+            media_type=MEDIA_TYPES["latex"],
+        )
+    finally:
+        _cleanup_work_dir(work_dir)
+
+
+def export_project_docx(project_id: str, owner_uid: str) -> ExportedFile:
+    project = get_project(project_id, owner_uid)
+    get_effective_paper(project)
+    work_dir = _create_work_dir(project_id)
+    try:
+        _, figure_paths_by_id = _stage_figures(project, work_dir)
+        file_path = _write_docx(project, work_dir, figure_paths_by_id)
+        return _store_export(
+            project=project,
+            owner_uid=owner_uid,
+            file_path=file_path,
+            export_format="docx",
+            media_type=MEDIA_TYPES["docx"],
+        )
+    finally:
+        _cleanup_work_dir(work_dir)
+
+
+def export_project_pdf(project_id: str, owner_uid: str) -> ExportedFile:
+    project = get_project(project_id, owner_uid)
+    work_dir = _create_work_dir(project_id)
+    try:
+        figures_by_section, _ = _stage_figures(project, work_dir)
+        build_result = generate_latex(project, settings.templates_dir, work_dir, figures_by_section)
+        pdf_path = _run_pdflatex(build_result.tex_path)
+        return _store_export(
+            project=project,
+            owner_uid=owner_uid,
+            file_path=pdf_path,
+            export_format="pdf",
+            media_type=MEDIA_TYPES["pdf"],
+        )
+    finally:
+        _cleanup_work_dir(work_dir)

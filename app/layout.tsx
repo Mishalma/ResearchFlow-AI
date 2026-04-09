@@ -1,16 +1,12 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
-import "./globals.css";
-import { Sidebar } from "@/components/layout/Sidebar";
-import { Header } from "@/components/layout/Header";
-import { SceneCanvas } from "@/components/3d/SceneCanvas";
-import { BackgroundParticles } from "@/components/3d/BackgroundParticles";
 
-const inter = Inter({ subsets: ["latin"] });
+import "./globals.css";
+import { BackgroundParticles } from "@/components/3d/BackgroundParticles";
+import { SceneCanvas } from "@/components/3d/SceneCanvas";
 
 export const metadata: Metadata = {
-  title: "ResearchFlow AI",
-  description: "AI-powered Research Paper Generator",
+  title: "PaperEasy",
+  description: "Secure AI-powered research paper generation workspace.",
 };
 
 export default function RootLayout({
@@ -20,21 +16,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className={`${inter.className} bg-background min-h-screen text-foreground antialiased overflow-x-hidden`}>
-        {/* 3D Global Background */}
-        <SceneCanvas className="fixed inset-0 pointer-events-none z-[-1]">
-           <BackgroundParticles count={600} />
+      <body className="min-h-screen overflow-x-hidden bg-background text-foreground antialiased">
+        <SceneCanvas className="pointer-events-none fixed inset-0 z-[-1]">
+          <BackgroundParticles count={450} />
         </SceneCanvas>
-
-        <Sidebar />
-        <div className="lg:pl-64 w-full flex flex-col min-h-screen">
-          <Header />
-          <main className="flex-1 w-full pt-6 pb-12">
-            <div className="max-w-5xl mx-auto px-6 md:px-8 w-full">
-              {children}
-            </div>
-          </main>
-        </div>
+        {children}
       </body>
     </html>
   );

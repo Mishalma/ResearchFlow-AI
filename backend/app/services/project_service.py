@@ -3,162 +3,308 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import logging
+import re
+from uuid import uuid4
 
 from app.core.exceptions import (
+    ExportArtifactNotFoundError,
+    FigureNotFoundError,
     ProjectExportContentError,
     ProjectNotFoundError,
-    ProjectSectionsUnavailableError,
 )
-from app.models.generation import GeneratedPaper, PaperSections
+from app.models.generation import GeneratedPaper, GenerationMetadata, ResearchPaperSchema
 from app.models.project import ExportArtifact, FigureRecord, ProjectRecord
-from app.schemas.project_schema import ProjectResponse, SectionUpdate
-from models.project import _PROJECTS_LOCK, PROJECTS
+from app.schemas.project_schema import ProjectResponse, ProjectSummaryResponse
+from app.services.paper_service import (
+    build_editor_display_text,
+    build_latex_ready_text,
+    parse_editor_content,
+    validate_research_paper,
+)
+from persistence import get_project_repository
 
 logger = logging.getLogger("papereasy.backend.project")
 
-
-SECTION_ORDER = (
-    ("Abstract", "abstract"),
-    ("Introduction", "introduction"),
-    ("Methodology", "methodology"),
-    ("Conclusion", "conclusion"),
-)
-
-
-def _build_formatted_paper(sections: PaperSections, references: list[str]) -> str:
-    references_block = "\n".join(references) if references else "No references available."
-    parts = ["RESEARCH PAPER"]
-
-    for title, key in SECTION_ORDER:
-        parts.extend(["", title, getattr(sections, key)])
-
-    parts.extend(["", "References", references_block])
-    return "\n".join(parts).strip()
-
-
-def _merge_sections(base_sections: PaperSections, updates: SectionUpdate) -> PaperSections:
-    merged = base_sections.model_dump()
-    merged.update(updates.model_dump(exclude_none=True))
-    return PaperSections(**merged)
-
-
-def _sync_generated_paper(
-    project: ProjectRecord,
-    sections: PaperSections,
-) -> GeneratedPaper | None:
-    if project.generated_paper is None:
-        return None
-
-    return project.generated_paper.model_copy(
-        update={
-            "abstract": sections.abstract,
-            "introduction": sections.introduction,
-            "methodology": sections.methodology,
-            "conclusion": sections.conclusion,
-            "formatted_paper": _build_formatted_paper(
-                sections,
-                project.generated_paper.references,
-            ),
-        }
-    )
+INVALID_FILE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def _timestamp() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def get_project(project_id: str) -> ProjectRecord:
-    with _PROJECTS_LOCK:
-        project = PROJECTS.get(project_id)
+def _safe_file_name(title: str) -> str:
+    slug = INVALID_FILE_NAME_CHARS.sub("-", title.strip()).strip("-._")
+    return slug or "research-paper"
 
+
+def _normalize_string_list(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    return [value.strip() for value in values if value.strip()]
+
+
+def _derive_project_title(project: ProjectRecord) -> str:
+    title = project.title.strip()
+    if title:
+        return title
+    return Path(project.file_name).stem or "Research Paper"
+
+
+def _derive_project_content(project: ProjectRecord) -> str:
+    content = project.content.strip()
+    if content:
+        return content
+
+    if project.edited_paper is not None:
+        return build_editor_display_text(project.edited_paper)
+
+    if project.generated_paper is not None:
+        return project.generated_paper.formatted_text.strip()
+
+    return project.extracted_text.strip()
+
+
+def _normalize_project(project: ProjectRecord) -> ProjectRecord:
+    created_at = project.created_at or _timestamp()
+    updated_at = project.updated_at or created_at
+    title = _derive_project_title(project)
+    content = _derive_project_content(project)
+    file_name = project.file_name or f"{_safe_file_name(title)}.txt"
+
+    return project.model_copy(
+        update={
+            "title": title,
+            "owner_uid": project.owner_uid.strip(),
+            "owner_email": project.owner_email.strip().lower(),
+            "authors": _normalize_string_list(project.authors),
+            "keywords": _normalize_string_list(project.keywords),
+            "content": content,
+            "display_paper_text": project.display_paper_text.strip() or content,
+            "latex_ready": project.latex_ready.strip() or content,
+            "file_name": file_name,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }
+    )
+
+
+def _assert_project_owner(project: ProjectRecord, owner_uid: str) -> ProjectRecord:
+    if project.owner_uid != owner_uid:
+        raise ProjectNotFoundError(project.id)
+    return project
+
+
+def persist_project(project: ProjectRecord) -> ProjectRecord:
+    repository = get_project_repository()
+    normalized_project = _normalize_project(project)
+    saved_project = repository.save(normalized_project)
+    logger.info("Persisted project %s", normalized_project.id)
+    return saved_project
+
+
+def get_project(project_id: str, owner_uid: str | None = None) -> ProjectRecord:
+    repository = get_project_repository()
+    project = repository.get(project_id)
     if project is None:
         raise ProjectNotFoundError(project_id)
+
+    if owner_uid is not None:
+        _assert_project_owner(project, owner_uid)
 
     return project
 
 
-def get_project_response(project_id: str) -> ProjectResponse:
-    project = get_project(project_id)
+def list_projects(owner_uid: str) -> list[ProjectRecord]:
+    repository = get_project_repository()
+    projects = repository.list(owner_uid)
+    return sorted(
+        projects,
+        key=lambda project: project.updated_at,
+        reverse=True,
+    )
+
+
+def list_project_responses(owner_uid: str) -> list[ProjectSummaryResponse]:
+    return [ProjectSummaryResponse.from_project(project) for project in list_projects(owner_uid)]
+
+
+def get_project_response(project_id: str, owner_uid: str) -> ProjectResponse:
+    project = get_project(project_id, owner_uid)
     return ProjectResponse.from_project(project)
 
 
-def get_effective_sections(project: ProjectRecord) -> PaperSections:
-    sections = project.edited_sections or project.generated_sections
-    if sections is None:
+def get_effective_paper(project: ProjectRecord) -> ResearchPaperSchema:
+    paper = project.edited_paper or (project.generated_paper.paper if project.generated_paper else None)
+    if paper is None:
         raise ProjectExportContentError(project.id)
 
-    return sections
+    issues = validate_research_paper(paper, require_references=False)
+    if issues:
+        raise ProjectExportContentError(
+            project.id,
+            message=f"Project '{project.id}' is missing required IEEE content: {'; '.join(issues)}",
+        )
+
+    return paper
 
 
 def get_project_title(project: ProjectRecord) -> str:
-    return Path(project.file_name).stem or "Research Paper"
+    return _derive_project_title(project)
 
 
 def get_project_references(project: ProjectRecord) -> list[str]:
-    if project.generated_paper is None:
+    try:
+        return get_effective_paper(project).references
+    except ProjectExportContentError:
         return []
 
-    return project.generated_paper.references
+
+def save_generated_paper(
+    project_id: str,
+    owner_uid: str,
+    generated_paper: GeneratedPaper,
+    generation_metadata: GenerationMetadata,
+) -> ProjectRecord:
+    project = get_project(project_id, owner_uid)
+    display_paper_text = generated_paper.formatted_text.strip() or build_editor_display_text(generated_paper.paper)
+    updated_project = project.model_copy(
+        update={
+            "title": generated_paper.paper.title,
+            "keywords": list(generated_paper.paper.keywords),
+            "generated_paper": generated_paper,
+            "edited_paper": None,
+            "generation_metadata": generation_metadata,
+            "content": display_paper_text,
+            "display_paper_text": display_paper_text,
+            "latex_ready": generated_paper.latex_ready,
+            "updated_at": _timestamp(),
+        }
+    )
+    return persist_project(updated_project)
 
 
-def save_project(project_id: str, sections: SectionUpdate) -> ProjectRecord:
-    with _PROJECTS_LOCK:
-        project = PROJECTS.get(project_id)
-        if project is None:
-            raise ProjectNotFoundError(project_id)
+def save_project_content(
+    *,
+    owner_uid: str,
+    owner_email: str,
+    project_id: str | None,
+    title: str,
+    authors: list[str] | None,
+    keywords: list[str] | None,
+    content: str | None,
+    paper: ResearchPaperSchema | None,
+) -> ProjectRecord:
+    normalized_title = title.strip()
+    normalized_authors = _normalize_string_list(authors)
+    normalized_keywords = _normalize_string_list(keywords)
+    normalized_content = (content or "").strip()
+    updated_at = _timestamp()
 
-        base_sections = project.edited_sections or project.generated_sections
-        if base_sections is None:
-            raise ProjectSectionsUnavailableError(project_id)
-
-        merged_sections = _merge_sections(base_sections, sections)
-        updated_at = _timestamp()
-        synced_generated_paper = _sync_generated_paper(project, merged_sections)
-
+    if project_id:
+        project = get_project(project_id, owner_uid)
+        fallback_keywords = normalized_keywords or project.keywords or (
+            project.generated_paper.paper.keywords if project.generated_paper else []
+        )
+        fallback_references = get_project_references(project)
+        parsed_paper = paper or parse_editor_content(
+            title=normalized_title,
+            content=normalized_content or project.display_paper_text,
+            fallback_keywords=fallback_keywords,
+            fallback_references=fallback_references,
+        )
+        display_paper_text = build_editor_display_text(parsed_paper)
         updated_project = project.model_copy(
             update={
-                "edited_sections": merged_sections,
-                "generated_paper": synced_generated_paper,
+                "title": normalized_title,
+                "owner_uid": owner_uid,
+                "owner_email": owner_email,
+                "authors": normalized_authors,
+                "keywords": normalized_keywords or parsed_paper.keywords,
+                "content": display_paper_text,
+                "display_paper_text": display_paper_text,
+                "latex_ready": build_latex_ready_text(parsed_paper),
+                "edited_paper": parsed_paper,
                 "updated_at": updated_at,
             }
         )
-        PROJECTS[project_id] = updated_project
+        saved_project = persist_project(updated_project)
+        logger.info("Saved project content for %s", project_id)
+        return saved_project
 
-    logger.info("Saved edited sections for project %s", project_id)
-    return updated_project
+    parsed_paper = paper or parse_editor_content(
+        title=normalized_title,
+        content=normalized_content,
+        fallback_keywords=normalized_keywords,
+        fallback_references=[],
+    )
+    display_paper_text = build_editor_display_text(parsed_paper)
+    created_at = updated_at
+
+    project = ProjectRecord(
+        id=str(uuid4()),
+        title=normalized_title,
+        owner_uid=owner_uid,
+        owner_email=owner_email,
+        authors=normalized_authors,
+        keywords=normalized_keywords or parsed_paper.keywords,
+        content=display_paper_text,
+        display_paper_text=display_paper_text,
+        latex_ready=build_latex_ready_text(parsed_paper),
+        generated_paper=None,
+        edited_paper=parsed_paper,
+        file_name=f"{_safe_file_name(normalized_title)}.txt",
+        file_path="",
+        extracted_text=display_paper_text,
+        file_type="manual",
+        file_size=len(display_paper_text.encode("utf-8")),
+        extraction_time_ms=0.0,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    saved_project = persist_project(project)
+    logger.info("Created project %s from editor save", saved_project.id)
+    return saved_project
 
 
-def add_figure(project_id: str, figure: FigureRecord) -> ProjectRecord:
-    with _PROJECTS_LOCK:
-        project = PROJECTS.get(project_id)
-        if project is None:
-            raise ProjectNotFoundError(project_id)
-
-        updated_project = project.model_copy(
-            update={
-                "figures": [*project.figures, figure],
-                "updated_at": _timestamp(),
-            }
-        )
-        PROJECTS[project_id] = updated_project
-
+def add_figure(project_id: str, owner_uid: str, figure: FigureRecord) -> ProjectRecord:
+    project = get_project(project_id, owner_uid)
+    updated_project = project.model_copy(
+        update={
+            "figures": [*project.figures, figure],
+            "updated_at": _timestamp(),
+        }
+    )
+    saved_project = persist_project(updated_project)
     logger.info("Attached figure %s to project %s", figure.id, project_id)
-    return updated_project
+    return saved_project
 
 
-def record_export(project_id: str, artifact: ExportArtifact) -> ProjectRecord:
-    with _PROJECTS_LOCK:
-        project = PROJECTS.get(project_id)
-        if project is None:
-            raise ProjectNotFoundError(project_id)
+def get_project_figure(project_id: str, owner_uid: str, figure_id: str) -> FigureRecord:
+    project = get_project(project_id, owner_uid)
+    for figure in project.figures:
+        if figure.id == figure_id:
+            return figure
 
-        updated_project = project.model_copy(
-            update={
-                "exports": [*project.exports, artifact],
-                "updated_at": _timestamp(),
-            }
-        )
-        PROJECTS[project_id] = updated_project
+    raise FigureNotFoundError(project_id, figure_id)
 
+
+def record_export(project_id: str, owner_uid: str, artifact: ExportArtifact) -> ProjectRecord:
+    project = get_project(project_id, owner_uid)
+    updated_project = project.model_copy(
+        update={
+            "exports": [*project.exports, artifact],
+            "updated_at": _timestamp(),
+        }
+    )
+    saved_project = persist_project(updated_project)
     logger.info("Recorded %s export for project %s", artifact.format, project_id)
-    return updated_project
+    return saved_project
+
+
+def get_project_export(project_id: str, owner_uid: str, export_id: str) -> ExportArtifact:
+    project = get_project(project_id, owner_uid)
+    for artifact in project.exports:
+        if artifact.id == export_id:
+            return artifact
+
+    raise ExportArtifactNotFoundError(project_id, export_id)

@@ -1,62 +1,64 @@
 \documentclass[conference]{IEEEtran}
-\usepackage[T1]{fontenc}
-\usepackage[utf8]{inputenc}
+\IEEEoverridecommandlockouts
+% The preceding line is only needed to identify funding in the first footnote. If that is unneeded, please comment it out.
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
 \usepackage{graphicx}
-\usepackage{float}
-\usepackage{url}
+\usepackage{textcomp}
+\usepackage{xcolor}
+{% raw %}\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}{% endraw %}
+\begin{document}
 
 \title{ {{ title }} }
-\author{\IEEEauthorblockN{AI-Powered Research Paper Generator}}
 
-\begin{document}
+\author{
+{% for author in authors -%}
+\IEEEauthorblockN{ {{ author.name }} }
+\IEEEauthorblockA{
+{% for line in author.affiliation_lines -%}
+{% if loop.first %}\textit{ {{ line }} }{% else %}{{ line }}{% endif %}{% if not loop.last %} \\
+{% endif -%}
+{% endfor -%}
+}
+{% if not loop.last %}\and
+{% endif -%}
+{% endfor -%}
+}
+
 \maketitle
 
 \begin{abstract}
 {{ abstract }}
 {% for figure in figures.abstract %}
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.95\linewidth]{ {{ figure.path }} }
+\begin{figure}[htbp]
+\centerline{\includegraphics[width=\linewidth]{ {{ figure.path }} }}
 \caption{ {{ figure.caption }} }
-\label{fig:{{ figure.id }}}
+\label{fig:{{ figure.label }}}
 \end{figure}
 {% endfor %}
 \end{abstract}
 
-\section{Introduction}
-{{ introduction }}
-{% for figure in figures.introduction %}
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.95\linewidth]{ {{ figure.path }} }
+{% if keywords %}
+\begin{IEEEkeywords}
+{{ keywords | join(", ") }}
+\end{IEEEkeywords}
+
+{% endif %}
+{% for section in sections %}
+\section{ {{ section.heading }} }
+{{ section.content }}
+{% for figure in section.figures %}
+\begin{figure}[htbp]
+\centerline{\includegraphics[width=\linewidth]{ {{ figure.path }} }}
 \caption{ {{ figure.caption }} }
-\label{fig:{{ figure.id }}}
+\label{fig:{{ figure.label }}}
 \end{figure}
 {% endfor %}
 
-\section{Methodology}
-{{ methodology }}
-{% for figure in figures.methodology %}
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.95\linewidth]{ {{ figure.path }} }
-\caption{ {{ figure.caption }} }
-\label{fig:{{ figure.id }}}
-\end{figure}
 {% endfor %}
-
-\section{Conclusion}
-{{ conclusion }}
-{% for figure in figures.conclusion %}
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.95\linewidth]{ {{ figure.path }} }
-\caption{ {{ figure.caption }} }
-\label{fig:{{ figure.id }}}
-\end{figure}
-{% endfor %}
-
-\begin{thebibliography}{99}
+\begin{thebibliography}{00}
 {% if references %}
 {% for reference in references %}
 \bibitem{ref{{ loop.index }}} {{ reference }}
@@ -65,5 +67,6 @@
 \bibitem{ref1} No references available.
 {% endif %}
 \end{thebibliography}
+\vspace{12pt}
 
 \end{document}

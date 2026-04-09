@@ -3,94 +3,95 @@ import {
   ArrowRight,
   Bot,
   FileText,
-  Network,
-  Quote,
-  Sparkles,
+  Lock,
+  ShieldCheck,
   UploadCloud,
 } from "lucide-react";
 
 import { FloatingCard } from "@/components/3d/FloatingCard";
-import { BackendHealthStatus } from "@/components/shared/BackendHealthStatus";
 import { Badge } from "@/components/ui/badge";
+import { getServerSessionUser } from "@/lib/server/auth/session";
 
 const workflowCards = [
   {
     title: "Upload Source",
     description:
-      "Send a real PDF or DOCX file to the FastAPI backend for extraction.",
+      "Securely upload a PDF or DOCX file through the Next.js backend-for-frontend layer.",
     icon: UploadCloud,
   },
   {
     title: "Generate Draft",
     description:
-      "Run the multi-agent Vertex AI pipeline to produce paper sections and references.",
+      "Run the authenticated multi-agent Vertex AI pipeline on your private Cloud Run backend.",
     icon: Bot,
   },
   {
-    title: "Review Output",
+    title: "Edit And Export",
     description:
-      "Open the live editor view to inspect the generated paper and metadata.",
+      "Review the generated IEEE paper, save revisions, attach figures, and export final outputs.",
     icon: FileText,
   },
 ];
 
-export default function Dashboard() {
+export const dynamic = "force-dynamic";
+
+export default async function HomePage() {
+  const user = await getServerSessionUser();
+
   return (
-    <div className="animate-in fade-in slide-in-from-bottom-4 space-y-10 pb-10 duration-500">
+    <div className="animate-in fade-in slide-in-from-bottom-4 space-y-10 px-4 pb-12 pt-6 duration-500 md:px-8">
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-3">
         <div className="space-y-5 pt-4 lg:col-span-2">
           <Badge className="border border-indigo-400/30 bg-indigo-500/15 text-indigo-100">
-            ResearchFlow Live Demo
+            Private Cloud Run + Vercel BFF
           </Badge>
           <h1 className="text-4xl font-bold tracking-tight text-white drop-shadow-[0_0_15px_rgba(255,255,255,0.2)] md:text-5xl">
-            Generate research papers from real backend data.
+            Generate, edit, and deliver research papers in a secure workspace.
           </h1>
           <p className="max-w-2xl text-lg leading-relaxed text-indigo-200/70">
-            This frontend is now connected to the live FastAPI plus Vertex AI
-            pipeline. Upload a source document, run generation, and review the
-            actual result returned by the backend.
+            PaperEasy keeps the browser on the safe side of the boundary. Users work through
+            authenticated Next.js routes, while the private FastAPI backend stays hidden on Cloud Run.
           </p>
 
           <div className="flex flex-wrap gap-3">
             <Link
-              href="/new"
-              className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-indigo-400/30 bg-indigo-600/80 px-2.5 text-sm font-medium whitespace-nowrap text-white shadow-[0_0_15px_rgba(79,70,229,0.4)] transition-all hover:bg-indigo-500"
+              href={user ? "/new" : "/login"}
+              className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-indigo-400/30 bg-indigo-600/80 px-4 text-sm font-medium text-white shadow-[0_0_15px_rgba(79,70,229,0.4)] transition-all hover:bg-indigo-500"
             >
-              Start New Project <ArrowRight className="ml-2 h-4 w-4" />
+              {user ? "Open Workspace" : "Sign In To Start"}
+              <ArrowRight className="ml-2 h-4 w-4" />
             </Link>
-            <a
-              href="http://127.0.0.1:8002/docs"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-transparent px-2.5 text-sm font-medium whitespace-nowrap text-indigo-200 transition-all hover:bg-white/10"
-            >
-              Open Backend Docs
-            </a>
+            {!user ? (
+              <Link
+                href="/login"
+                className="inline-flex h-10 items-center justify-center rounded-lg border border-white/10 bg-transparent px-4 text-sm font-medium text-indigo-200 transition-all hover:bg-white/10"
+              >
+                Create Account
+              </Link>
+            ) : null}
           </div>
         </div>
 
         <FloatingCard className="lg:col-span-1">
           <div className="space-y-4 p-6">
             <h3 className="flex items-center gap-2 text-lg font-semibold tracking-tight text-white">
-              <Sparkles className="h-4 w-4 text-indigo-400" />
-              Connected Flow
+              <ShieldCheck className="h-4 w-4 text-indigo-400" />
+              Security Boundary
             </h3>
             <div className="space-y-3 text-sm text-indigo-200/75">
               <p className="rounded-xl border border-white/10 bg-white/5 p-4">
-                Frontend upload form uses the live `/upload` endpoint.
+                Firebase Authentication protects user access and session state.
               </p>
               <p className="rounded-xl border border-white/10 bg-white/5 p-4">
-                The processing screen calls the live `/generate` endpoint.
+                Next.js API routes proxy only the allowed backend operations.
               </p>
               <p className="rounded-xl border border-white/10 bg-white/5 p-4">
-                The editor reads the stored project from <code>/project/{"{id}"}</code>.
+                Private Cloud Run receives trusted user headers only from the server.
               </p>
             </div>
           </div>
         </FloatingCard>
       </div>
-
-      <BackendHealthStatus />
 
       <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
         {workflowCards.map((card, index) => (
@@ -114,32 +115,29 @@ export default function Dashboard() {
         <div className="grid gap-6 rounded-2xl border border-white/10 bg-black/30 p-8 backdrop-blur-xl md:grid-cols-3">
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-white">
-              <Network className="h-4 w-4 text-indigo-300" />
-              <h3 className="font-semibold">FastAPI</h3>
+              <Lock className="h-4 w-4 text-indigo-300" />
+              <h3 className="font-semibold">Authenticated Sessions</h3>
             </div>
             <p className="text-sm leading-6 text-indigo-200/70">
-              Handles upload, project storage, generation routing, and error
-              handling.
+              Server-managed cookies keep the browser session secure without exposing cloud credentials.
             </p>
           </div>
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-white">
-              <Sparkles className="h-4 w-4 text-indigo-300" />
-              <h3 className="font-semibold">Vertex AI</h3>
+              <Bot className="h-4 w-4 text-indigo-300" />
+              <h3 className="font-semibold">Vertex AI Pipeline</h3>
             </div>
             <p className="text-sm leading-6 text-indigo-200/70">
-              Gemini generates the structured paper through the multi-agent
-              orchestration pipeline.
+              Gemini and the multi-agent orchestrator generate structured IEEE-ready papers.
             </p>
           </div>
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-white">
-              <Quote className="h-4 w-4 text-indigo-300" />
-              <h3 className="font-semibold">MCP Tools</h3>
+              <ShieldCheck className="h-4 w-4 text-indigo-300" />
+              <h3 className="font-semibold">User-Scoped Data</h3>
             </div>
             <p className="text-sm leading-6 text-indigo-200/70">
-              Citation formatting and search are surfaced in the UI as part of
-              the generated paper metadata.
+              Projects, figures, and exports are filtered by ownership before they ever reach the UI.
             </p>
           </div>
         </div>

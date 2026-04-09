@@ -1,55 +1,53 @@
 # PaperEasy Backend
 
-FastAPI backend for uploading PDF and DOCX files, extracting clean text, and turning that raw content into a structured research paper through a modular multi-agent pipeline powered by Gemini on Vertex AI.
+FastAPI backend for uploading source documents, extracting clean text, generating research papers through a configurable multi-agent Vertex AI pipeline, and persisting projects with either local storage or Google Cloud services.
 
 ## What is included
 
-- File upload and text extraction for `.pdf` and `.docx`
-- In-memory project storage for MVP development
-- `POST /generate` backed by a stateless multi-agent pipeline
-- A2A-style JSON message passing between agents
-- MCP-style tool registry for citation and search tools
-- Vertex AI Gemini integration using `gemini-2.5-flash`
-- Basic logging, retries, and per-agent timing metadata
+- PDF and DOCX upload plus text extraction
+- Configurable multi-agent pipeline powered by Gemini on Vertex AI
+- A2A-style in-process message dispatch with a transport abstraction for future remote A2A
+- MCP-style internal tool registry for citation and search tools
+- Local persistence adapters for VS Code development
+- Google Cloud adapters for Firestore and Cloud Storage
+- Figure upload plus download URLs
+- IEEE conference LaTeX export built from the official `conference_101719.tex` structure
+- LaTeX, DOCX, and PDF export with cloud-safe artifact storage
+- Cloud Run container and Cloud Build deployment config
 
-## Agent pipeline
+## Architecture summary
 
-1. `StructuringAgent`
-   Converts raw extracted text into `abstract`, `introduction`, `methodology`, and `conclusion`.
-2. `WritingAgent`
-   Improves clarity and academic tone without adding unsupported claims.
-3. `CitationAgent`
-   Calls simulated MCP tools to attach structured references.
-4. `FormattingAgent`
-   Produces an IEEE-style paper layout and final formatted output.
+### Agents
 
-## Project structure
+The generation pipeline runs four specialized agents:
 
-```text
-backend/
-+-- agents/
-+-- app/
-+-- core/
-+-- mcp/
-+-- models/
-+-- orchestration/
-+-- uploads/
-+-- .env
-+-- README.md
-+-- requirements.txt
-```
+1. `structuring_agent`
+2. `writing_agent`
+3. `citation_agent`
+4. `formatting_agent`
 
-## Prerequisites
+Their runtime configuration lives in [agents/agent_specs.json](./agents/agent_specs.json). Each agent spec includes:
 
-- Python 3.10+
-- A Google Cloud project with Vertex AI enabled
-- A service account JSON file with Vertex AI access
+- `name`
+- `role`
+- `prompt_template`
+- `input_schema`
+- `output_schema`
+- `model`
+- `enabled_tools`
+- `timeout_seconds`
+- `retry_policy`
 
-## Install dependencies
+### Persistence backends
 
-```bash
-pip install -r requirements.txt
-```
+The backend supports two persistence modes controlled by `PERSISTENCE_BACKEND`:
+
+- `local`
+  - project metadata is stored as JSON under `backend/data/projects`
+  - uploads, figures, and exports are stored on local disk
+- `gcp`
+  - project metadata is stored in Firestore
+  - uploads, figures, and exports are stored in Cloud Storage
 
 ## Environment variables
 
@@ -58,12 +56,19 @@ The backend reads configuration from `backend/.env`.
 ```env
 APP_NAME=PaperEasy Backend
 DEBUG=true
+PERSISTENCE_BACKEND=local
+LOCAL_PROJECTS_DIR=./data/projects
+TEMP_DIR=./.tmp
+GCS_BUCKET_NAME=
+FIRESTORE_PROJECTS_COLLECTION=papereasy-projects
+AGENT_SPECS_PATH=./agents/agent_specs.json
 MAX_UPLOAD_SIZE_MB=10
+MAX_FIGURE_SIZE_MB=10
 ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
-GOOGLE_CLOUD_PROJECT=your-gcp-project-id
+GOOGLE_CLOUD_PROJECT=
 GOOGLE_CLOUD_LOCATION=us-central1
 VERTEX_MODEL=gemini-2.5-flash
-VERTEX_SERVICE_ACCOUNT_FILE=./service-account.json
+VERTEX_SERVICE_ACCOUNT_FILE=
 AI_REQUEST_TIMEOUT_SECONDS=60
 AI_SOURCE_TEXT_MAX_CHARS=20000
 AI_TEMPERATURE=0.2
@@ -71,54 +76,84 @@ AI_MAX_OUTPUT_TOKENS=2000
 AGENT_RETRY_ATTEMPTS=2
 AGENT_RETRY_BACKOFF_SECONDS=1
 CITATION_RESULT_LIMIT=3
+PDFLATEX_TIMEOUT_SECONDS=60
 ```
 
-`VERTEX_SERVICE_ACCOUNT_FILE` may be absolute or relative to `backend/`.
+Notes:
 
-## Run the development server
+- For local development, keep `PERSISTENCE_BACKEND=local`.
+- For Cloud Run, use `PERSISTENCE_BACKEND=gcp` and set `TEMP_DIR=/tmp`.
+- On Cloud Run, prefer the attached service account instead of `VERTEX_SERVICE_ACCOUNT_FILE`.
+- Locally, Vertex can use ADC from `gcloud auth application-default login`.
+
+## Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+## Run locally
+
+From `backend/`:
 
 ```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
-If port `8000` is already in use on your machine, run another port such as `8001`.
+If `8000` is already in use, run another port such as `8001` or `8002`.
+
+## Connect the local frontend
+
+This repo uses a private Cloud Run proxy pattern in Next.js. The browser should call Next.js API routes, not the backend directly.
+
+For a local backend during development, set the frontend backend URL in `.env.local`:
+
+```env
+NEXT_PUBLIC_BACKEND_URL=http://127.0.0.1:8000
+```
+
+If you deploy the backend to Cloud Run, keep the browser on the Next.js app and configure the server-side proxy envs instead:
+
+```env
+CLOUD_RUN_SERVICE_URL=https://YOUR-CLOUD-RUN-URL
+CLOUD_RUN_ID_TOKEN_AUDIENCE=https://YOUR-CLOUD-RUN-URL
+```
+
+Restart the Next.js dev server after changing `.env.local`.
 
 ## API endpoints
 
-### Health check
+### Health
 
-```bash
+```http
 GET /
 GET /health
 ```
 
-### Upload a file
+### Upload source document
 
-```bash
+```http
 POST /upload
 ```
 
-Accepted file types:
+Accepts `.pdf` and `.docx`.
 
-- `.pdf`
-- `.docx`
-
-Successful response example:
+Response example:
 
 ```json
 {
   "project_id": "uuid",
-  "file_name": "paper.pdf",
+  "file_name": "paper.docx",
   "extracted_text": "Clean extracted content...",
-  "file_type": "pdf",
-  "file_size": 1024,
-  "extraction_time_ms": 12.34
+  "file_type": "docx",
+  "file_size": 36765,
+  "extraction_time_ms": 45.2
 }
 ```
 
-### Generate a research paper
+### Generate paper
 
-```bash
+```http
 POST /generate
 ```
 
@@ -130,55 +165,27 @@ Request body:
 }
 ```
 
-Successful response example:
+### Load project
 
-```json
-{
-  "project_id": "uuid",
-  "generated_paper": {
-    "abstract": "...",
-    "introduction": "...",
-    "methodology": "...",
-    "conclusion": "...",
-    "references": [
-      "[1] A. Sharma and L. Chen, \"...\", Simulated MCP Research Index, 2022."
-    ],
-    "citation_sources": [
-      {
-        "title": "...",
-        "authors": ["A. Sharma", "L. Chen"],
-        "year": 2022,
-        "source": "Simulated MCP Research Index",
-        "query": "...",
-        "ieee_reference": "[1] ..."
-      }
-    ],
-    "formatted_paper": "RESEARCH PAPER\n\nAbstract\n..."
-  },
-  "provider": "vertex_ai",
-  "model": "gemini-2.5-flash",
-  "generation_time_ms": 1532.8,
-  "trace_id": "uuid",
-  "agent_timings": [
-    {"agent": "structuring_agent", "duration_ms": 412.1},
-    {"agent": "writing_agent", "duration_ms": 376.5},
-    {"agent": "citation_agent", "duration_ms": 18.2},
-    {"agent": "formatting_agent", "duration_ms": 1.1}
-  ]
-}
-```
-
-### Retrieve a project
-
-```bash
+```http
 GET /project/{project_id}
 ```
 
-The stored project includes the effective editor `sections`, the original `generated_sections`, any `edited_sections`, and generation metadata after `/generate` succeeds.
+Returns the stored project, including:
+
+- `authors`
+- `keywords`
+- `generated_sections`
+- `edited_sections`
+- effective `sections`
+- `figures`
+- `exports`
+- `generated_paper`
+- `generation_metadata`
 
 ### Save edited sections
 
-```bash
+```http
 POST /save
 ```
 
@@ -187,88 +194,97 @@ Request body:
 ```json
 {
   "project_id": "uuid",
+  "title": "Research Paper Title",
+  "authors": ["Author Name, Affiliation"],
+  "keywords": ["keyword one", "keyword two"],
   "sections": {
-    "abstract": "Updated abstract text",
-    "introduction": "Updated introduction text"
+    "abstract": "Updated abstract",
+    "introduction": "Updated introduction",
+    "methodology": "Updated methodology",
+    "conclusion": "Updated conclusion"
   }
 }
 ```
 
-The save API supports partial updates, stores `edited_sections`, and updates `updated_at` in the in-memory project store.
+### Upload figure
 
-## Testing workflow
-
-1. Start the backend with `uvicorn app.main:app --reload`.
-2. Upload a PDF or DOCX file from Postman, curl, or the frontend.
-3. Confirm the response includes extracted text and a `project_id`.
-4. Call `POST /generate` with the `project_id`.
-5. Request `GET /project/{project_id}` to fetch the stored paper and metadata.
-
-## Notes
-
-- Uploaded files are stored in `backend/uploads`.
-- Files larger than 10MB are rejected.
-- Error responses use the shape `{ "error": "..." }`.
-- CORS is enabled for `http://localhost:3000` and `http://127.0.0.1:3000`.
-- The in-memory project store resets when the backend restarts.
-- The MCP citation and search tools are simulated placeholders for now, designed so they can be replaced with real services later.
-- The agents are stateless and structured to map cleanly onto ADK and future Vertex AI Agent Engine deployment.
-
-
-## Figure uploads and export
-
-### Upload a figure
-
-```bash
+```http
 POST /figure/upload
+GET /figure/{project_id}/{figure_id}
 ```
 
-Form fields:
+Form fields for upload:
 
 - `project_id`
 - `caption`
-- `section` (`abstract`, `introduction`, `methodology`, or `conclusion`)
-- `file` (`.png`, `.jpg`, `.jpeg`)
+- `section`
+- `file`
 
-Successful response example:
+Accepted figure types:
 
-```json
-{
-  "project_id": "uuid",
-  "figure": {
-    "id": "uuid",
-    "path": "static/figures/uuid.png",
-    "public_url": "/static/figures/uuid.png",
-    "caption": "Graph of results",
-    "section": "methodology"
-  }
-}
-```
+- `.png`
+- `.jpg`
+- `.jpeg`
 
-### Export the document
+### Export
 
-```bash
+```http
 POST /export/latex
 POST /export/docx
 POST /export/pdf
+GET /export/{project_id}/{export_id}
 ```
 
-Request body:
+The `POST` export endpoints stream the file immediately and also persist an export artifact. The `GET` export endpoint downloads a previously stored artifact.
 
-```json
-{
-  "project_id": "uuid"
-}
+The LaTeX output follows the official IEEE conference template shape:
+
+- `\documentclass[conference]{IEEEtran}`
+- `\IEEEoverridecommandlockouts`
+- IEEE title and author block formatting
+- two-column `IEEEtran` document structure
+- `figure` blocks using `\centerline{\includegraphics[width=\linewidth]{...}}`
+
+## Cloud Run deployment
+
+The backend includes:
+
+- [Dockerfile](./Dockerfile)
+- [cloudbuild.yaml](./cloudbuild.yaml)
+- [agents/agent_specs.json](./agents/agent_specs.json)
+- [templates/ieee_template.tex](./templates/ieee_template.tex)
+- [templates/IEEEtran.cls](./templates/IEEEtran.cls)
+
+Typical deploy flow:
+
+1. Create an Artifact Registry repository.
+2. Create a Cloud Storage bucket for project objects.
+3. Enable Firestore in your Google Cloud project.
+4. Grant the Cloud Run service account access to:
+   - Vertex AI generation
+   - Cloud Storage object read/write
+   - Firestore document read/write
+5. Grant the Next.js server-side runtime identity Cloud Run invocation access to the private backend.
+6. Run Cloud Build or `gcloud run deploy` from `backend/`.
+
+Example command:
+
+```bash
+gcloud builds submit --config cloudbuild.yaml \
+  --substitutions=_SERVICE_ACCOUNT=YOUR_SERVICE_ACCOUNT,_GCS_BUCKET=YOUR_BUCKET
 ```
 
-Each export endpoint streams the generated file as a download response and records the artifact in the in-memory project under `exports`.
+## Verification
 
-- LaTeX uses `backend/templates/ieee_template.tex`
-- DOCX uses `python-docx`
-- PDF uses `pdflatex` and will return a service error if `pdflatex` is not installed or not on `PATH`
+Validated locally after this refactor:
 
-### Static assets
+- `python -m compileall backend`
+- `npx tsc --noEmit`
+- `eslint app/editor/editor-client.tsx lib/backend.ts app/api/upload/route.ts app/api/export/pdf/route.ts app/api/export/docx/route.ts app/api/export/latex/route.ts`
+- upload flow with local persistence
+- project save/load flow with persisted JSON records
+- figure upload plus figure download route
+- IEEE LaTeX export plus artifact download route
+- DOCX export plus artifact download route
 
-- Uploaded figures are stored in `backend/static/figures`
-- Generated export files are stored in `backend/outputs`
-- Figures are previewable through `/static/figures/<filename>`
+PDF export still depends on `pdflatex` being installed and available on `PATH`.

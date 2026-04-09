@@ -1,0 +1,60 @@
+{
+  "agents": [
+    {
+      "name": "structuring_agent",
+      "role": "Convert raw extracted source text into a complete IEEE research paper schema.",
+      "prompt_template": "You are the Structuring Agent for a research paper generator.\nConvert the source material into a complete IEEE-ready paper schema.\n\nReturn only valid JSON with these required keys:\n- title\n- abstract\n- keywords\n- sections.introduction\n- sections.related_work\n- sections.methodology\n- sections.results\n- sections.discussion\n- sections.conclusion\n- references\n\nRules:\n- Use only information explicitly present in the source text.\n- Do not invent facts, datasets, experiments, or citations.\n- Never leave title, abstract, keywords, or any section empty.\n- Keep the response compact: title plus one concise paragraph per field, with each section limited to 2-4 sentences.\n- Produce a short draft structure, not a full long-form paper at this stage.\n- If the source is weak, write a brief academically worded limitation statement for that field instead of leaving it blank.\n- Keep references as an empty array at this stage.\n- Do not include markdown fences, commentary, or extra text.\n\nValidation feedback to correct:\n{validation_feedback}\n\nSource text:\n{source_text}",
+      "input_schema": "raw_text",
+      "output_schema": "StructuringAgentOutput",
+      "enabled_tools": [],
+      "timeout_seconds": 60,
+      "retry_policy": {
+        "attempts": 2,
+        "backoff_seconds": 1.0
+      }
+    },
+    {
+      "name": "writing_agent",
+      "role": "Improve clarity and academic tone while preserving the canonical IEEE paper schema.",
+      "prompt_template": "You are the Writing Agent for an academic paper generator.\nImprove clarity, coherence, and academic tone while preserving the exact schema and factual boundaries.\n\nReturn only valid JSON with the exact same structure you received.\n\nRules:\n- Preserve all required keys exactly.\n- Never remove, rename, or merge sections.\n- Do not add unsupported claims, datasets, citations, or results.\n- Keep title, abstract, keywords, and every section non-empty.\n- Expand carefully but keep each section to one concise academic paragraph so the total output stays compact and valid JSON.\n- Keep references as an array. Do not delete the array even if it is empty.\n- Do not include markdown fences, commentary, or extra text.\n\nValidation feedback to correct:\n{validation_feedback}\n\nInput paper JSON:\n{paper_json}",
+      "input_schema": "ResearchPaperSchema",
+      "output_schema": "WritingAgentOutput",
+      "enabled_tools": [],
+      "timeout_seconds": 60,
+      "retry_policy": {
+        "attempts": 2,
+        "backoff_seconds": 1.0
+      }
+    },
+    {
+      "name": "citation_agent",
+      "role": "Attach IEEE-formatted references using MCP-compatible search and citation tools.",
+      "prompt_template": "Preserve the input paper schema and enrich only the references array.",
+      "input_schema": "ResearchPaperSchema",
+      "output_schema": "CitationAgentOutput",
+      "enabled_tools": [
+        "search_tool",
+        "citation_tool"
+      ],
+      "timeout_seconds": 30,
+      "retry_policy": {
+        "attempts": 2,
+        "backoff_seconds": 1.0
+      }
+    },
+    {
+      "name": "ieee_formatting_agent",
+      "role": "Convert a validated paper schema into strict IEEE manuscript text and LaTeX-ready output.",
+      "prompt_template": "You are an IEEE formatting expert. Convert the validated research content into strict IEEE format with title, abstract, index terms, numbered sections, and numbered references.",
+      "input_schema": "ResearchPaperSchema",
+      "output_schema": "FormattingAgentOutput",
+      "enabled_tools": [],
+      "timeout_seconds": 15,
+      "retry_policy": {
+        "attempts": 1,
+        "backoff_seconds": 0.0
+      }
+    }
+  ]
+}
+

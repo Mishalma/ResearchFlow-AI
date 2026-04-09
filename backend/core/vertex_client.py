@@ -1,8 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import TypeVar
 
@@ -14,6 +15,8 @@ from core.exceptions import GenerationConfigurationError, GenerationError
 TModel = TypeVar("TModel", bound=BaseModel)
 
 logger = logging.getLogger("papereasy.backend.vertex")
+
+JSON_OBJECT_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
 
 
 class VertexGeminiClient:
@@ -60,6 +63,136 @@ class VertexGeminiClient:
                 "GOOGLE_CLOUD_PROJECT is required for Vertex AI generation."
             )
 
+    def _extract_json_candidate(self, raw_text: str) -> str:
+        stripped = raw_text.strip()
+        if not stripped:
+            raise GenerationError("Vertex AI returned an empty response.")
+
+        fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, re.DOTALL)
+        if fenced_match:
+            return fenced_match.group(1).strip()
+
+        direct_match = JSON_OBJECT_PATTERN.search(stripped)
+        if direct_match:
+            return direct_match.group(0).strip()
+
+        return stripped
+
+    def _parse_structured_response(self, response, response_schema: type[TModel]) -> TModel:
+        if response.parsed is not None:
+            if isinstance(response.parsed, response_schema):
+                return response.parsed
+            return response_schema.model_validate(response.parsed)
+
+        raw_text = (response.text or "").strip()
+        json_candidate = self._extract_json_candidate(raw_text)
+
+        try:
+            parsed_json = json.loads(json_candidate)
+        except json.JSONDecodeError as exc:
+            logger.debug("Vertex AI raw output: %s", raw_text)
+            raise GenerationError("Vertex AI returned invalid JSON output.") from exc
+
+        return response_schema.model_validate(parsed_json)
+
+    async def _repair_invalid_json(
+        self,
+        *,
+        async_client,
+        types,
+        raw_text: str,
+        response_schema: type[TModel],
+        model_name: str | None,
+    ) -> TModel:
+        repair_prompt = (
+            "You repair malformed JSON produced by a structured generation system.\n"
+            "Return only valid JSON that matches the required schema exactly.\n"
+            "Do not add markdown fences or commentary.\n"
+            "If any required string field is incomplete or missing, fill it with a brief academically worded placeholder so the JSON remains valid.\n\n"
+            f"Required JSON schema:\n{json.dumps(response_schema.model_json_schema(), ensure_ascii=True)}\n\n"
+            f"Malformed content to repair:\n{raw_text}"
+        )
+
+        repair_response = await async_client.models.generate_content(
+            model=model_name or self.settings.vertex_model,
+            contents=repair_prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=self.settings.ai_max_output_tokens,
+                response_mime_type="application/json",
+                response_schema=response_schema,
+            ),
+        )
+
+        return self._parse_structured_response(repair_response, response_schema)
+
+    async def _request_structured_response(
+        self,
+        *,
+        async_client,
+        types,
+        prompt: str,
+        response_schema: type[TModel],
+        model_name: str | None,
+        attempt: int,
+        max_attempts: int,
+    ) -> TModel:
+        retry_suffix = ""
+        if attempt > 1:
+            retry_suffix = (
+                "\n\nIMPORTANT:\n"
+                "- Return only valid JSON.\n"
+                "- Do not wrap JSON in markdown fences.\n"
+                "- Escape all quotes and line breaks correctly.\n"
+                "- Ensure the JSON is complete and parseable.\n"
+                "- Keep every required field present and non-empty."
+            )
+
+        response = await async_client.models.generate_content(
+            model=model_name or self.settings.vertex_model,
+            contents=f"{prompt}{retry_suffix}",
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=self.settings.ai_max_output_tokens,
+                response_mime_type="application/json",
+                response_schema=response_schema,
+            ),
+        )
+
+        try:
+            return self._parse_structured_response(response, response_schema)
+        except GenerationError as exc:
+            logger.warning(
+                "Vertex AI returned invalid JSON on attempt %s/%s.",
+                attempt,
+                max_attempts,
+            )
+
+            raw_text = (response.text or "").strip()
+            if raw_text:
+                try:
+                    repaired_result = await self._repair_invalid_json(
+                        async_client=async_client,
+                        types=types,
+                        raw_text=raw_text,
+                        response_schema=response_schema,
+                        model_name=model_name,
+                    )
+                    logger.info(
+                        "Recovered Vertex structured response via JSON repair on attempt %s/%s.",
+                        attempt,
+                        max_attempts,
+                    )
+                    return repaired_result
+                except GenerationError:
+                    logger.warning(
+                        "Vertex JSON repair failed on attempt %s/%s.",
+                        attempt,
+                        max_attempts,
+                    )
+
+            raise exc
+
     async def generate_json(
         self,
         *,
@@ -98,33 +231,33 @@ class VertexGeminiClient:
             )
             async_client = client.aio
 
-            response = await async_client.models.generate_content(
-                model=model_name or self.settings.vertex_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=self.settings.ai_temperature,
-                    max_output_tokens=self.settings.ai_max_output_tokens,
-                    response_mime_type="application/json",
-                    response_schema=response_schema,
-                ),
-            )
+            max_attempts = max(1, self.settings.agent_retry_attempts)
+            last_generation_error: GenerationError | None = None
 
-            if response.parsed is not None:
-                if isinstance(response.parsed, response_schema):
-                    return response.parsed
-                return response_schema.model_validate(response.parsed)
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return await self._request_structured_response(
+                        async_client=async_client,
+                        types=types,
+                        prompt=prompt,
+                        response_schema=response_schema,
+                        model_name=model_name,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                    )
+                except GenerationError as exc:
+                    last_generation_error = exc
+                    if "invalid JSON output" not in str(exc) or attempt >= max_attempts:
+                        raise
+                    logger.warning(
+                        "Retrying Vertex structured generation after invalid JSON (attempt %s/%s).",
+                        attempt,
+                        max_attempts,
+                    )
 
-            raw_text = (response.text or "").strip()
-            if not raw_text:
-                raise GenerationError("Vertex AI returned an empty response.")
-
-            try:
-                parsed_json = json.loads(raw_text)
-            except json.JSONDecodeError as exc:
-                logger.exception("Vertex AI returned non-JSON output.")
-                raise GenerationError("Vertex AI returned invalid JSON output.") from exc
-
-            return response_schema.model_validate(parsed_json)
+            if last_generation_error is not None:
+                raise last_generation_error
+            raise GenerationError("Vertex AI request failed.")
         except GenerationConfigurationError:
             raise
         except genai_errors.ClientError as exc:
@@ -137,9 +270,18 @@ class VertexGeminiClient:
                 raise GenerationConfigurationError(
                     "The configured Vertex model or location was not found. Verify VERTEX_MODEL and GOOGLE_CLOUD_LOCATION."
                 ) from exc
+            if "default credentials were not found" in message.lower():
+                raise GenerationConfigurationError(
+                    "Application Default Credentials were not found. Run gcloud auth application-default login locally or use an attached service account in Cloud Run."
+                ) from exc
             logger.exception("Vertex AI client request failed.")
             raise GenerationError("Vertex AI request failed.") from exc
         except Exception as exc:
+            message = str(exc)
+            if "default credentials" in message.lower():
+                raise GenerationConfigurationError(
+                    "Application Default Credentials were not found. Run gcloud auth application-default login locally or use an attached service account in Cloud Run."
+                ) from exc
             logger.exception("Vertex AI generation failed.")
             raise GenerationError("Vertex AI request failed.") from exc
         finally:

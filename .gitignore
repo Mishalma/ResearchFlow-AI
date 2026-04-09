@@ -43,5 +43,15 @@ next-env.d.ts
 # python backend
 **/__pycache__/
 *.py[cod]
+backend/.tmp/
 backend/uploads/*
 !backend/uploads/.gitkeep
+backend/static/figures/*
+!backend/static/figures/.gitkeep
+backend/outputs/*
+!backend/outputs/.gitkeep
+backend/data/*
+!backend/data/.gitkeep
+!backend/data/projects/
+backend/data/projects/*
+!backend/data/projects/.gitkeep

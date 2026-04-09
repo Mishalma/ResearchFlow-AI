@@ -1,187 +1,165 @@
 "use client";
 
-import React, { useCallback, useState } from "react";
-import { useDropzone, FileRejection } from "react-dropzone";
-import { UploadCloud, File, X, CheckCircle2, AlertCircle } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
-import { Progress } from "@/components/ui/progress";
-import { Button } from "@/components/ui/button";
+import { type MouseEvent, useCallback, useState } from "react";
+import { type FileRejection, useDropzone } from "react-dropzone";
+import { AlertCircle, CheckCircle2, File, UploadCloud, X } from "lucide-react";
 
 interface FileUploadProps {
   onFileSelect: (file: File | null) => void;
   accept?: Record<string, string[]>;
-  maxSize?: number; // in bytes
+  maxSize?: number;
 }
+
+const DEFAULT_ACCEPT = {
+  "application/pdf": [".pdf"],
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [
+    ".docx",
+  ],
+};
 
 export function FileUpload({
   onFileSelect,
-  accept = {
-    "application/pdf": [".pdf"],
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
-  },
-  maxSize = 10485760, // 10MB
+  accept = DEFAULT_ACCEPT,
+  maxSize = 10 * 1024 * 1024,
 }: FileUploadProps) {
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [progress, setProgress] = useState(0);
-  const [uploadStatus, setUploadStatus] = useState<"idle" | "uploading" | "success" | "error">("idle");
 
   const onDrop = useCallback(
     (acceptedFiles: File[], fileRejections: FileRejection[]) => {
       setError(null);
-      setProgress(0);
 
       if (fileRejections.length > 0) {
         const rejection = fileRejections[0];
-        if (rejection.errors[0]?.code === "file-too-large") {
-          setError(`File is too large. Max size is ${Math.round(maxSize / 1024 / 1024)}MB`);
-        } else if (rejection.errors[0]?.code === "file-invalid-type") {
-          setError("Invalid file type. Please upload a PDF or DOCX.");
+        const firstError = rejection.errors[0];
+
+        if (firstError?.code === "file-too-large") {
+          setError(
+            `File is too large. Maximum allowed size is ${Math.round(
+              maxSize / 1024 / 1024,
+            )}MB.`,
+          );
+        } else if (firstError?.code === "file-invalid-type") {
+          setError("Invalid file type. Please upload a PDF or DOCX file.");
         } else {
-          setError(rejection.errors[0]?.message || "Failed to upload file.");
+          setError(firstError?.message || "Unable to select this file.");
         }
+
+        setFile(null);
+        onFileSelect(null);
         return;
       }
 
-      if (acceptedFiles.length > 0) {
-        const selectedFile = acceptedFiles[0];
-        setFile(selectedFile);
-        setUploadStatus("uploading");
-        onFileSelect(selectedFile);
-
-        // Simulate upload progress
-        let currentProgress = 0;
-        const interval = setInterval(() => {
-          currentProgress += Math.random() * 20 + 10;
-          if (currentProgress >= 100) {
-            currentProgress = 100;
-            clearInterval(interval);
-            setUploadStatus("success");
-          }
-          setProgress(Math.min(currentProgress, 100));
-        }, 300);
-      }
+      const selectedFile = acceptedFiles[0] ?? null;
+      setFile(selectedFile);
+      onFileSelect(selectedFile);
     },
-    [maxSize, onFileSelect]
+    [maxSize, onFileSelect],
   );
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+  const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     onDrop,
     accept,
     maxSize,
     multiple: false,
+    noKeyboard: true,
   });
 
-  const removeFile = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const removeFile = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
     setFile(null);
-    setProgress(0);
-    setUploadStatus("idle");
     setError(null);
     onFileSelect(null);
   };
 
   const formatFileSize = (bytes: number) => {
     if (bytes === 0) return "0 Bytes";
-    const k = 1024;
-    const sizes = ["Bytes", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+
+    const units = ["Bytes", "KB", "MB", "GB"];
+    const unitIndex = Math.floor(Math.log(bytes) / Math.log(1024));
+    const value = bytes / 1024 ** unitIndex;
+
+    return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
   };
 
   return (
-    <div className="w-full">
-      <AnimatePresence mode="wait">
-        {!file && (
-          <motion.div
-            key="dropzone"
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95 }}
-            {...(getRootProps() as any)}
-            className={`relative border-2 border-dashed rounded-xl p-10 flex flex-col items-center justify-center text-center cursor-pointer transition-colors
-              ${
-                isDragActive
-                  ? "border-indigo-500 bg-indigo-50"
-                  : error
-                  ? "border-red-300 bg-red-50 hover:bg-red-50/80"
-                  : "border-zinc-300 bg-zinc-50 hover:bg-zinc-100 hover:border-indigo-300"
-              }
-            `}
-          >
-            <input {...getInputProps()} />
-            
-            <div className={`p-4 rounded-full mb-4 ${isDragActive ? "bg-indigo-100" : error ? "bg-red-100" : "bg-white shadow-sm border border-zinc-200"}`}>
+    <div className="w-full space-y-3">
+      <div
+        {...getRootProps()}
+        className={`rounded-2xl border-2 border-dashed p-6 transition-colors ${
+          error
+            ? "border-red-300 bg-red-50"
+            : isDragActive
+              ? "border-indigo-400 bg-indigo-50"
+              : "border-zinc-300 bg-zinc-50 hover:border-indigo-300 hover:bg-zinc-100"
+        }`}
+      >
+        <input {...getInputProps()} />
+
+        {!file ? (
+          <div className="flex min-h-44 flex-col items-center justify-center text-center">
+            <div className="mb-4 rounded-full border border-zinc-200 bg-white p-4 shadow-sm">
               {error ? (
-                <AlertCircle className="w-8 h-8 text-red-500" />
+                <AlertCircle className="h-8 w-8 text-red-500" />
               ) : (
-                <UploadCloud className={`w-8 h-8 ${isDragActive ? "text-indigo-600" : "text-zinc-500"}`} />
+                <UploadCloud className="h-8 w-8 text-indigo-500" />
               )}
             </div>
 
-            <h3 className="text-lg font-semibold text-zinc-900 mb-2">
-              {isDragActive ? "Drop file to upload" : "Click or drag to upload"}
-            </h3>
-            
-            <p className="text-sm text-zinc-500 max-w-xs mb-4">
-              {error || "Supports PDF, DOCX up to 10MB."}
+            <p className="text-lg font-semibold text-zinc-900">
+              {isDragActive ? "Drop your file here" : "Drag and drop your file here"}
+            </p>
+            <p className="mt-2 max-w-md text-sm text-zinc-500">
+              {error || "Choose a PDF or DOCX file up to 10MB."}
             </p>
 
-            <Button type="button" variant="outline" className="bg-white pointer-events-none">
-              Select File
-            </Button>
-          </motion.div>
-        )}
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                open();
+              }}
+              className="mt-5 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
+            >
+              Select Source Document
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-start gap-4">
+            <div className="rounded-xl bg-indigo-100 p-3">
+              <File className="h-7 w-7 text-indigo-600" />
+            </div>
 
-        {file && (
-          <motion.div
-            key="file-preview"
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="border border-zinc-200 rounded-xl p-6 bg-white shadow-sm relative overflow-hidden"
-          >
-            <div className="flex items-start gap-4">
-              <div className="p-3 bg-indigo-50 rounded-lg shrink-0">
-                <File className="w-8 h-8 text-indigo-500" />
-              </div>
-              
-              <div className="flex-1 min-w-0 pr-8">
-                <p className="text-sm font-semibold text-zinc-900 truncate mb-1" title={file.name}>
-                  {file.name}
-                </p>
-                <div className="flex items-center gap-3 text-xs text-zinc-500 mb-3">
-                  <span>{formatFileSize(file.size)}</span>
-                  <span>•</span>
-                  <span>{file.type.split("/").pop()?.toUpperCase() || "FILE"}</span>
-                </div>
-
-                {uploadStatus === "uploading" && (
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-xs font-medium text-indigo-600">
-                      <span>Uploading...</span>
-                      <span>{Math.round(progress)}%</span>
-                    </div>
-                    <Progress value={progress} className="h-2 bg-indigo-100 [&>div]:bg-indigo-500" />
-                  </div>
-                )}
-                
-                {uploadStatus === "success" && (
-                  <div className="flex items-center gap-1.5 text-xs font-medium text-emerald-600">
-                    <CheckCircle2 className="w-4 h-4" /> Ready for processing
-                  </div>
-                )}
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-semibold text-zinc-900" title={file.name}>
+                {file.name}
+              </p>
+              <p className="mt-1 text-xs text-zinc-500">
+                {formatFileSize(file.size)} -{" "}
+                {file.type.split("/").pop()?.toUpperCase() || "FILE"}
+              </p>
+              <div className="mt-3 inline-flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
+                <CheckCircle2 className="h-4 w-4" />
+                Ready for processing
               </div>
             </div>
 
             <button
+              type="button"
               onClick={removeFile}
-              className="absolute top-4 right-4 p-1.5 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 rounded-md transition-colors"
+              className="rounded-md p-2 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-700"
+              aria-label="Remove selected file"
             >
-              <X className="w-4 h-4" />
+              <X className="h-4 w-4" />
             </button>
-          </motion.div>
+          </div>
         )}
-      </AnimatePresence>
+      </div>
+
+      <p className="text-xs text-zinc-500">
+        Accepted formats: PDF and DOCX. Maximum file size: 10MB.
+      </p>
     </div>
   );
 }
+

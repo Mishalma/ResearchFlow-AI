@@ -1,23 +1,26 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
+import shutil
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import uuid4
 
 from app.models.project import ProjectRecord
-from app.services.project_service import (
-    get_effective_sections,
-    get_project_references,
-    get_project_title,
-)
+from app.services.project_service import get_effective_paper, get_project_title
 from core.exceptions import ExportDependencyError, ExportError
 
 logger = logging.getLogger("papereasy.backend.latex")
 
-SECTION_KEYS = ("abstract", "introduction", "methodology", "conclusion")
+SECTION_ORDER = (
+    ("introduction", "Introduction"),
+    ("related_work", "Related Work"),
+    ("methodology", "Methodology"),
+    ("results", "Results"),
+    ("discussion", "Discussion"),
+    ("conclusion", "Conclusion"),
+)
 
 LATEX_SPECIAL_CHARACTERS = {
     "\\": r"\textbackslash{}",
@@ -35,7 +38,6 @@ LATEX_SPECIAL_CHARACTERS = {
 
 @dataclass(frozen=True)
 class LatexBuildResult:
-    export_id: str
     work_dir: Path
     tex_path: Path
     file_name: str
@@ -58,13 +60,19 @@ def _get_jinja_environment(template_dir: Path):
     )
 
 
+def _to_ascii(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    return normalized.encode("ascii", "ignore").decode("ascii")
+
+
 def escape_latex(value: str) -> str:
-    return "".join(LATEX_SPECIAL_CHARACTERS.get(character, character) for character in value)
+    ascii_value = _to_ascii(value)
+    return "".join(LATEX_SPECIAL_CHARACTERS.get(character, character) for character in ascii_value)
 
 
 def _normalize_text_for_latex(value: str) -> str:
     normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
-    paragraphs = []
+    paragraphs: list[str] = []
     for paragraph in normalized.split("\n\n"):
         line = " ".join(segment.strip() for segment in paragraph.splitlines() if segment.strip())
         if line:
@@ -78,44 +86,71 @@ def _slugify(value: str) -> str:
     return slug or "research-paper"
 
 
-def _build_figures_by_section(project: ProjectRecord, work_dir: Path) -> dict[str, list[dict[str, str]]]:
-    figures_by_section: dict[str, list[dict[str, str]]] = {
-        key: [] for key in SECTION_KEYS
+def _normalize_author_block(author_value: str) -> dict[str, object]:
+    parts = [part.strip() for part in author_value.split(",") if part.strip()]
+    if not parts:
+        return {
+            "name": escape_latex("PaperEasy Research Team"),
+            "affiliation_lines": [escape_latex("Researchflow AI")],
+        }
+
+    name = escape_latex(parts[0])
+    affiliation_parts = [escape_latex(part) for part in parts[1:]]
+    if not affiliation_parts:
+        affiliation_parts = [escape_latex("Independent Researcher")]
+
+    return {
+        "name": name,
+        "affiliation_lines": affiliation_parts,
     }
 
-    backend_root = Path(__file__).resolve().parents[1]
 
-    for figure in project.figures:
-        absolute_path = Path(figure.path)
-        if not absolute_path.is_absolute():
-            absolute_path = (backend_root / figure.path).resolve()
+def _build_author_blocks(project: ProjectRecord) -> list[dict[str, object]]:
+    if project.authors:
+        return [_normalize_author_block(author_value) for author_value in project.authors]
 
-        if not absolute_path.exists():
-            logger.warning(
-                "Skipping missing figure %s while rendering LaTeX for project %s",
-                figure.id,
-                project.id,
-            )
-            continue
+    return [
+        {
+            "name": escape_latex("PaperEasy Research Team"),
+            "affiliation_lines": [escape_latex("Researchflow AI")],
+        }
+    ]
 
-        relative_path = Path(os.path.relpath(absolute_path, work_dir)).as_posix()
-        figures_by_section[figure.section].append(
+
+def _build_sections(
+    project: ProjectRecord,
+    figures_by_section: dict[str, list[dict[str, str]]],
+) -> list[dict[str, object]]:
+    paper = get_effective_paper(project)
+    section_entries: list[dict[str, object]] = []
+
+    for key, heading in SECTION_ORDER:
+        section_entries.append(
             {
-                "id": figure.id,
-                "caption": escape_latex(figure.caption),
-                "path": relative_path,
+                "key": key,
+                "heading": heading,
+                "content": _normalize_text_for_latex(getattr(paper.sections, key)),
+                "figures": figures_by_section.get(key, []),
             }
         )
 
-    return figures_by_section
+    return section_entries
+
+
+def _copy_template_assets(template_dir: Path, work_dir: Path) -> None:
+    for asset_name in ("IEEEtran.cls",):
+        source = template_dir / asset_name
+        if not source.exists():
+            continue
+        shutil.copy2(source, work_dir / asset_name)
 
 
 def generate_latex(
     project: ProjectRecord,
     template_dir: Path,
-    outputs_dir: Path,
+    work_dir: Path,
+    figures_by_section: dict[str, list[dict[str, str]]] | None = None,
 ) -> LatexBuildResult:
-    sections = get_effective_sections(project)
     environment = _get_jinja_environment(template_dir)
 
     try:
@@ -123,22 +158,23 @@ def generate_latex(
     except Exception as exc:
         raise ExportError("Unable to load the IEEE LaTeX template.") from exc
 
-    export_id = str(uuid4())
-    work_dir = outputs_dir / project.id / export_id
     work_dir.mkdir(parents=True, exist_ok=True)
+    _copy_template_assets(template_dir, work_dir)
 
+    paper = get_effective_paper(project)
     title = get_project_title(project)
     base_name = _slugify(title)
     tex_path = work_dir / f"{base_name}.tex"
+    figures = figures_by_section or {"abstract": [], **{key: [] for key, _ in SECTION_ORDER}}
 
     context = {
         "title": escape_latex(title),
-        "abstract": _normalize_text_for_latex(sections.abstract),
-        "introduction": _normalize_text_for_latex(sections.introduction),
-        "methodology": _normalize_text_for_latex(sections.methodology),
-        "conclusion": _normalize_text_for_latex(sections.conclusion),
-        "references": [escape_latex(reference) for reference in get_project_references(project)],
-        "figures": _build_figures_by_section(project, work_dir),
+        "authors": _build_author_blocks(project),
+        "keywords": [escape_latex(keyword) for keyword in paper.keywords],
+        "abstract": _normalize_text_for_latex(paper.abstract),
+        "sections": _build_sections(project, figures),
+        "references": [escape_latex(reference) for reference in paper.references],
+        "figures": figures,
     }
 
     try:
@@ -147,12 +183,12 @@ def generate_latex(
         raise ExportError("Unable to render the IEEE LaTeX document.") from exc
 
     tex_path.write_text(content, encoding="utf-8")
-    logger.info("Generated LaTeX export for project %s at %s", project.id, tex_path)
+    logger.info("Generated IEEE LaTeX export for project %s at %s", project.id, tex_path)
 
     return LatexBuildResult(
-        export_id=export_id,
         work_dir=work_dir,
         tex_path=tex_path,
         file_name=tex_path.name,
         content=content,
     )
+

@@ -7,5 +7,7 @@ python-docx
 google-cloud-aiplatform
 google-genai
 google-adk
+google-cloud-storage
+google-cloud-firestore
 pydantic
 jinja2

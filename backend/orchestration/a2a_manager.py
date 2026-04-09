@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from time import perf_counter
-from typing import Any
+from typing import Any, Protocol
 
 from agents.base import BaseAgent
 from core.config import Settings, get_settings
@@ -13,9 +13,28 @@ from models.a2a import A2AMessage, A2AResult
 logger = logging.getLogger("papereasy.backend.a2a")
 
 
+class A2ATransport(Protocol):
+    async def deliver(self, agent: BaseAgent, message: A2AMessage) -> dict[str, Any]: ...
+
+
+class InProcessTransport:
+    async def deliver(self, agent: BaseAgent, message: A2AMessage) -> dict[str, Any]:
+        return await agent.receive_message(message)
+
+
+class HttpA2ATransport:
+    async def deliver(self, agent: BaseAgent, message: A2AMessage) -> dict[str, Any]:
+        raise AgentExecutionError(agent.agent_name, "HTTP A2A transport is not implemented yet.")
+
+
 class A2AManager:
-    def __init__(self, settings: Settings | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        transport: A2ATransport | None = None,
+    ):
         self.settings = settings or get_settings()
+        self.transport = transport or InProcessTransport()
         self._agents: dict[str, BaseAgent] = {}
 
     def register(self, agent: BaseAgent) -> None:
@@ -42,11 +61,12 @@ class A2AManager:
             payload=payload,
         )
         last_error: Exception | None = None
+        retry_policy = agent.spec.retry_policy
 
-        for attempt in range(1, self.settings.agent_retry_attempts + 1):
+        for attempt in range(1, retry_policy.attempts + 1):
             start_time = perf_counter()
             try:
-                result_payload = await agent.receive_message(message)
+                result_payload = await self.transport.deliver(agent, message)
                 duration_ms = (perf_counter() - start_time) * 1000
                 logger.info(
                     "A2A message %s -> %s succeeded on attempt %s in %.2f ms",
@@ -81,7 +101,7 @@ class A2AManager:
                     attempt,
                     duration_ms,
                 )
-                if attempt < self.settings.agent_retry_attempts:
-                    await asyncio.sleep(self.settings.agent_retry_backoff_seconds)
+                if attempt < retry_policy.attempts:
+                    await asyncio.sleep(retry_policy.backoff_seconds)
 
         raise AgentExecutionError(recipient, str(last_error)) from last_error

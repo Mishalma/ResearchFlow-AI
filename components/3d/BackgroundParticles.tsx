@@ -5,15 +5,20 @@ import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { Float } from "@react-three/drei";
 
+function seededCoordinate(seed: number) {
+  const normalized = Math.sin(seed * 12.9898) * 43758.5453;
+  return (normalized - Math.floor(normalized) - 0.5) * 15;
+}
+
 export function BackgroundParticles({ count = 800 }) {
   const pointsRef = useRef<THREE.Points>(null);
 
   const particlesPosition = useMemo(() => {
     const positions = new Float32Array(count * 3);
     for (let i = 0; i < count; i++) {
-      positions[i * 3] = (Math.random() - 0.5) * 15; // x
-      positions[i * 3 + 1] = (Math.random() - 0.5) * 15; // y
-      positions[i * 3 + 2] = (Math.random() - 0.5) * 15; // z
+      positions[i * 3] = seededCoordinate(i + 1); // x
+      positions[i * 3 + 1] = seededCoordinate(i + 101); // y
+      positions[i * 3 + 2] = seededCoordinate(i + 1001); // z
     }
     return positions;
   }, [count]);
@@ -25,8 +30,8 @@ export function BackgroundParticles({ count = 800 }) {
       pointsRef.current.rotation.x = state.clock.elapsedTime * 0.01;
       
       // Slight mouse parallax
-      const targetX = (state.pointer.x * 0.5);
-      const targetY = (state.pointer.y * 0.5);
+      const targetX = state.pointer.x * 0.5;
+      const targetY = state.pointer.y * 0.5;
       
       pointsRef.current.position.x += (targetX - pointsRef.current.position.x) * 0.02;
       pointsRef.current.position.y += (targetY - pointsRef.current.position.y) * 0.02;
@@ -45,12 +50,12 @@ export function BackgroundParticles({ count = 800 }) {
             itemSize={3}
           />
         </bufferGeometry>
-        <pointsMaterial 
-          size={0.03} 
-          color="#38bdf8" 
-          transparent 
-          opacity={0.4} 
-          sizeAttenuation={true} 
+        <pointsMaterial
+          size={0.03}
+          color="#38bdf8"
+          transparent
+          opacity={0.4}
+          sizeAttenuation
           blending={THREE.AdditiveBlending}
         />
       </points>

@@ -20,13 +20,17 @@ from app.api.routes.upload import router as upload_router
 from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.services.file_service import ensure_upload_dir
+from persistence import get_object_storage, get_project_repository
 from services.figure_service import ensure_figure_dir
 
 settings = get_settings()
 settings.static_dir.mkdir(parents=True, exist_ok=True)
 settings.figures_dir.mkdir(parents=True, exist_ok=True)
 settings.outputs_dir.mkdir(parents=True, exist_ok=True)
+settings.local_projects_dir.mkdir(parents=True, exist_ok=True)
 settings.templates_dir.mkdir(parents=True, exist_ok=True)
+settings.temp_dir.mkdir(parents=True, exist_ok=True)
+
 
 
 def configure_logging() -> None:
@@ -46,9 +50,15 @@ async def lifespan(_app: FastAPI):
     ensure_upload_dir(settings.uploads_dir)
     ensure_figure_dir(settings.figures_dir)
     settings.outputs_dir.mkdir(parents=True, exist_ok=True)
+    settings.local_projects_dir.mkdir(parents=True, exist_ok=True)
+    settings.temp_dir.mkdir(parents=True, exist_ok=True)
+    get_project_repository()
+    get_object_storage()
     logger.info("Upload directory ready at %s", settings.uploads_dir)
     logger.info("Figure directory ready at %s", settings.figures_dir)
     logger.info("Output directory ready at %s", settings.outputs_dir)
+    logger.info("Project repository ready at %s", settings.local_projects_dir)
+    logger.info("Persistence backend: %s", settings.persistence_backend)
     yield
 
 

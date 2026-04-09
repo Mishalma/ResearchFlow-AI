@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
 from fastapi import UploadFile
@@ -18,17 +18,12 @@ from core.exceptions import (
     InvalidUploadError,
     UnsupportedImageTypeError,
 )
+from persistence.base import ObjectStorage
 
 logger = logging.getLogger("papereasy.backend.figure")
 
 ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 READ_CHUNK_SIZE = 1024 * 1024
-
-
-@dataclass(frozen=True)
-class StoredFigure:
-    figure: FigureRecord
-    file_path: Path
 
 
 def ensure_figure_dir(figures_dir: Path) -> None:
@@ -49,24 +44,39 @@ def _normalize_image_filename(file_name: str | None) -> tuple[str, str]:
 
 async def store_project_figure(
     project_id: str,
+    owner_uid: str,
     upload_file: UploadFile,
     caption: str,
     section: FigureSection,
     figures_dir: Path,
+    temp_dir: Path,
+    object_storage: ObjectStorage,
     max_size_bytes: int,
     max_size_mb: int,
 ) -> FigureRecord:
-    get_project(project_id)
+    get_project(project_id, owner_uid)
     original_file_name, extension = _normalize_image_filename(upload_file.filename)
+    normalized_caption = caption.strip()
+    if not normalized_caption:
+        raise InvalidUploadError("Figure caption is required.")
+
     ensure_figure_dir(figures_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
 
     figure_id = str(uuid4())
     stored_file_name = f"{figure_id}{extension}"
-    destination = figures_dir / stored_file_name
     total_bytes = 0
+    temp_path = Path(
+        NamedTemporaryFile(
+            delete=False,
+            dir=temp_dir,
+            prefix=f"figure-{figure_id}-",
+            suffix=extension,
+        ).name
+    )
 
     try:
-        with destination.open("wb") as file_buffer:
+        with temp_path.open("wb") as file_buffer:
             while True:
                 chunk = await upload_file.read(READ_CHUNK_SIZE)
                 if not chunk:
@@ -78,18 +88,31 @@ async def store_project_figure(
 
                 file_buffer.write(chunk)
     except FileTooLargeError:
-        delete_file(destination)
+        delete_file(temp_path)
         raise
     except OSError as exc:
-        delete_file(destination)
-        logger.exception("Unable to store figure %s", original_file_name)
+        delete_file(temp_path)
+        logger.exception("Unable to stage figure %s", original_file_name)
         raise FigureStorageError() from exc
     finally:
         await upload_file.close()
 
     if total_bytes == 0:
-        delete_file(destination)
+        delete_file(temp_path)
         raise EmptyFileError()
+
+    storage_key = f"static/figures/{project_id}/{stored_file_name}"
+    try:
+        object_storage.upload_file(
+            storage_key,
+            temp_path,
+            content_type=upload_file.content_type or "application/octet-stream",
+        )
+    except Exception:
+        delete_file(temp_path)
+        raise
+    finally:
+        delete_file(temp_path)
 
     figure = FigureRecord(
         id=figure_id,
@@ -97,12 +120,18 @@ async def store_project_figure(
         stored_file_name=stored_file_name,
         file_size=total_bytes,
         content_type=upload_file.content_type or "application/octet-stream",
-        path=(Path("static") / "figures" / stored_file_name).as_posix(),
-        public_url=f"/static/figures/{stored_file_name}",
-        caption=caption.strip(),
+        path=storage_key,
+        public_url=f"/figure/{project_id}/{figure_id}",
+        caption=normalized_caption,
         section=section,
         uploaded_at=datetime.now(timezone.utc),
     )
-    add_figure(project_id, figure)
+
+    try:
+        add_figure(project_id, owner_uid, figure)
+    except Exception:
+        object_storage.delete(storage_key)
+        raise
+
     logger.info("Stored figure %s for project %s", figure.id, project_id)
     return figure
