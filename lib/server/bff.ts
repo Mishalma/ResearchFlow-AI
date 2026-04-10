@@ -296,6 +296,12 @@ export async function forwardCloudRunRequest(options: {
     const idToken = await getCloudRunIdToken(targetAudience);
     ensureCloudRunAuthHeader(outboundHeaders, idToken);
 
+    // When we rebuild a multipart body in the BFF, the browser's original
+    // boundary no longer matches. Let fetch generate the correct header.
+    if (typeof FormData !== "undefined" && options.body instanceof FormData) {
+      outboundHeaders.delete("content-type");
+    }
+
     if (options.user) {
       attachTrustedUserHeaders(outboundHeaders, options.user);
     }
