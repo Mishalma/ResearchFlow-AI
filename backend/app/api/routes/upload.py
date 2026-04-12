@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, File, UploadFile, status
 
 from app.core.auth import AuthenticatedRequestUser, get_authenticated_user
