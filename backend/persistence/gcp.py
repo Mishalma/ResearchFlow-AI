@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from core.exceptions import PersistenceConfigurationError, PersistenceError
 from models.project import ProjectRecord
 from persistence.base import DownloadedObject, ObjectStorage, ProjectRepository, StoredObject
+
+logger = logging.getLogger("papereasy.backend.persistence.gcp")
 
 
 class FirestoreProjectRepository(ProjectRepository):
@@ -23,6 +26,11 @@ class FirestoreProjectRepository(ProjectRepository):
         try:
             self._collection.document(project.id).set(project.model_dump(mode="python"))
         except Exception as exc:
+            logger.exception(
+                "Firestore save failed for project %s in collection %s",
+                project.id,
+                self._collection.id,
+            )
             raise PersistenceError("Unable to save the project to Firestore.") from exc
         return project
 
@@ -30,6 +38,11 @@ class FirestoreProjectRepository(ProjectRepository):
         try:
             snapshot = self._collection.document(project_id).get()
         except Exception as exc:
+            logger.exception(
+                "Firestore get failed for project %s in collection %s",
+                project_id,
+                self._collection.id,
+            )
             raise PersistenceError("Unable to load the project from Firestore.") from exc
 
         if not snapshot.exists:
@@ -44,6 +57,11 @@ class FirestoreProjectRepository(ProjectRepository):
                 query = query.where("owner_uid", "==", owner_uid)
             snapshots = list(query.stream())
         except Exception as exc:
+            logger.exception(
+                "Firestore list failed for owner %s in collection %s",
+                owner_uid,
+                self._collection.id,
+            )
             raise PersistenceError("Unable to list projects from Firestore.") from exc
 
         return [ProjectRecord.model_validate(snapshot.to_dict() or {}) for snapshot in snapshots]
@@ -72,6 +90,13 @@ class GCSObjectStorage(ObjectStorage):
         try:
             blob.upload_from_filename(str(source_path), content_type=content_type)
         except Exception as exc:
+            logger.exception(
+                "Cloud Storage upload failed for key %s to bucket %s using project %s from %s",
+                key,
+                self._bucket.name,
+                self._client.project,
+                source_path,
+            )
             raise PersistenceError(f"Unable to upload object '{key}' to Cloud Storage.") from exc
 
         return StoredObject(
@@ -87,6 +112,12 @@ class GCSObjectStorage(ObjectStorage):
             content = blob.download_as_bytes()
             blob.reload()
         except Exception as exc:
+            logger.exception(
+                "Cloud Storage download failed for key %s from bucket %s using project %s",
+                key,
+                self._bucket.name,
+                self._client.project,
+            )
             raise PersistenceError(f"Unable to download object '{key}' from Cloud Storage.") from exc
 
         return DownloadedObject(
@@ -103,6 +134,12 @@ class GCSObjectStorage(ObjectStorage):
         try:
             blob.download_to_filename(str(destination))
         except Exception as exc:
+            logger.exception(
+                "Cloud Storage download-to-file failed for key %s from bucket %s using project %s",
+                key,
+                self._bucket.name,
+                self._client.project,
+            )
             raise PersistenceError(f"Unable to download object '{key}' from Cloud Storage.") from exc
 
         return destination

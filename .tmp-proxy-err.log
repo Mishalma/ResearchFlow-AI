@@ -1,0 +1,22 @@
+Pausing command execution:
+
+This command requires the `cloud-run-proxy` component to be installed. Would you
+ like to install the `cloud-run-proxy` component to continue command execution? 
+(Y/n)?  
+
+ERROR: Cannot use bundled Python installation to update Google Cloud CLI in
+non-interactive mode. Please run again in interactive mode.
+
+
+
+If you really want to run in non-interactive mode, please run the
+following command before re-running this one:
+
+
+
+  FOR /F "delims=" %i in ( '""C:\Users\moham\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"" components copy-bundled-python'
+  ) DO (
+    SET CLOUDSDK_PYTHON=%i
+  )
+
+(Substitute `%%i` for `%i` if in a .bat script.)
