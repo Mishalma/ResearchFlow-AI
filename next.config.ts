@@ -19,6 +19,9 @@ const contentSecurityPolicy = [
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ["google-auth-library", "firebase-admin"],
+  experimental: {
+    workerThreads: true,
+  },
   async headers() {
     return [
       {
