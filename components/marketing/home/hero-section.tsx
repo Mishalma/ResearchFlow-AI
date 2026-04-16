@@ -1,13 +1,10 @@
 import Link from "next/link";
-import { ArrowRight, CheckCircle2, ShieldCheck } from "lucide-react";
+import { ArrowRight, ShieldCheck } from "lucide-react";
 
 import type { AuthenticatedUser } from "@/lib/server/auth/session";
 import { cn } from "@/lib/utils";
 import { buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { FloatingCard } from "@/components/3d/FloatingCard";
-
-import { DashboardMockup } from "./dashboard-mockup";
 
 type HeroSectionProps = {
   user: AuthenticatedUser | null;
@@ -27,8 +24,8 @@ export function HeroSection({ user }: HeroSectionProps) {
       id="hero"
       className="scroll-mt-28 px-4 pt-8 md:px-6 md:pt-10 lg:px-8 lg:pt-14"
     >
-      <div className="mx-auto grid max-w-7xl gap-10 lg:grid-cols-[minmax(0,1fr)_1.06fr] lg:items-center">
-        <div className="space-y-8">
+      <div className="mx-auto max-w-6xl">
+        <div className="max-w-4xl space-y-8">
           <div className="space-y-5">
             <Badge className="border border-indigo-400/25 bg-indigo-500/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.28em] text-indigo-100">
               <ShieldCheck className="mr-1.5 h-3.5 w-3.5 text-indigo-300" />
@@ -71,29 +68,7 @@ export function HeroSection({ user }: HeroSectionProps) {
               Login
             </Link>
           </div>
-
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {[
-              "Private Cloud Run processing",
-              "Structured IEEE-ready drafting",
-              "Ownership-scoped project access",
-            ].map((item) => (
-              <div
-                key={item}
-                className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-indigo-100/82 backdrop-blur-xl"
-              >
-                <CheckCircle2 className="h-4 w-4 text-emerald-300" />
-                <span>{item}</span>
-              </div>
-            ))}
-          </div>
         </div>
-
-        <FloatingCard className="group">
-          <div className="rounded-[30px] border border-white/10 bg-black/20 p-3 backdrop-blur-2xl md:p-4">
-            <DashboardMockup variant="hero" />
-          </div>
-        </FloatingCard>
       </div>
     </section>
   );
