@@ -3,8 +3,6 @@ import { HeroSection } from "@/components/marketing/home/hero-section";
 import { TrustStrip } from "@/components/marketing/home/trust-strip";
 import { HowItWorksSection } from "@/components/marketing/home/how-it-works-section";
 import { FeaturesSection } from "@/components/marketing/home/features-section";
-import { DashboardPreviewSection } from "@/components/marketing/home/dashboard-preview-section";
-import { PricingTeaserSection } from "@/components/marketing/home/pricing-teaser-section";
 import { TestimonialsSection } from "@/components/marketing/home/testimonials-section";
 import { ReferEarnSection } from "@/components/marketing/home/refer-earn-section";
 import { PublicHomeFooter } from "@/components/marketing/home/public-home-footer";
@@ -23,8 +21,6 @@ export default async function HomePage() {
         <TrustStrip />
         <HowItWorksSection />
         <FeaturesSection />
-        <DashboardPreviewSection />
-        <PricingTeaserSection user={user} />
         <TestimonialsSection />
         <ReferEarnSection user={user} />
       </main>

@@ -111,7 +111,6 @@ export function PublicHomeNav({ user }: PublicHomeNavProps) {
   const resourceItems = useMemo<NavItem[]>(
     () => [
       { label: "How It Works", href: "#how-it-works" },
-      { label: "Dashboard Preview", href: "#dashboard-preview" },
       { label: "Refer & Earn", href: "#refer-earn" },
       { label: "What Users Say", href: "#testimonials" },
     ],
@@ -121,7 +120,6 @@ export function PublicHomeNav({ user }: PublicHomeNavProps) {
   const mobileItems = useMemo<NavItem[]>(
     () => [
       ...featureItems,
-      { label: "Pricing", href: "#pricing" },
       ...resourceItems,
     ],
     [featureItems, resourceItems],
@@ -174,12 +172,6 @@ export function PublicHomeNav({ user }: PublicHomeNavProps) {
 
             <nav className="hidden items-center gap-1 lg:flex">
               <NavDropdown label="Features" items={featureItems} />
-              <Link
-                href="#pricing"
-                className="rounded-full px-3 py-2 text-sm font-medium text-indigo-100/74 transition-colors hover:bg-white/6 hover:text-white"
-              >
-                Pricing
-              </Link>
               <NavDropdown label="Resources" items={resourceItems} />
             </nav>
 
