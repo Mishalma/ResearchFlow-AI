@@ -15,7 +15,6 @@ from app.core.exceptions import (
     InvalidUploadError,
     UnsupportedFileTypeError,
 )
-from persistence.base import ObjectStorage
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx"}
 READ_CHUNK_SIZE = 1024 * 1024
@@ -31,8 +30,6 @@ class StoredFile:
     file_type: str
     file_size: int
     content_type: str
-    storage_key: str
-    storage_uri: str
 
 
 def ensure_upload_dir(upload_dir: Path) -> None:
@@ -60,7 +57,6 @@ async def store_upload_file(
     upload_file: UploadFile,
     upload_dir: Path,
     temp_dir: Path,
-    object_storage: ObjectStorage,
     max_size_bytes: int,
     max_size_mb: int,
 ) -> StoredFile:
@@ -105,21 +101,9 @@ async def store_upload_file(
         delete_file(temp_path)
         raise EmptyFileError()
 
-    storage_key = f"uploads/{project_id}{extension}"
-    try:
-        stored_object = object_storage.upload_file(
-            storage_key,
-            temp_path,
-            content_type=upload_file.content_type or "application/octet-stream",
-        )
-    except Exception:
-        delete_file(temp_path)
-        raise
-
     logger.info(
-        "Stored upload %s as %s (%s bytes)",
+        "Staged upload %s for extraction only (%s bytes)",
         file_name,
-        storage_key,
         total_bytes,
     )
 
@@ -130,6 +114,4 @@ async def store_upload_file(
         file_type=extension.lstrip("."),
         file_size=total_bytes,
         content_type=upload_file.content_type or "application/octet-stream",
-        storage_key=storage_key,
-        storage_uri=stored_object.storage_uri,
     )
