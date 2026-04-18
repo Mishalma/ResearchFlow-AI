@@ -14,6 +14,7 @@ from app.api.routes.export import router as export_router
 from app.api.routes.figure import router as figure_router
 from app.api.routes.generate import router as generate_router
 from app.api.routes.health import router as health_router
+from app.api.routes.originality import router as originality_router
 from app.api.routes.project import router as project_router
 from app.api.routes.save import router as save_router
 from app.api.routes.upload import router as upload_router
@@ -78,7 +79,10 @@ app.mount("/outputs", StaticFiles(directory=settings.outputs_dir, check_dir=Fals
 
 @app.exception_handler(AppError)
 async def handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
-    return JSONResponse(status_code=exc.status_code, content={"error": exc.message})
+    content = {"error": exc.message}
+    if exc.details:
+        content["details"] = exc.details
+    return JSONResponse(status_code=exc.status_code, content=content)
 
 
 @app.exception_handler(RequestValidationError)
@@ -122,6 +126,7 @@ async def log_requests_and_handle_errors(request: Request, call_next):
 
 
 app.include_router(health_router)
+app.include_router(originality_router)
 app.include_router(upload_router)
 app.include_router(project_router)
 app.include_router(save_router)

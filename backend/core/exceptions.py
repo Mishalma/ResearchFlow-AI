@@ -4,10 +4,16 @@ from starlette import status
 
 
 class AppError(Exception):
-    def __init__(self, message: str, status_code: int = status.HTTP_400_BAD_REQUEST):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = status.HTTP_400_BAD_REQUEST,
+        details: dict[str, object] | None = None,
+    ):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        self.details = details or {}
 
 
 class AuthenticationRequiredError(AppError):
@@ -177,3 +183,12 @@ class AgentExecutionError(GenerationError):
 class MCPToolError(GenerationError):
     def __init__(self, tool_name: str):
         super().__init__(f"MCP tool '{tool_name}' failed.")
+
+
+class OriginalityReviewBlockedError(AppError):
+    def __init__(
+        self,
+        message: str = "The manuscript failed the final originality review.",
+        details: dict[str, object] | None = None,
+    ):
+        super().__init__(message, status.HTTP_409_CONFLICT, details=details)

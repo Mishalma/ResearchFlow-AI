@@ -1,0 +1,5 @@
+Cloud Run proxy request failed. {
+  method: 'GET',
+  targetUrl: 'https://papereasy-backend-wppyhczzqa-uc.a.run.app/health',
+  error: 'spawn EPERM'
+}

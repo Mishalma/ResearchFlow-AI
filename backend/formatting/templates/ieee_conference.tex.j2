@@ -1,0 +1,93 @@
+\documentclass[conference]{IEEEtran}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{times}
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage[
+{% if profile.paper_size == "a4" -%}
+a4paper,
+top={{ profile.top_margin_mm }}mm,
+bottom={{ profile.bottom_margin_mm }}mm,
+left={{ profile.left_margin_mm }}mm,
+right={{ profile.right_margin_mm }}mm,
+columnsep={{ profile.column_gap_mm }}mm
+{% else -%}
+letterpaper,
+top=0.75in,
+bottom=1.0in,
+left=0.625in,
+right=0.625in,
+columnsep=0.25in
+{% endif -%}
+]{geometry}
+
+\begin{document}
+
+\title{ {{ title }} }
+
+\author{
+{% for author in authors -%}
+\IEEEauthorblockN{ {{ author.name }} }
+\IEEEauthorblockA{
+{% for line in author.affiliation_lines -%}
+{{ line }}{% if not loop.last %} \\
+{% endif -%}
+{% endfor -%}
+{% if author.email %} \\
+\texttt{ {{ author.email }} }{% endif -%}
+{% if author.orcid %} \\
+ORCID: {{ author.orcid }}{% endif -%}
+}
+{% if not loop.last %}\and
+{% endif -%}
+{% endfor -%}
+}
+
+\maketitle
+
+\begin{abstract}
+Abstract---{{ abstract }}
+\end{abstract}
+
+{% if keywords %}
+\begin{IEEEkeywords}
+{{ keywords | join(", ") }}
+\end{IEEEkeywords}
+{% endif %}
+
+{% for section in sections %}
+\section{ {{ section.heading }} }
+{{ section.content }}
+
+{% for figure in section.figures %}
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\linewidth]{ {{ figure.path }} }
+\caption{ {{ figure.caption }} }
+\label{fig:{{ figure.label }}}
+\end{figure}
+{% endfor %}
+
+{% for table in section.tables %}
+\begin{table}[htbp]
+\caption{ {{ table.caption }} }
+\label{tab:{{ table.label }}}
+\centering
+{{ table.latex }}
+\end{table}
+{% endfor %}
+{% endfor %}
+
+\begin{thebibliography}{99}
+{% for reference in references %}
+\bibitem{ref{{ loop.index }}} {{ reference }}
+{% endfor %}
+\end{thebibliography}
+
+\end{document}

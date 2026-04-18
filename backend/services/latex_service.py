@@ -19,6 +19,7 @@ SECTION_ORDER = (
     ("methodology", "Methodology"),
     ("results", "Results"),
     ("discussion", "Discussion"),
+    ("limitations", "Limitations"),
     ("conclusion", "Conclusion"),
 )
 

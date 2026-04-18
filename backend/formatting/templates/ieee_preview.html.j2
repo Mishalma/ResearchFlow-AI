@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{{ title_html }}</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page-width: {% if profile.paper_size == "a4" %}210mm{% else %}8.5in{% endif %};
+      --page-padding-top: {{ profile.top_margin_mm }}mm;
+      --page-padding-bottom: {{ profile.bottom_margin_mm }}mm;
+      --page-padding-side: {{ profile.left_margin_mm }}mm;
+      --column-gap: {{ profile.column_gap_mm }}mm;
+    }
+    body {
+      margin: 0;
+      background: #f2f4f8;
+      font-family: "Times New Roman", Times, serif;
+      color: #111;
+    }
+    .page {
+      width: var(--page-width);
+      margin: 24px auto;
+      padding: var(--page-padding-top) var(--page-padding-side) var(--page-padding-bottom);
+      background: #fff;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+      box-sizing: border-box;
+    }
+    .title {
+      font-size: 24pt;
+      line-height: 1.15;
+      text-align: center;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+    .authors {
+      text-align: center;
+      font-size: 10pt;
+      margin-bottom: 16px;
+    }
+    .author-block {
+      display: inline-block;
+      margin: 0 14px 10px;
+      vertical-align: top;
+      max-width: 32%;
+    }
+    .author-name {
+      font-size: 11pt;
+      font-weight: 700;
+    }
+    .author-meta {
+      font-size: 9pt;
+      font-style: italic;
+      line-height: 1.35;
+    }
+    .abstract, .keywords {
+      font-size: 10pt;
+      line-height: 1.35;
+    }
+    .abstract strong, .keywords strong {
+      font-style: italic;
+    }
+    .columns {
+      column-count: 2;
+      column-gap: var(--column-gap);
+      font-size: 10pt;
+      line-height: 1.36;
+      text-align: justify;
+      margin-top: 18px;
+    }
+    .section {
+      break-inside: avoid;
+      margin-bottom: 12px;
+    }
+    .section h2 {
+      text-align: center;
+      font-size: 10pt;
+      margin: 0 0 6px;
+      font-variant: small-caps;
+      letter-spacing: 0.03em;
+    }
+    .section p {
+      margin: 0 0 8px;
+      text-indent: 3.5mm;
+    }
+    .references ol {
+      margin: 0;
+      padding-left: 18px;
+    }
+    .references li {
+      margin-bottom: 6px;
+    }
+  </style>
+</head>
+<body>
+  <article class="page">
+    <header>
+      <div class="title">{{ title_html }}</div>
+      <div class="authors">
+        {% for author in authors %}
+        <div class="author-block">
+          <div class="author-name">{{ author.name }}</div>
+          <div class="author-meta">
+            {% for line in author.affiliation_lines %}
+            <div>{{ line }}</div>
+            {% endfor %}
+            {% if author.email %}<div>{{ author.email }}</div>{% endif %}
+            {% if author.orcid %}<div>ORCID: {{ author.orcid }}</div>{% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      <section class="abstract">
+        <strong>Abstract&mdash;</strong> {{ abstract_html | safe }}
+      </section>
+      {% if keywords_html %}
+      <section class="keywords">
+        <strong>Index Terms&mdash;</strong> {{ keywords_html | join(", ") }}
+      </section>
+      {% endif %}
+    </header>
+
+    <section class="columns">
+      {% for section in preview_sections %}
+      <section class="section">
+        <h2>{{ loop.index | upper_roman }}. {{ section.heading | upper }}</h2>
+        {{ section.content_html | safe }}
+      </section>
+      {% endfor %}
+      <section class="section references">
+        <h2>REFERENCES</h2>
+        <ol>
+          {% for reference in references_html %}
+          <li>{{ reference }}</li>
+          {% endfor %}
+        </ol>
+      </section>
+    </section>
+  </article>
+</body>
+</html>

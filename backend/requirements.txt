@@ -11,3 +11,7 @@ google-cloud-storage
 google-cloud-firestore
 pydantic
 jinja2
+pytest
+transformers
+torch
+spacy

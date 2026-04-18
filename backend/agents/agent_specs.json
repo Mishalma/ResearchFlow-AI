@@ -2,8 +2,8 @@
   "agents": [
     {
       "name": "structuring_agent",
-      "role": "Convert raw extracted source text into a complete IEEE research paper schema.",
-      "prompt_template": "You are the Structuring Agent for a research paper generator.\nConvert the source material into a complete IEEE-ready paper schema.\n\nReturn only valid JSON with these required keys:\n- title\n- abstract\n- keywords\n- sections.introduction\n- sections.related_work\n- sections.methodology\n- sections.results\n- sections.discussion\n- sections.conclusion\n- references\n\nRules:\n- Use only information explicitly present in the source text.\n- Do not invent facts, datasets, experiments, or citations.\n- Never leave title, abstract, keywords, or any section empty.\n- Keep the response compact: title plus one concise paragraph per field, with each section limited to 2-4 sentences.\n- Produce a short draft structure, not a full long-form paper at this stage.\n- If the source is weak, write a brief academically worded limitation statement for that field instead of leaving it blank.\n- Keep references as an empty array at this stage.\n- Do not include markdown fences, commentary, or extra text.\n\nValidation feedback to correct:\n{validation_feedback}\n\nSource text:\n{source_text}",
+      "role": "Convert raw extracted source text into an evidence-grounded IEEE research paper skeleton with a limitations section.",
+      "prompt_template": "You are the Structuring Agent for a research paper generator.\nConvert the source material into a complete IEEE-ready paper schema.\n\nReturn only valid JSON with these required keys:\n- title\n- abstract\n- keywords\n- sections.introduction\n- sections.related_work\n- sections.methodology\n- sections.results\n- sections.discussion\n- sections.limitations\n- sections.conclusion\n- references\n\nRules:\n- Use only information explicitly present in the source text.\n- Do not invent facts, datasets, experiments, or citations.\n- Never leave title, abstract, keywords, or any section empty.\n- Keep the response compact: title plus one concise paragraph per field, with each section limited to 2-4 sentences.\n- Produce a short draft structure, not a full long-form paper at this stage.\n- If the source is weak, write a brief academically worded limitation statement for that field instead of leaving it blank.\n- Keep references as an empty array at this stage.\n- Do not include markdown fences, commentary, or extra text.\n\nValidation feedback to correct:\n{validation_feedback}\n\nSource text:\n{source_text}",
       "input_schema": "raw_text",
       "output_schema": "StructuringAgentOutput",
       "enabled_tools": [],
@@ -15,8 +15,8 @@
     },
     {
       "name": "writing_agent",
-      "role": "Improve clarity and academic tone while preserving the canonical IEEE paper schema.",
-      "prompt_template": "You are the Writing Agent for an academic paper generator.\nImprove clarity, coherence, and academic tone while preserving the exact schema and factual boundaries.\n\nReturn only valid JSON with the exact same structure you received.\n\nRules:\n- Preserve all required keys exactly.\n- Never remove, rename, or merge sections.\n- Do not add unsupported claims, datasets, citations, or results.\n- Keep title, abstract, keywords, and every section non-empty.\n- Expand carefully but keep each section to one concise academic paragraph so the total output stays compact and valid JSON.\n- Keep references as an array. Do not delete the array even if it is empty.\n- Do not include markdown fences, commentary, or extra text.\n\nValidation feedback to correct:\n{validation_feedback}\n\nInput paper JSON:\n{paper_json}",
+      "role": "Rewrite the structured IEEE draft into publication-style prose while preserving evidence, uncertainty, and downstream compatibility.",
+      "prompt_template": "The Writing Agent now uses the backend/writing runtime. Keep the configured model for Vertex-backed section generation and preserve the existing downstream paper schema.",
       "input_schema": "ResearchPaperSchema",
       "output_schema": "WritingAgentOutput",
       "enabled_tools": [],
@@ -28,14 +28,11 @@
     },
     {
       "name": "citation_agent",
-      "role": "Attach IEEE-formatted references using MCP-compatible search and citation tools.",
-      "prompt_template": "Preserve the input paper schema and enrich only the references array.",
+      "role": "Ground claim-level scholarly citations using real academic APIs and keep the formatter-facing paper schema stable.",
+      "prompt_template": "The Citation Agent now uses the backend/citation runtime. Match claims to real scholarly references, preserve the legacy paper snapshot, and expose the richer citation_draft metadata for future agents.",
       "input_schema": "ResearchPaperSchema",
       "output_schema": "CitationAgentOutput",
-      "enabled_tools": [
-        "search_tool",
-        "citation_tool"
-      ],
+      "enabled_tools": [],
       "timeout_seconds": 30,
       "retry_policy": {
         "attempts": 2,
@@ -44,8 +41,8 @@
     },
     {
       "name": "ieee_formatting_agent",
-      "role": "Convert a validated paper schema into strict IEEE manuscript text and LaTeX-ready output.",
-      "prompt_template": "You are an IEEE formatting expert. Convert the validated research content into strict IEEE format with title, abstract, index terms, numbered sections, and numbered references.",
+      "role": "Render, compile, validate, and preview an IEEE conference manuscript using real LaTeX tooling while preserving the legacy paper snapshot for downstream stages.",
+      "prompt_template": "The IEEE formatting agent now uses the backend/formatting runtime. Render a real IEEEtran conference document, compile with pdflatex, capture diagnostics, generate an HTML preview, and keep the legacy paper snapshot compatible with downstream Humanizer and originality review.",
       "input_schema": "ResearchPaperSchema",
       "output_schema": "FormattingAgentOutput",
       "enabled_tools": [],
@@ -53,6 +50,32 @@
       "retry_policy": {
         "attempts": 1,
         "backoff_seconds": 0.0
+      }
+    },
+    {
+      "name": "humanizer_agent",
+      "role": "Reduce AI-writing signals in the formatted IEEE manuscript while preserving meaning, citations, LaTeX safety, hedging, and section intent.",
+      "prompt_template": "The Humanizer Agent now uses the backend/humanizer runtime. Apply targeted post-formatting rewrites, preserve the legacy generated paper shape, and emit graph-routing diagnostics for future plagiarism integration.",
+      "input_schema": "FormattingAgentOutput",
+      "output_schema": "HumanizerAgentOutput",
+      "enabled_tools": [],
+      "timeout_seconds": 45,
+      "retry_policy": {
+        "attempts": 2,
+        "backoff_seconds": 1.0
+      }
+    },
+    {
+      "name": "originality_agent",
+      "role": "Run the final originality, attribution, and compliance gate using Winston AI with Copyleaks fallback, and block approval when manual review is required.",
+      "prompt_template": "The Originality Agent now uses the backend/originality runtime. Preserve approved paper output when the manuscript passes, otherwise return a structured originality report and graph routing decision without rewriting to evade detection.",
+      "input_schema": "HumanizerAgentOutput",
+      "output_schema": "OriginalityAgentOutput",
+      "enabled_tools": [],
+      "timeout_seconds": 60,
+      "retry_policy": {
+        "attempts": 2,
+        "backoff_seconds": 1.0
       }
     }
   ]

@@ -16,6 +16,7 @@ FigureSection = Literal[
     "methodology",
     "results",
     "discussion",
+    "limitations",
     "conclusion",
 ]
 ExportFormat = Literal["pdf", "docx", "latex"]
@@ -26,7 +27,8 @@ DISPLAY_SECTION_ORDER = (
     ("III.", "methodology", "METHODOLOGY"),
     ("IV.", "results", "RESULTS"),
     ("V.", "discussion", "DISCUSSION"),
-    ("VI.", "conclusion", "CONCLUSION"),
+    ("VI.", "limitations", "LIMITATIONS"),
+    ("VII.", "conclusion", "CONCLUSION"),
 )
 
 LEGACY_SECTION_FALLBACKS = {
@@ -36,6 +38,7 @@ LEGACY_SECTION_FALLBACKS = {
     "methodology": "Methodology content requires author review.",
     "results": "Results were not explicitly identified in the source material and require author review.",
     "discussion": "Discussion points were not explicitly identified in the source material and require author review.",
+    "limitations": "Limitations content requires author review.",
     "conclusion": "Conclusion content requires author review.",
 }
 
@@ -111,6 +114,7 @@ def _coerce_sections(value: object) -> IEEESectionMap | None:
         "methodology": _clean_text(value.get("methodology")),
         "results": _clean_text(value.get("results")),
         "discussion": _clean_text(value.get("discussion")),
+        "limitations": _clean_text(value.get("limitations")),
         "conclusion": _clean_text(value.get("conclusion")),
     }
 
@@ -128,6 +132,7 @@ def _coerce_sections(value: object) -> IEEESectionMap | None:
         methodology=normalized["methodology"] or _fallback_text("methodology"),
         results=normalized["results"] or _fallback_text("results"),
         discussion=normalized["discussion"] or _fallback_text("discussion"),
+        limitations=normalized["limitations"] or _fallback_text("limitations"),
         conclusion=normalized["conclusion"] or _fallback_text("conclusion"),
     )
 
@@ -166,6 +171,7 @@ def _coerce_paper(
             methodology=_fallback_text("methodology"),
             results=_fallback_text("results"),
             discussion=_fallback_text("discussion"),
+            limitations=_fallback_text("limitations"),
             conclusion=_fallback_text("conclusion"),
         ),
         references=_normalize_string_list(value.get("references")),

@@ -7,13 +7,20 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from agents.citation_agent import CitationAgent
+from agents.humanizer_agent import HumanizerAgent
 from agents.ieee_formatting_agent import IEEEFormattingAgent
+from agents.originality_agent import OriginalityAgent
 from agents.registry import get_agent_registry
 from agents.structuring_agent import StructuringAgent
 from agents.writing_agent import WritingAgent
 from app.services.paper_service import validate_research_paper
 from core.config import Settings, get_settings
-from core.exceptions import InvalidAgentResponseError, PaperValidationError
+from core.exceptions import (
+    AgentExecutionError,
+    InvalidAgentResponseError,
+    OriginalityReviewBlockedError,
+    PaperValidationError,
+)
 from core.vertex_client import VertexGeminiClient
 from mcp.mcp_server import build_default_mcp_server
 from models.generation import (
@@ -22,6 +29,8 @@ from models.generation import (
     FormattingAgentOutput,
     GeneratedPaper,
     GenerationMetadata,
+    HumanizerAgentOutput,
+    OriginalityAgentOutput,
     PipelineResult,
     ResearchPaperSchema,
     StructuringAgentOutput,
@@ -41,6 +50,7 @@ def _paper_summary(paper: ResearchPaperSchema) -> str:
             "methodology",
             "results",
             "discussion",
+            "limitations",
             "conclusion",
         )
         if getattr(paper.sections, key).strip()
@@ -94,14 +104,31 @@ async def _dispatch_validated_stage(
                 continue
             raise InvalidAgentResponseError(recipient) from exc
 
-        paper = structured_result if isinstance(structured_result, ResearchPaperSchema) else structured_result.paper
+        if isinstance(structured_result, OriginalityAgentOutput):
+            if structured_result.approved_snapshot is None:
+                validation_events.append(
+                    f"{recipient}: originality decision '{structured_result.decision_graph_action or 'unknown'}' returned without approved snapshot"
+                )
+                return structured_result, result
+            paper = structured_result.approved_snapshot.paper
+        else:
+            paper = structured_result if isinstance(structured_result, ResearchPaperSchema) else structured_result.paper
         issues = validate_research_paper(paper, require_references=require_references)
 
-        if isinstance(structured_result, FormattingAgentOutput):
+        if isinstance(structured_result, (FormattingAgentOutput, HumanizerAgentOutput)):
             if not structured_result.formatted_text.strip():
                 issues.append("formatted_text is empty")
             if not structured_result.latex_ready.strip():
                 issues.append("latex_ready is empty")
+        elif isinstance(structured_result, OriginalityAgentOutput):
+            approved_snapshot = structured_result.approved_snapshot
+            if approved_snapshot is None:
+                issues.append("approved_snapshot is empty")
+            else:
+                if not approved_snapshot.formatted_text.strip():
+                    issues.append("approved_snapshot.formatted_text is empty")
+                if not approved_snapshot.latex_ready.strip():
+                    issues.append("approved_snapshot.latex_ready is empty")
 
         logger.info(
             "Agent %s output summary for trace %s: %s",
@@ -160,8 +187,10 @@ async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineR
         resolved_settings,
     )
     formatting_agent = IEEEFormattingAgent(registry.get("ieee_formatting_agent"))
+    humanizer_agent = HumanizerAgent(vertex_client, registry.get("humanizer_agent"))
+    originality_agent = OriginalityAgent(registry.get("originality_agent"))
 
-    for agent in [structuring_agent, writing_agent, citation_agent, formatting_agent]:
+    for agent in [structuring_agent, writing_agent, citation_agent, formatting_agent, humanizer_agent, originality_agent]:
         a2a_manager.register(agent)
 
     logger.info("Pipeline trace %s started with %s source characters", trace_id, len(text))
@@ -214,7 +243,53 @@ async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineR
         validation_events=validation_events,
     )
 
+    if formatting_result.error is not None:
+        raise AgentExecutionError(
+            formatting_agent.agent_name,
+            message=str(formatting_result.error.get("message") or "Formatting failed."),
+        )
+
+    humanizer_result, humanizer_dispatch = await _dispatch_validated_stage(
+        a2a_manager=a2a_manager,
+        sender=formatting_agent.agent_name,
+        recipient=humanizer_agent.agent_name,
+        task="humanize_ieee_paper",
+        trace_id=trace_id,
+        payload={
+            "paper": formatting_result.model_dump(),
+            "written_draft": writing_result.written_draft,
+            "section_confidences": writing_result.section_confidences,
+        },
+        response_model=HumanizerAgentOutput,
+        require_references=True,
+        validation_events=validation_events,
+    )
+
+    originality_result, originality_dispatch = await _dispatch_validated_stage(
+        a2a_manager=a2a_manager,
+        sender=humanizer_agent.agent_name,
+        recipient=originality_agent.agent_name,
+        task="review_originality_and_compliance",
+        trace_id=trace_id,
+        payload={
+            "paper": humanizer_result.model_dump(),
+            "citation_draft": citation_result.citation_draft,
+        },
+        response_model=OriginalityAgentOutput,
+        require_references=True,
+        validation_events=validation_events,
+    )
+
+    if originality_result.error is not None:
+        raise AgentExecutionError(
+            originality_agent.agent_name,
+            message=str(originality_result.error.get("message") or "Originality review failed."),
+        )
+
     total_duration_ms = (perf_counter() - start_time) * 1000
+    originality_report = originality_result.originality_report or {}
+    section_reports = originality_report.get("sections") or {}
+    flagged_span_count = sum(len((section or {}).get("spans") or []) for section in section_reports.values())
     metadata = GenerationMetadata(
         model=resolved_settings.vertex_model,
         generation_time_ms=total_duration_ms,
@@ -225,16 +300,48 @@ async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineR
             AgentTiming(agent=writing_agent.agent_name, duration_ms=writing_dispatch.duration_ms),
             AgentTiming(agent=citation_agent.agent_name, duration_ms=citation_dispatch.duration_ms),
             AgentTiming(agent=formatting_agent.agent_name, duration_ms=formatting_dispatch.duration_ms),
+            AgentTiming(agent=humanizer_agent.agent_name, duration_ms=humanizer_dispatch.duration_ms),
+            AgentTiming(agent=originality_agent.agent_name, duration_ms=originality_dispatch.duration_ms),
         ],
         mcp_tools_used=registry.get("citation_agent").enabled_tools,
         validation_events=validation_events,
+        structuring_global_confidence=structuring_result.global_confidence,
+        structuring_section_confidences=structuring_result.section_confidences,
+        structuring_evidence_summary=structuring_result.evidence_summary,
+        writing_global_confidence=writing_result.global_confidence,
+        writing_section_confidences=writing_result.section_confidences,
+        writing_annotation_summary=writing_result.annotation_summary,
+        citation_match_count=citation_result.matched_claim_count,
+        citation_bibliography_count=citation_result.bibliography_count,
+        citation_provider_summary=citation_result.provider_summary,
+        formatting_compile_success=formatting_result.compile_success,
+        formatting_retry_recommended=formatting_result.retry_recommended,
+        formatting_diagnostic_summary=formatting_result.diagnostic_summary,
+        humanizer_ai_pattern_score_before=humanizer_result.ai_pattern_score_before,
+        humanizer_ai_pattern_score_after=humanizer_result.ai_pattern_score_after,
+        humanizer_perplexity_before=humanizer_result.perplexity_before,
+        humanizer_perplexity_after=humanizer_result.perplexity_after,
+        humanizer_iterations=humanizer_result.iteration_count,
+        humanizer_graph_action=humanizer_result.graph_action,
+        originality_provider_used=originality_result.provider_used,
+        originality_global_score=originality_result.global_originality_score,
+        originality_global_ai_score=originality_result.global_ai_score,
+        originality_section_status_counts=originality_result.section_status_counts,
+        originality_decision=originality_result.decision_graph_action,
+        originality_flagged_span_count=flagged_span_count,
     )
 
-    generated_paper = GeneratedPaper(
-        paper=formatting_result.paper,
-        formatted_text=formatting_result.formatted_text,
-        latex_ready=formatting_result.latex_ready,
-    )
+    if originality_result.approved_snapshot is None:
+        raise OriginalityReviewBlockedError(
+            message="The manuscript requires originality or compliance review before approval.",
+            details={
+                "trace_id": trace_id,
+                "graph_action": originality_result.decision_graph_action or "needs_manual_review",
+                "originality_report": originality_report,
+            },
+        )
+
+    generated_paper = originality_result.approved_snapshot
 
     logger.info("Pipeline trace %s completed in %.2f ms", trace_id, total_duration_ms)
     return PipelineResult(generated_paper=generated_paper, metadata=metadata)

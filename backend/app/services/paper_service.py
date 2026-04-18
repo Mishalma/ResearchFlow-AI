@@ -16,7 +16,8 @@ IEEE_SECTION_HEADINGS = {
     "methodology": re.compile(r"^(?:iii\.?\s*)?methodology$", re.IGNORECASE),
     "results": re.compile(r"^(?:iv\.?\s*)?results$", re.IGNORECASE),
     "discussion": re.compile(r"^(?:v\.?\s*)?discussion$", re.IGNORECASE),
-    "conclusion": re.compile(r"^(?:vi\.?\s*)?conclusion$", re.IGNORECASE),
+    "limitations": re.compile(r"^(?:vi\.?\s*)?limitations$", re.IGNORECASE),
+    "conclusion": re.compile(r"^(?:vii\.?\s*)?conclusion$", re.IGNORECASE),
     "references": re.compile(r"^references$", re.IGNORECASE),
 }
 
@@ -123,6 +124,7 @@ def parse_editor_content(
         "methodology": [],
         "results": [],
         "discussion": [],
+        "limitations": [],
         "conclusion": [],
         "references": [],
     }
@@ -178,6 +180,7 @@ def parse_editor_content(
         "methodology": _normalize_paragraph_block(buffers["methodology"]),
         "results": _normalize_paragraph_block(buffers["results"]),
         "discussion": _normalize_paragraph_block(buffers["discussion"]),
+        "limitations": _normalize_paragraph_block(buffers["limitations"]),
         "conclusion": _normalize_paragraph_block(buffers["conclusion"]),
     }
 
@@ -206,6 +209,7 @@ def parse_editor_content(
             methodology=normalized_sections["methodology"],
             results=normalized_sections["results"],
             discussion=normalized_sections["discussion"],
+            limitations=normalized_sections["limitations"],
             conclusion=normalized_sections["conclusion"],
         ),
         references=parsed_references,

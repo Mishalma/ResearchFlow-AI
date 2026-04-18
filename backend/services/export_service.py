@@ -37,9 +37,19 @@ SECTION_ORDER = (
     ("Methodology", "methodology"),
     ("Results", "results"),
     ("Discussion", "discussion"),
+    ("Limitations", "limitations"),
     ("Conclusion", "conclusion"),
 )
-FIGURE_SECTION_KEYS = ("abstract", "introduction", "related_work", "methodology", "results", "discussion", "conclusion")
+FIGURE_SECTION_KEYS = (
+    "abstract",
+    "introduction",
+    "related_work",
+    "methodology",
+    "results",
+    "discussion",
+    "limitations",
+    "conclusion",
+)
 
 
 @dataclass(frozen=True)

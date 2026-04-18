@@ -4,7 +4,8 @@ from typing import Any
 
 from agents.base import BaseAgent
 from core.config import Settings, get_settings
-from mcp.mcp_server import MCPServer
+from citation.agent import run_citation_pipeline
+from citation.config import CitationConfig
 from models.a2a import A2AMessage
 from models.agent_runtime import AgentSpec
 from models.generation import CitationAgentOutput, ResearchPaperSchema
@@ -13,78 +14,45 @@ from models.generation import CitationAgentOutput, ResearchPaperSchema
 class CitationAgent(BaseAgent):
     def __init__(
         self,
-        mcp_server: MCPServer,
+        mcp_server,
         spec: AgentSpec,
         settings: Settings | None = None,
     ):
         super().__init__(agent_name=spec.name, spec=spec)
-        self.mcp_server = mcp_server
         self.settings = settings or get_settings()
+        self.citation_config = CitationConfig.from_settings(self.settings)
 
     async def process_task(self, message: A2AMessage) -> dict[str, Any]:
-        paper = ResearchPaperSchema.model_validate(message.payload.get("paper", {}))
-        queries = self._build_queries(paper)
-        formatted_references: list[str] = []
-        seen_titles: set[str] = set()
+        payload = message.payload.get("paper", {})
+        legacy_paper = ResearchPaperSchema.model_validate(payload)
+        result = await run_citation_pipeline(
+            written_draft=payload.get("written_draft"),
+            structured_draft=payload.get("structured_draft"),
+            paper_topic=str(message.payload.get("paper_topic", "")).strip() or None,
+            paper_domain=str(message.payload.get("paper_domain", "")).strip() or None,
+            author_metadata=message.payload.get("author_metadata"),
+            trace_id=message.trace_id,
+            settings=self.settings,
+            config=self.citation_config,
+            fallback_keywords=legacy_paper.keywords,
+        )
 
-        search_tool_name = self.spec.enabled_tools[0] if self.spec.enabled_tools else "search_tool"
-        citation_tool_name = self.spec.enabled_tools[1] if len(self.spec.enabled_tools) > 1 else "citation_tool"
-
-        for query in queries:
-            remaining = self.settings.citation_result_limit - len(formatted_references)
-            if remaining <= 0:
-                break
-
-            search_results = await self.mcp_server.call_tool(
-                search_tool_name,
-                {"query": query, "limit": remaining},
-            )
-            for result in search_results:
-                title = str(result.get("title", "")).strip().lower()
-                if not title or title in seen_titles:
-                    continue
-
-                citation = await self.mcp_server.call_tool(
-                    citation_tool_name,
-                    {
-                        "reference": result,
-                        "index": len(formatted_references) + 1,
-                        "query": query,
-                    },
-                )
-                formatted_references.append(str(citation["ieee_reference"]).strip())
-                seen_titles.add(title)
-
-                if len(formatted_references) >= self.settings.citation_result_limit:
-                    break
-
-        if not formatted_references:
-            formatted_references.append(
-                "[1] PaperEasy Citation Agent, \"Reference enrichment pending manual review,\" Internal Research Workflow, 2026."
-            )
+        paper = result.paper_snapshot
+        citation_draft = result.citation_draft
+        if paper is None or citation_draft is None:
+            raise ValueError("Citation runtime returned no paper snapshot.")
 
         output = CitationAgentOutput(
             title=paper.title,
             abstract=paper.abstract,
-            keywords=paper.keywords,
+            keywords=legacy_paper.keywords or paper.keywords,
             sections=paper.sections,
-            references=formatted_references,
+            references=paper.references,
+            citation_draft=citation_draft.model_dump(mode="python"),
+            matched_claim_count=citation_draft.matched_claim_count,
+            bibliography_count=citation_draft.bibliography_count,
+            provider_summary=citation_draft.provider_summary,
+            trace_id=result.trace_id,
+            error=result.error.model_dump(mode="python") if result.error is not None else None,
         )
-        return output.model_dump()
-
-    def _build_queries(self, paper: ResearchPaperSchema) -> list[str]:
-        candidates = [
-            paper.title,
-            paper.sections.introduction,
-            paper.sections.methodology,
-            paper.sections.results,
-            paper.sections.discussion,
-        ]
-        queries: list[str] = []
-        for text in candidates:
-            normalized = " ".join(text.split())
-            if not normalized:
-                continue
-            queries.append(normalized[:120])
-
-        return queries[:4]
+        return output.model_dump(mode="python")
