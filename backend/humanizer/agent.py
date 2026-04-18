@@ -6,6 +6,7 @@ pipeline, future LangGraph nodes, and tests can all reuse the same logic.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -132,48 +133,29 @@ async def run_humanizer_pipeline(
     perplexity_before_scores: list[float] = []
     perplexity_after_scores: list[float] = []
     total_iterations = 0
-
-    for section_name in SECTION_ORDER:
-        original_text = section_texts[section_name]
-        outcome = await rewriter.humanize_section(
+    section_semaphore = asyncio.Semaphore(resolved_config.max_parallel_sections)
+    section_tasks = [
+        _humanize_section(
             section_name=section_name,
-            text=original_text,
+            original_text=section_texts[section_name],
             section_confidence=confidence_map.get(section_name),
             trace_id=resolved_trace_id,
+            rewriter=rewriter,
+            config=resolved_config,
             logger_=active_logger,
+            semaphore=section_semaphore,
         )
-        ai_before_scores.append(outcome.analysis_before.ai_pattern_score)
-        ai_after_scores.append(outcome.analysis_after.ai_pattern_score)
-        if outcome.section_perplexity_before.available:
-            perplexity_before_scores.append(outcome.section_perplexity_before.value)
-        if outcome.section_perplexity_after.available:
-            perplexity_after_scores.append(outcome.section_perplexity_after.value)
-        total_iterations += outcome.iterations
-
-        paragraph_reports = _build_paragraph_reports(outcome)
-        passed_threshold = outcome.analysis_after.ai_pattern_score <= resolved_config.ai_pattern_threshold
-        needs_writer_loopback = outcome.analysis_after.ai_pattern_score >= resolved_config.writer_loopback_threshold
-        needs_graph_retry = not passed_threshold and not needs_writer_loopback
-
-        report = SectionHumanizationReport(
-            section_name=section_name,
-            original_text=original_text,
-            final_text=outcome.text,
-            original_perplexity=outcome.section_perplexity_before.value if outcome.section_perplexity_before.available else 0.0,
-            final_perplexity=outcome.section_perplexity_after.value if outcome.section_perplexity_after.available else 0.0,
-            detected_patterns=outcome.analysis_after.detected_patterns,
-            paragraph_reports=paragraph_reports,
-            rewrite_iterations=outcome.iterations,
-            passed_threshold=passed_threshold,
-            needs_graph_retry=needs_graph_retry,
-            needs_writer_loopback=needs_writer_loopback,
-        )
-        humanized_sections[section_name] = HumanizedSection(
-            section_name=section_name,
-            text=outcome.text,
-            diff_summary=build_diff_summary(original_text, outcome.text),
-            report=report,
-        )
+        for section_name in SECTION_ORDER
+    ]
+    for humanized_section, metrics in await asyncio.gather(*section_tasks):
+        humanized_sections[humanized_section.section_name] = humanized_section
+        ai_before_scores.append(metrics["ai_before"])
+        ai_after_scores.append(metrics["ai_after"])
+        if metrics["perplexity_before_available"]:
+            perplexity_before_scores.append(metrics["perplexity_before"])
+        if metrics["perplexity_after_available"]:
+            perplexity_after_scores.append(metrics["perplexity_after"])
+        total_iterations += int(metrics["iterations"])
 
     final_section_texts = {
         section_name: section.text
@@ -327,6 +309,63 @@ def _normalize_section_confidences(value: dict[str, float] | None) -> dict[str, 
         if 0.0 <= bounded <= 1.0:
             normalized[str(key)] = bounded
     return normalized
+
+
+async def _humanize_section(
+    *,
+    section_name: str,
+    original_text: str,
+    section_confidence: float | None,
+    trace_id: str,
+    rewriter: HybridSectionRewriter,
+    config: HumanizerConfig,
+    logger_: logging.Logger,
+    semaphore: asyncio.Semaphore,
+) -> tuple[HumanizedSection, dict[str, float | int | bool]]:
+    async with semaphore:
+        outcome = await rewriter.humanize_section(
+            section_name=section_name,
+            text=original_text,
+            section_confidence=section_confidence,
+            trace_id=trace_id,
+            logger_=logger_,
+        )
+
+    paragraph_reports = _build_paragraph_reports(outcome)
+    passed_threshold = outcome.analysis_after.ai_pattern_score <= config.ai_pattern_threshold
+    needs_writer_loopback = outcome.analysis_after.ai_pattern_score >= config.writer_loopback_threshold
+    needs_graph_retry = not passed_threshold and not needs_writer_loopback
+
+    report = SectionHumanizationReport(
+        section_name=section_name,
+        original_text=original_text,
+        final_text=outcome.text,
+        original_perplexity=outcome.section_perplexity_before.value if outcome.section_perplexity_before.available else 0.0,
+        final_perplexity=outcome.section_perplexity_after.value if outcome.section_perplexity_after.available else 0.0,
+        detected_patterns=outcome.analysis_after.detected_patterns,
+        paragraph_reports=paragraph_reports,
+        rewrite_iterations=outcome.iterations,
+        passed_threshold=passed_threshold,
+        needs_graph_retry=needs_graph_retry,
+        needs_writer_loopback=needs_writer_loopback,
+    )
+    return (
+        HumanizedSection(
+            section_name=section_name,
+            text=outcome.text,
+            diff_summary=build_diff_summary(original_text, outcome.text),
+            report=report,
+        ),
+        {
+            "ai_before": outcome.analysis_before.ai_pattern_score,
+            "ai_after": outcome.analysis_after.ai_pattern_score,
+            "perplexity_before": outcome.section_perplexity_before.value,
+            "perplexity_after": outcome.section_perplexity_after.value,
+            "perplexity_before_available": outcome.section_perplexity_before.available,
+            "perplexity_after_available": outcome.section_perplexity_after.available,
+            "iterations": outcome.iterations,
+        },
+    )
 
 
 def _merge_confidences_from_written_draft(

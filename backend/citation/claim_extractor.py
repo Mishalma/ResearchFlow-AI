@@ -22,6 +22,7 @@ def extract_claim_queries(
     structured_draft: StructuredPaperDraft | None = None,
     paper_topic: str | None = None,
     paper_domain: str | None = None,
+    max_claims_per_section: int | None = None,
     logger_: logging.Logger | None = None,
 ) -> dict[str, list[ClaimQuery]]:
     active_logger = logger_ or logger
@@ -63,6 +64,13 @@ def extract_claim_queries(
                     notes=_build_claim_notes(claim, paper_topic, paper_domain),
                 )
             )
+
+        if max_claims_per_section is not None and len(claim_queries) > max_claims_per_section:
+            claim_queries = _prioritize_claims(claim_queries, limit=max_claims_per_section)
+            claim_queries = [
+                claim.model_copy(update={"claim_id": f"{section_name}-claim-{index:03d}"})
+                for index, claim in enumerate(claim_queries, start=1)
+            ]
 
         extracted[section_name] = claim_queries
         active_logger.info(
@@ -159,3 +167,36 @@ def _build_structured_span_lookup(structured_draft: StructuredPaperDraft | None)
                 "relevance_score": span.relevance_score,
             }
     return lookup
+
+
+def _prioritize_claims(claims: list[ClaimQuery], *, limit: int) -> list[ClaimQuery]:
+    prioritized = sorted(
+        claims,
+        key=lambda claim: (
+            _claim_priority(claim),
+            len(claim.source_spans),
+            len(claim.claim_text),
+        ),
+        reverse=True,
+    )
+    return prioritized[:limit]
+
+
+def _claim_priority(claim: ClaimQuery) -> float:
+    priority = float(claim.confidence)
+    if claim.evidence_class == "evidence_backed":
+        priority += 0.3
+    elif claim.evidence_class == "inferred":
+        priority -= 0.12
+    elif claim.evidence_class == "hedged":
+        priority -= 0.08
+
+    if claim.claim_type in {
+        "prior_work_claim",
+        "comparative_state_of_the_art_claim",
+        "methodology_provenance_claim",
+        "dataset_tool_claim",
+        "domain_fact_claim",
+    }:
+        priority += 0.12
+    return priority

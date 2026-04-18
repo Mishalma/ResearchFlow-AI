@@ -33,6 +33,7 @@ class WritingConfig:
     preferred_title_max_words: int = 14
     diversity_backend: str = "deterministic"
     reducer_model: str | None = None
+    max_parallel_section_writes: int = 4
     low_confidence_threshold: float = 0.4
     medium_confidence_threshold: float = 0.65
     high_confidence_threshold: float = 0.85
@@ -54,4 +55,5 @@ class WritingConfig:
             preferred_title_max_words=max(6, _get_int("WRITING_PREFERRED_TITLE_MAX_WORDS", 14)),
             diversity_backend=os.getenv("WRITING_DIVERSITY_BACKEND", "deterministic").strip() or "deterministic",
             reducer_model=os.getenv("WRITING_MODEL_NAME", "").strip() or resolved_settings.vertex_model,
+            max_parallel_section_writes=max(1, _get_int("WRITING_MAX_PARALLEL_SECTIONS", 4)),
         )

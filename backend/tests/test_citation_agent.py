@@ -403,6 +403,9 @@ def test_graceful_error_when_no_citations_can_be_found():
 
     assert result.error is not None
     assert result.error.code == "no_citations_found"
+    assert result.citation_draft is not None
+    assert result.paper_snapshot is not None
+    assert result.paper_snapshot.references == ["[1] Reference curation pending manual review."]
 
 
 def test_compatibility_wrapper_returns_legacy_snapshot(monkeypatch: pytest.MonkeyPatch):

@@ -6,6 +6,7 @@ future LangGraph nodes, and unit tests can all reuse the same logic.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -162,39 +163,44 @@ async def run_structuring_pipeline(
         )
 
     section_start = perf_counter()
-    section_summaries: dict[str, SectionSkeleton] = {}
-    evidence_notes: dict[str, list] = {}
-    for section_name in REQUIRED_STRUCTURING_SECTIONS:
-        ranked_chunks = retrieval_results.get(section_name)
-        candidates = ranked_chunks.candidates if ranked_chunks is not None else []
-        notes = map_chunks_to_evidence_notes(
+    section_semaphore = asyncio.Semaphore(resolved_config.max_parallel_section_reductions)
+    section_tasks = [
+        _build_section_result(
             section_name=section_name,
-            ranked_chunks=candidates,
-            config=resolved_config,
-        )
-        evidence_notes[section_name] = notes
-        section_summaries[section_name] = await build_section_skeleton(
-            section_name=section_name,
-            notes=notes,
-            ranked_chunks=candidates,
+            retrieval_results=retrieval_results,
             reducer=active_reducer,
             context=context,
             config=resolved_config,
+            semaphore=section_semaphore,
         )
-    timings_ms["summarization"] = round((perf_counter() - section_start) * 1000, 2)
-
+        for section_name in REQUIRED_STRUCTURING_SECTIONS
+    ]
     title_notes = map_chunks_to_evidence_notes(
         section_name="title",
         ranked_chunks=retrieval_results.get("title").candidates if retrieval_results.get("title") else [],
         config=resolved_config,
     )
-    titles = await build_title_candidates(
-        source_text=normalized_source,
-        title_notes=title_notes,
-        reducer=active_reducer,
-        context=context,
-        config=resolved_config,
+    title_task = asyncio.create_task(
+        build_title_candidates(
+            source_text=normalized_source,
+            title_notes=title_notes,
+            reducer=active_reducer,
+            context=context,
+            config=resolved_config,
+        )
     )
+    section_results = await asyncio.gather(*section_tasks)
+    section_summaries: dict[str, SectionSkeleton] = {
+        section_name: section_skeleton
+        for section_name, _notes, section_skeleton in section_results
+    }
+    evidence_notes: dict[str, list] = {
+        section_name: notes
+        for section_name, notes, _section_skeleton in section_results
+    }
+    timings_ms["summarization"] = round((perf_counter() - section_start) * 1000, 2)
+
+    titles = await title_task
 
     global_confidence = round(
         mean(section.confidence for section in section_summaries.values()),
@@ -336,6 +342,34 @@ def _resolve_max_input_chars(*, requested: object | None, settings: Settings) ->
     if requested_int <= 0:
         return settings.ai_source_text_max_chars
     return min(requested_int, settings.ai_source_text_max_chars)
+
+
+async def _build_section_result(
+    *,
+    section_name: str,
+    retrieval_results,
+    reducer: SectionReducer | None,
+    context: dict[str, str],
+    config: StructuringConfig,
+    semaphore: asyncio.Semaphore,
+) -> tuple[str, list, SectionSkeleton]:
+    ranked_chunks = retrieval_results.get(section_name)
+    candidates = ranked_chunks.candidates if ranked_chunks is not None else []
+    notes = map_chunks_to_evidence_notes(
+        section_name=section_name,
+        ranked_chunks=candidates,
+        config=config,
+    )
+    async with semaphore:
+        section_skeleton = await build_section_skeleton(
+            section_name=section_name,
+            notes=notes,
+            ranked_chunks=candidates,
+            reducer=reducer,
+            context=context,
+            config=config,
+        )
+    return section_name, notes, section_skeleton
 
 
 def _build_paper_snapshot(

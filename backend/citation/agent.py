@@ -23,6 +23,8 @@ from writing.schemas import WrittenPaperDraft, build_paper_snapshot
 
 logger = logging.getLogger("papereasy.backend.citation.agent")
 
+MANUAL_REVIEW_REFERENCE = "[1] Reference curation pending manual review."
+
 try:  # pragma: no cover - environment dependent import
     from google import genai as _google_genai  # noqa: F401
     from google.adk.agents import BaseAgent as ADKBaseAgent
@@ -105,13 +107,32 @@ async def run_citation_pipeline(
         logger_=active_logger,
     )
     if not citation_draft.bibliography:
-        return _build_error_result(
-            code="no_citations_found",
-            message="The citation agent could not validate any external scholarly references for the current draft.",
+        paper_snapshot = build_paper_snapshot(
+            title=parsed_written_draft.title,
+            abstract=parsed_written_draft.abstract.text,
+            keywords=list(parsed_written_draft.metadata.get("keywords", fallback_keywords or [])),
+            sections=parsed_written_draft.sections,
+            references=[MANUAL_REVIEW_REFERENCE],
+        )
+        return CitationAgentResult(
+            citation_draft=citation_draft,
+            paper_snapshot=paper_snapshot,
+            error=CitationAgentError(
+                code="no_citations_found",
+                message="The citation agent could not validate any external scholarly references for the current draft.",
+                trace_id=resolved_trace_id,
+                details={
+                    "matched_claim_count": citation_draft.matched_claim_count,
+                    "provider_summary": citation_draft.provider_summary,
+                    "manual_review_required": True,
+                },
+            ),
             trace_id=resolved_trace_id,
-            details={
-                "matched_claim_count": citation_draft.matched_claim_count,
+            metadata={
                 "provider_summary": citation_draft.provider_summary,
+                "matched_claim_count": citation_draft.matched_claim_count,
+                "bibliography_count": citation_draft.bibliography_count,
+                "manual_review_required": True,
             },
         )
 

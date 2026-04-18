@@ -203,6 +203,7 @@ async def run_originality_pipeline(
         manual_review_found=manual_review_found,
         config=resolved_config,
     )
+    provider_review_pending = _is_provider_only_manual_review(reports)
     report = OriginalityPaperReport(
         sections=reports,
         global_originality_score=global_originality_score,
@@ -223,6 +224,7 @@ async def run_originality_pipeline(
             "provider_used": _select_provider_used(scan_metadata.get("provider_summary", {})),
             "section_status_counts": report.metadata.get("section_status_counts", {}),
             "decision": decision.graph_action,
+            "provider_review_pending": provider_review_pending,
         },
     )
 
@@ -376,6 +378,13 @@ def _build_decision(
     manual_review_found: bool,
     config: OriginalityConfig,
 ) -> OriginalityDecision:
+    if _is_provider_only_manual_review(reports):
+        return OriginalityDecision(
+            graph_action="needs_manual_review",
+            approved=True,
+            reason_codes=["originality_provider_review_pending"],
+            summary="Originality providers require manual follow-up, but no concrete overlap findings blocked approval.",
+        )
     if blocking_issue_found or manual_review_found:
         return OriginalityDecision(
             graph_action="needs_manual_review",
@@ -398,6 +407,19 @@ def _build_decision(
         reason_codes=["originality_passed"],
         summary="The manuscript passed the final originality and compliance gate.",
     )
+
+
+def _is_provider_only_manual_review(reports: dict[str, SectionOriginalityReport]) -> bool:
+    review_required = False
+    for report in reports.values():
+        if report.status in {"blocked", "needs_manual_review"} and report.spans:
+            return False
+        if report.status == "provider_review_required":
+            review_required = True
+            continue
+        if report.status not in {"clean", "clean_with_notes"}:
+            return False
+    return review_required
 
 
 def _select_provider_used(provider_summary: dict[str, int]) -> str | None:

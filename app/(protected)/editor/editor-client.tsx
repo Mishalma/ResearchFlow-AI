@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertCircle,
   ArrowLeft,
   CheckCircle2,
+  Download,
   FileImage,
   FileText,
   Loader2,
@@ -19,17 +20,23 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { IeeeManuscriptPreview } from "@/components/editor/ieee-manuscript-preview";
 import {
   buildFigureAssetUrl,
+  downloadBlob,
+  exportProjectDocument,
   fetchProject,
   fetchProjects,
   saveProject,
   uploadProjectFigure,
+  type ExportFormat,
   type FigureSection,
   type ProjectResponse,
   type ProjectSummary,
 } from "@/lib/backend";
+import { parseIeeeManuscript } from "@/lib/ieee-manuscript";
 
 const FIGURE_SECTION_OPTIONS: Array<{
   value: FigureSection;
@@ -40,6 +47,7 @@ const FIGURE_SECTION_OPTIONS: Array<{
   { value: "methodology", label: "Methodology" },
   { value: "results", label: "Results" },
   { value: "discussion", label: "Discussion" },
+  { value: "limitations", label: "Limitations" },
   { value: "conclusion", label: "Conclusion" },
 ];
 
@@ -63,7 +71,10 @@ Write the results here.
 V. DISCUSSION
 Write the discussion here.
 
-VI. CONCLUSION
+VI. LIMITATIONS
+Write the limitations here.
+
+VII. CONCLUSION
 Write the conclusion here.
 
 References
@@ -117,14 +128,21 @@ export default function EditorClientPage({
   const [figureCaption, setFigureCaption] = useState("");
   const [figureSection, setFigureSection] =
     useState<FigureSection>("methodology");
+  const [manuscriptView, setManuscriptView] = useState<"preview" | "editor">(
+    "preview",
+  );
   const [isProjectsLoading, setIsProjectsLoading] = useState(true);
   const [isProjectLoading, setIsProjectLoading] = useState(Boolean(projectId));
   const [isSaving, setIsSaving] = useState(false);
   const [isUploadingFigure, setIsUploadingFigure] = useState(false);
+  const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(
+    null,
+  );
   const [isDirty, setIsDirty] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [figureError, setFigureError] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const refreshProjects = useCallback(async (signal?: AbortSignal) => {
     const projectList = await fetchProjects(signal);
@@ -242,7 +260,18 @@ export default function EditorClientPage({
     setIsDirty(true);
     setSaveError(null);
     setFigureError(null);
+    setExportError(null);
   };
+
+  const manuscriptPreview = useMemo(
+    () =>
+      parseIeeeManuscript(
+        manuscriptValue,
+        currentProject?.paper?.keywords ?? [],
+      ),
+    [currentProject?.paper?.keywords, manuscriptValue],
+  );
+  const authorLines = useMemo(() => textToAuthors(authorsValue), [authorsValue]);
 
   const persistCurrentProject = useCallback(async () => {
     const normalizedTitle = titleValue.trim();
@@ -346,6 +375,34 @@ export default function EditorClientPage({
     }
   };
 
+  const handleExport = async (format: ExportFormat) => {
+    setExportError(null);
+
+    let targetProject = currentProject;
+
+    try {
+      if (isDirty || !targetProject || !selectedProjectId) {
+        targetProject = await persistCurrentProject();
+      }
+
+      if (!targetProject) {
+        throw new Error("Save the paper before downloading it.");
+      }
+
+      setExportingFormat(format);
+      const exportResult = await exportProjectDocument(targetProject.id, format);
+      downloadBlob(exportResult.blob, exportResult.fileName);
+    } catch (error) {
+      setExportError(
+        error instanceof Error
+          ? error.message
+          : "Unable to prepare this download right now.",
+      );
+    } finally {
+      setExportingFormat(null);
+    }
+  };
+
   return (
     <div className="flex min-h-[calc(100vh-8rem)] flex-col gap-6 animate-in fade-in duration-500">
       <div className="flex flex-col gap-4 border-b border-white/10 bg-black/20 px-4 py-4 backdrop-blur-lg md:flex-row md:items-center md:justify-between md:px-6">
@@ -364,8 +421,8 @@ export default function EditorClientPage({
               Paper Editor
             </h1>
             <p className="text-sm text-indigo-200/70">
-              Review the complete IEEE paper, edit the manuscript, and attach
-              figures.
+              Review the complete IEEE paper, switch to an IEEE-style preview,
+              export downloads, and attach figures.
             </p>
           </div>
         </div>
@@ -414,6 +471,29 @@ export default function EditorClientPage({
               </>
             )}
           </Button>
+
+          {(["pdf", "docx", "latex"] as ExportFormat[]).map((format) => (
+            <Button
+              key={format}
+              size="sm"
+              variant="ghost"
+              onClick={() => void handleExport(format)}
+              disabled={isSaving || exportingFormat !== null}
+              className="border border-white/10 bg-white/5 text-white hover:bg-white/10"
+            >
+              {exportingFormat === format ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Preparing {format.toUpperCase()}
+                </>
+              ) : (
+                <>
+                  <Download className="mr-2 h-4 w-4" />
+                  {format.toUpperCase()}
+                </>
+              )}
+            </Button>
+          ))}
         </div>
       </div>
 
@@ -519,31 +599,86 @@ export default function EditorClientPage({
               <h2 className="font-semibold">Complete Paper</h2>
             </div>
             <p className="mb-4 text-sm text-indigo-200/70">
-              Edit the full IEEE manuscript here. Keep the headings like
-              <span className="mx-1 font-semibold text-indigo-100">
-                Abstract
-              </span>
-              ,
-              <span className="mx-1 font-semibold text-indigo-100">
-                Index Terms
-              </span>
-              , and the numbered section titles intact so the backend can save
-              the paper correctly.
+              Preview the manuscript in an IEEE-style two-column layout, then
+              switch back to source editing whenever you need to adjust the raw
+              headings and content.
             </p>
-            <Textarea
-              value={manuscriptValue}
-              onChange={(event) => {
-                setManuscriptValue(event.target.value);
-                markDirty();
-              }}
-              placeholder="The generated paper will appear here..."
-              className="min-h-[640px] resize-y border-white/10 bg-white/5 font-serif leading-8 text-zinc-100 placeholder:text-zinc-500"
-            />
+            <Tabs
+              value={manuscriptView}
+              onValueChange={(value) =>
+                setManuscriptView(value as "preview" | "editor")
+              }
+              className="gap-4"
+            >
+              <TabsList
+                variant="line"
+                className="rounded-xl border border-white/10 bg-white/5 p-1"
+              >
+                <TabsTrigger
+                  value="preview"
+                  className="rounded-lg px-4 text-zinc-300 data-active:text-white"
+                >
+                  IEEE Preview
+                </TabsTrigger>
+                <TabsTrigger
+                  value="editor"
+                  className="rounded-lg px-4 text-zinc-300 data-active:text-white"
+                >
+                  Source Editor
+                </TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="preview" className="space-y-4">
+                <div className="rounded-2xl border border-indigo-400/20 bg-indigo-500/10 px-4 py-3 text-sm text-indigo-100">
+                  This preview follows an IEEE conference-style reading surface:
+                  two columns, single-spaced body copy, and Times-style 10pt
+                  typography. Use the download buttons above for PDF, DOCX, or
+                  LaTeX exports.
+                </div>
+                <IeeeManuscriptPreview
+                  title={titleValue}
+                  authors={authorLines}
+                  preview={manuscriptPreview}
+                  figures={currentProject?.figures ?? []}
+                  projectId={currentProject?.id ?? null}
+                />
+              </TabsContent>
+
+              <TabsContent value="editor" className="space-y-4">
+                <div className="text-sm text-indigo-200/70">
+                  Keep the headings like
+                  <span className="mx-1 font-semibold text-indigo-100">
+                    Abstract
+                  </span>
+                  ,
+                  <span className="mx-1 font-semibold text-indigo-100">
+                    Index Terms
+                  </span>
+                  , and the numbered section titles intact so the backend can
+                  save the paper correctly.
+                </div>
+                <Textarea
+                  value={manuscriptValue}
+                  onChange={(event) => {
+                    setManuscriptValue(event.target.value);
+                    markDirty();
+                  }}
+                  placeholder="The generated paper will appear here..."
+                  className="min-h-[640px] resize-y border-white/10 bg-white/5 font-serif leading-8 text-zinc-100 placeholder:text-zinc-500"
+                />
+              </TabsContent>
+            </Tabs>
           </Card>
 
           {saveError ? (
             <Card className="border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100 shadow-none">
               {saveError}
+            </Card>
+          ) : null}
+
+          {exportError ? (
+            <Card className="border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100 shadow-none">
+              {exportError}
             </Card>
           ) : null}
 

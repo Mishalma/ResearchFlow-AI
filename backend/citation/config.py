@@ -29,7 +29,8 @@ class CitationConfig:
     crossref_mailto: str | None = None
     http_timeout_seconds: int = 15
     max_results_per_provider: int = 8
-    max_queries_per_claim: int = 3
+    max_queries_per_claim: int = 2
+    max_claims_per_section: int = 3
     max_parallel_claims: int = 6
     max_parallel_requests_per_claim: int = 4
     max_selected_citations_per_claim: int = 2
@@ -62,7 +63,8 @@ class CitationConfig:
             crossref_mailto=os.getenv("CROSSREF_MAILTO", "").strip() or os.getenv("NCBI_EMAIL", "").strip() or None,
             http_timeout_seconds=max(5, int(os.getenv("CITATION_HTTP_TIMEOUT_SECONDS", "15"))),
             max_results_per_provider=max(3, int(os.getenv("CITATION_PROVIDER_RESULT_LIMIT", str(max(6, citation_limit * 2))))),
-            max_queries_per_claim=max(1, int(os.getenv("CITATION_MAX_QUERIES_PER_CLAIM", "3"))),
+            max_queries_per_claim=max(1, int(os.getenv("CITATION_MAX_QUERIES_PER_CLAIM", "2"))),
+            max_claims_per_section=max(1, int(os.getenv("CITATION_MAX_CLAIMS_PER_SECTION", "3"))),
             max_parallel_claims=max(1, int(os.getenv("CITATION_MAX_PARALLEL_CLAIMS", "6"))),
             max_parallel_requests_per_claim=max(1, int(os.getenv("CITATION_MAX_PARALLEL_REQUESTS_PER_CLAIM", "4"))),
             max_selected_citations_per_claim=max(1, min(3, int(os.getenv("CITATION_MAX_SELECTED_PER_CLAIM", str(min(2, citation_limit)))))),

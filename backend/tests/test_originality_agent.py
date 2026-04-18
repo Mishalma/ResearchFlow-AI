@@ -182,9 +182,11 @@ def test_both_providers_unavailable_routes_to_manual_review():
     )
 
     assert result.error is None
-    assert result.approved_snapshot is None
+    assert result.approved_snapshot is not None
     assert result.originality_report is not None
     assert result.originality_report.decision.graph_action == "needs_manual_review"
+    assert result.originality_report.decision.approved is True
+    assert result.metadata["provider_review_pending"] is True
 
 
 def test_chunked_section_scans_preserve_section_offsets():

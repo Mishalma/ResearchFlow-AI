@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 from core.config import Settings, get_settings
@@ -22,6 +23,7 @@ class StructuringConfig:
     section_names: tuple[str, ...] = field(default_factory=lambda: REQUIRED_STRUCTURING_SECTIONS)
     title_candidate_limit: int = 3
     max_key_points: int = 4
+    max_parallel_section_reductions: int = 4
 
     @property
     def chunk_size_chars(self) -> int:
@@ -36,4 +38,8 @@ class StructuringConfig:
         resolved_settings = settings or get_settings()
         return cls(
             reducer_model=resolved_settings.vertex_model,
+            max_parallel_section_reductions=max(
+                1,
+                int(os.getenv("STRUCTURING_MAX_PARALLEL_SECTIONS", "4")),
+            ),
         )

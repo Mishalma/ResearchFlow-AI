@@ -40,6 +40,7 @@ class HumanizerConfig:
     debug_logging: bool = False
     max_iterations: int = 2
     max_target_paragraphs_per_section: int = 2
+    max_parallel_sections: int = 4
     min_section_improvement: float = 0.03
     ai_pattern_threshold: float = 0.42
     writer_loopback_threshold: float = 0.72
@@ -65,6 +66,10 @@ class HumanizerConfig:
             max_target_paragraphs_per_section=max(
                 1,
                 _get_int("HUMANIZER_MAX_TARGET_PARAGRAPHS_PER_SECTION", 2),
+            ),
+            max_parallel_sections=max(
+                1,
+                _get_int("HUMANIZER_MAX_PARALLEL_SECTIONS", 4),
             ),
             min_section_improvement=max(
                 0.0,

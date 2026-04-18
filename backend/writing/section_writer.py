@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Protocol
@@ -178,38 +179,42 @@ async def write_paper(
         "config": config,
     }
 
-    title, title_notes, title_backend = await select_title(
-        structured_draft=structured_draft,
-        config=config,
-        vertex_client=vertex_client,
-        paper_topic=paper_topic,
-        paper_domain=paper_domain,
+    section_semaphore = asyncio.Semaphore(config.max_parallel_section_writes)
+    title_task = asyncio.create_task(
+        select_title(
+            structured_draft=structured_draft,
+            config=config,
+            vertex_client=vertex_client,
+            paper_topic=paper_topic,
+            paper_domain=paper_domain,
+        )
     )
+    section_tasks = {
+        section_name: asyncio.create_task(
+            _write_section_with_semaphore(
+                section_name=section_name,
+                skeleton=structured_draft.sections[section_name],
+                config=config,
+                context=context,
+                llm_generator=llm_generator,
+                deterministic_generator=deterministic_generator,
+                diversity_rewriter=diversity_rewriter,
+                semaphore=section_semaphore,
+            )
+        )
+        for section_name in ("abstract", *BODY_WRITING_SECTIONS)
+    }
+
+    title, title_notes, title_backend = await title_task
     active_logger.info("Writing trace %s selected title via %s.", trace_id, title_backend)
 
-    abstract_section, abstract_bundle, abstract_backend = await write_section(
-        section_name="abstract",
-        skeleton=structured_draft.sections["abstract"],
-        config=config,
-        context=context,
-        llm_generator=llm_generator,
-        deterministic_generator=deterministic_generator,
-        diversity_rewriter=diversity_rewriter,
-    )
+    abstract_section, abstract_bundle, abstract_backend = await section_tasks["abstract"]
 
     body_sections: dict[str, WrittenSection] = {}
     annotation_bundles: dict[str, AnnotationBundle] = {}
     generation_backends: dict[str, str] = {"title": title_backend, "abstract": abstract_backend}
     for section_name in BODY_WRITING_SECTIONS:
-        written_section, annotation_bundle, backend_name = await write_section(
-            section_name=section_name,
-            skeleton=structured_draft.sections[section_name],
-            config=config,
-            context=context,
-            llm_generator=llm_generator,
-            deterministic_generator=deterministic_generator,
-            diversity_rewriter=diversity_rewriter,
-        )
+        written_section, annotation_bundle, backend_name = await section_tasks[section_name]
         body_sections[section_name] = written_section
         annotation_bundles[section_name] = annotation_bundle
         generation_backends[section_name] = backend_name
@@ -333,6 +338,29 @@ async def write_section(
         revision_notes=revision_notes,
     )
     return written_section, annotation_bundle, generation_result.backend
+
+
+async def _write_section_with_semaphore(
+    *,
+    section_name: str,
+    skeleton: SectionSkeleton,
+    config: WritingConfig,
+    context: dict[str, object],
+    llm_generator: LLMSectionGenerator | None,
+    deterministic_generator: DeterministicSectionGenerator,
+    diversity_rewriter: DiversityRewriter | None,
+    semaphore: asyncio.Semaphore,
+) -> tuple[WrittenSection, AnnotationBundle, str]:
+    async with semaphore:
+        return await write_section(
+            section_name=section_name,
+            skeleton=skeleton,
+            config=config,
+            context=context,
+            llm_generator=llm_generator,
+            deterministic_generator=deterministic_generator,
+            diversity_rewriter=diversity_rewriter,
+        )
 
 
 async def select_title(

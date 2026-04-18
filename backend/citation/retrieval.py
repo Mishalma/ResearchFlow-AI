@@ -45,6 +45,7 @@ async def build_citation_draft(
         structured_draft=structured_draft,
         paper_topic=paper_topic,
         paper_domain=paper_domain,
+        max_claims_per_section=config.max_claims_per_section,
         logger_=active_logger,
     )
     query_plan = {

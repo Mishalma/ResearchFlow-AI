@@ -12,6 +12,7 @@ export type FigureSection =
   | "methodology"
   | "results"
   | "discussion"
+  | "limitations"
   | "conclusion";
 
 export type IEEESections = {
@@ -20,6 +21,7 @@ export type IEEESections = {
   methodology: string;
   results: string;
   discussion: string;
+  limitations: string;
   conclusion: string;
 };
 
