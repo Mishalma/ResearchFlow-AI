@@ -19,7 +19,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { IeeeManuscriptPreview } from "@/components/editor/ieee-manuscript-preview";
@@ -34,7 +33,6 @@ import {
   type ExportFormat,
   type FigureSection,
   type ProjectResponse,
-  type ProjectSummary,
 } from "@/lib/backend";
 import { parseIeeeManuscript } from "@/lib/ieee-manuscript";
 
@@ -85,19 +83,6 @@ type EditorClientPageProps = {
   title: string | null;
 };
 
-function formatDateTime(value: string | null | undefined) {
-  if (!value) {
-    return "Recently updated";
-  }
-
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return "Recently updated";
-  }
-
-  return parsed.toLocaleDateString();
-}
-
 function authorsToText(authors: string[]) {
   return authors.join("\n");
 }
@@ -114,7 +99,6 @@ export default function EditorClientPage({
   title,
 }: EditorClientPageProps) {
   const router = useRouter();
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [currentProject, setCurrentProject] = useState<ProjectResponse | null>(
     null,
   );
@@ -131,7 +115,6 @@ export default function EditorClientPage({
   const [manuscriptView, setManuscriptView] = useState<"preview" | "editor">(
     "preview",
   );
-  const [isProjectsLoading, setIsProjectsLoading] = useState(true);
   const [isProjectLoading, setIsProjectLoading] = useState(Boolean(projectId));
   const [isSaving, setIsSaving] = useState(false);
   const [isUploadingFigure, setIsUploadingFigure] = useState(false);
@@ -145,9 +128,7 @@ export default function EditorClientPage({
   const [exportError, setExportError] = useState<string | null>(null);
 
   const refreshProjects = useCallback(async (signal?: AbortSignal) => {
-    const projectList = await fetchProjects(signal);
-    setProjects(projectList);
-    return projectList;
+    return fetchProjects(signal);
   }, []);
 
   const applyProject = useCallback((project: ProjectResponse) => {
@@ -218,8 +199,6 @@ export default function EditorClientPage({
     const controller = new AbortController();
 
     async function initializeEditor() {
-      setIsProjectsLoading(true);
-
       try {
         const projectList = await refreshProjects(controller.signal);
         const targetProjectId = projectId ?? projectList[0]?.id ?? null;
@@ -240,14 +219,10 @@ export default function EditorClientPage({
         setPageError(
           error instanceof Error
             ? error.message
-            : "Unable to load saved papers right now.",
+            : "Unable to load your paper right now.",
         );
         resetToBlankDraft(title);
         setIsProjectLoading(false);
-      } finally {
-        if (!controller.signal.aborted) {
-          setIsProjectsLoading(false);
-        }
       }
     }
 
@@ -497,64 +472,22 @@ export default function EditorClientPage({
         </div>
       </div>
 
-      <div className="grid flex-1 gap-6 px-4 pb-8 md:px-6 xl:grid-cols-[280px_minmax(0,1fr)_360px]">
-        <Card className="border-white/10 bg-black/40 p-0 shadow-none backdrop-blur-xl">
-          <div className="border-b border-white/10 px-5 py-4">
-            <div className="flex items-center gap-2 text-white">
-              <FileText className="h-4 w-4 text-indigo-300" />
-              <h2 className="font-semibold">Saved Papers</h2>
-            </div>
-            <p className="mt-1 text-sm text-indigo-200/70">
-              Open an existing paper or start a fresh draft.
-            </p>
-          </div>
-
-          <ScrollArea className="h-[420px] xl:h-[calc(100vh-18rem)]">
-            <div className="space-y-2 p-4">
-              {isProjectsLoading ? (
-                <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-4 text-sm text-zinc-300">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading saved papers...
-                </div>
-              ) : projects.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-white/10 bg-white/5 px-4 py-6 text-sm text-zinc-400">
-                  No saved papers yet.
-                </div>
-              ) : (
-                projects.map((project) => {
-                  const isActive = selectedProjectId === project.id;
-
-                  return (
-                    <button
-                      key={project.id}
-                      type="button"
-                      onClick={() => void loadProjectById(project.id)}
-                      className={`w-full rounded-xl border px-4 py-3 text-left transition-all ${
-                        isActive
-                          ? "border-indigo-400/40 bg-indigo-500/15 text-white shadow-[0_0_18px_rgba(79,70,229,0.12)]"
-                          : "border-white/10 bg-white/5 text-zinc-300 hover:border-white/20 hover:bg-white/10"
-                      }`}
-                    >
-                      <p className="truncate text-sm font-semibold">
-                        {project.title}
-                      </p>
-                      <p className="mt-1 text-xs text-indigo-200/65">
-                        {formatDateTime(project.updated_at)}
-                      </p>
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          </ScrollArea>
-        </Card>
-
+      <div className="grid flex-1 gap-6 px-4 pb-8 md:px-6 xl:grid-cols-[minmax(0,1.45fr)_320px] 2xl:grid-cols-[minmax(0,1.6fr)_340px]">
         <div className="space-y-6">
           {pageError ? (
             <Card className="border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100 shadow-none">
               <div className="flex items-start gap-3">
                 <AlertCircle className="mt-0.5 h-5 w-5 text-rose-300" />
                 <p>{pageError}</p>
+              </div>
+            </Card>
+          ) : null}
+
+          {exportError ? (
+            <Card className="border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100 shadow-none">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="mt-0.5 h-5 w-5 text-rose-300" />
+                <p>{exportError}</p>
               </div>
             </Card>
           ) : null}
@@ -673,12 +606,6 @@ export default function EditorClientPage({
           {saveError ? (
             <Card className="border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100 shadow-none">
               {saveError}
-            </Card>
-          ) : null}
-
-          {exportError ? (
-            <Card className="border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-100 shadow-none">
-              {exportError}
             </Card>
           ) : null}
 

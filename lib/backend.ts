@@ -401,10 +401,19 @@ export async function exportProjectDocument(
 }
 
 export function downloadBlob(blob: Blob, fileName: string) {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return;
+  }
+
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = fileName;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
   anchor.click();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => {
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }, 1000);
 }
