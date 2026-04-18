@@ -27,11 +27,15 @@ def _export_response(exported_file):
     response = _download_response(
         content=exported_file.content,
         media_type=exported_file.media_type,
-        file_name=exported_file.artifact.file_name,
+        file_name=exported_file.file_name,
     )
-    response.headers["X-Export-Id"] = exported_file.artifact.id
-    response.headers["X-Export-Format"] = exported_file.artifact.format
-    response.headers["X-Export-Download-Url"] = exported_file.artifact.download_url
+    response.headers["X-Export-Format"] = exported_file.export_format
+    response.headers["X-Export-Persisted"] = "true" if exported_file.persisted else "false"
+    if exported_file.persistence_warning:
+        response.headers["X-Export-Warning"] = exported_file.persistence_warning
+    if exported_file.artifact:
+        response.headers["X-Export-Id"] = exported_file.artifact.id
+        response.headers["X-Export-Download-Url"] = exported_file.artifact.download_url
     return response
 
 

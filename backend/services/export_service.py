@@ -18,7 +18,7 @@ from app.services.project_service import (
     record_export,
 )
 from core.config import get_settings
-from core.exceptions import ExportDependencyError, ExportError
+from core.exceptions import ExportDependencyError, ExportError, PersistenceError
 from persistence import get_object_storage
 from services.latex_service import escape_latex, generate_latex
 
@@ -54,9 +54,13 @@ FIGURE_SECTION_KEYS = (
 
 @dataclass(frozen=True)
 class ExportedFile:
-    artifact: ExportArtifact
+    artifact: ExportArtifact | None
+    export_format: ExportFormat
     media_type: str
     content: bytes
+    file_name: str
+    persisted: bool = True
+    persistence_warning: str | None = None
 
 
 def _slugify(value: str) -> str:
@@ -235,26 +239,47 @@ def _store_export(
     artifact_id = str(uuid4())
     storage_key = f"outputs/{project.id}/{artifact_id}/{file_path.name}"
     object_storage = get_object_storage()
-    object_storage.upload_file(storage_key, file_path, content_type=media_type)
-    artifact = _create_artifact(
-        project_id=project.id,
-        artifact_id=artifact_id,
-        storage_key=storage_key,
-        export_format=export_format,
-        file_name=file_path.name,
-    )
+    content = file_path.read_bytes()
 
     try:
-        record_export(project.id, owner_uid, artifact)
-    except Exception:
-        object_storage.delete(storage_key)
-        raise
+        object_storage.upload_file(storage_key, file_path, content_type=media_type)
+        artifact = _create_artifact(
+            project_id=project.id,
+            artifact_id=artifact_id,
+            storage_key=storage_key,
+            export_format=export_format,
+            file_name=file_path.name,
+        )
+
+        try:
+            record_export(project.id, owner_uid, artifact)
+        except Exception:
+            object_storage.delete(storage_key)
+            raise
+    except PersistenceError as exc:
+        logger.warning(
+            "Export persistence unavailable for project %s (%s). Returning direct %s download without stored artifact.",
+            project.id,
+            exc,
+            export_format,
+        )
+        return ExportedFile(
+            artifact=None,
+            export_format=export_format,
+            media_type=media_type,
+            content=content,
+            file_name=file_path.name,
+            persisted=False,
+            persistence_warning=str(exc),
+        )
 
     logger.info("Generated %s export for project %s at %s", export_format, project.id, storage_key)
     return ExportedFile(
         artifact=artifact,
+        export_format=export_format,
         media_type=media_type,
-        content=file_path.read_bytes(),
+        content=content,
+        file_name=file_path.name,
     )
 
 
