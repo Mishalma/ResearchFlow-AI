@@ -55,6 +55,29 @@ export type FigureRecord = {
   uploaded_at: string;
 };
 
+export type GeneratedFigureSpec = {
+  id: string;
+  type: string;
+  section: FigureSection;
+  title: string;
+  caption: string;
+  data: Record<string, unknown>;
+  placement_hint: string;
+  figure_number: number | null;
+  table_number: number | null;
+  is_table: boolean;
+};
+
+export type GeneratedRenderedFigure = {
+  spec: GeneratedFigureSpec;
+  png_base64: string | null;
+  svg_content: string | null;
+  latex_block: string;
+  latex_table: string | null;
+  render_success: boolean;
+  render_error: string | null;
+};
+
 export type ExportArtifact = {
   id: string;
   format: "pdf" | "docx" | "latex";
@@ -99,6 +122,8 @@ export type ProjectResponse = {
   display_paper_text: string;
   paper: ResearchPaper | null;
   figures: FigureRecord[];
+  generated_figures: GeneratedRenderedFigure[];
+  generated_tables: GeneratedRenderedFigure[];
 };
 
 export type SaveProjectPayload = {

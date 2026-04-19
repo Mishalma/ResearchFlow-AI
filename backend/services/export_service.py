@@ -5,6 +5,7 @@ import logging
 import re
 import shutil
 import subprocess
+from collections.abc import Iterable
 from io import BytesIO
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -160,6 +161,8 @@ def _stage_figures(project: ProjectRecord, work_dir: Path):
 
     for entry in project.generated_tables:
         if not isinstance(entry, dict):
+            continue
+        if not entry.get("render_success"):
             continue
         spec = entry.get("spec") or {}
         if not isinstance(spec, dict):
@@ -486,7 +489,10 @@ def export_project_pdf(project_id: str, owner_uid: str) -> ExportedFile:
 
 def _append_generated_table(document, spec: dict[str, object]) -> None:
     headers = [str(value) for value in (spec.get("data", {}) or {}).get("headers", [])]
-    rows = [[str(cell) for cell in row] for row in (spec.get("data", {}) or {}).get("rows", [])]
+    rows = _normalize_table_rows_for_docx(
+        (spec.get("data", {}) or {}).get("rows", []),
+        column_count=len(headers),
+    )
     if not headers:
         return
 
@@ -503,3 +509,25 @@ def _append_generated_table(document, spec: dict[str, object]) -> None:
                 cells[index].text = value
 
     document.add_paragraph(str(spec.get("caption", "")).strip(), style="Caption")
+
+
+def _normalize_table_rows_for_docx(rows: object, *, column_count: int) -> list[list[str]]:
+    normalized_rows: list[list[str]] = []
+    if not isinstance(rows, Iterable) or isinstance(rows, (str, bytes, dict)):
+        return normalized_rows
+
+    for row in rows:
+        if isinstance(row, dict):
+            values = [str(value) for value in row.values()]
+        elif isinstance(row, Iterable) and not isinstance(row, (str, bytes)):
+            values = [str(cell) for cell in row]
+        else:
+            values = [str(row)]
+
+        if column_count > 0:
+            if len(values) < column_count:
+                values.extend([""] * (column_count - len(values)))
+            elif len(values) > column_count:
+                values = values[:column_count]
+        normalized_rows.append(values)
+    return normalized_rows

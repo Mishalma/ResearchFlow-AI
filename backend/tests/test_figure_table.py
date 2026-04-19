@@ -129,6 +129,24 @@ def test_table_renderer_returns_valid_rendered_figure():
     assert "\\begin{table}" in rendered.latex_block
 
 
+def test_table_renderer_handles_scalar_rows():
+    generator = FigureGenerator()
+    spec = FigureSpec(
+        id="tab1",
+        type=FigureType.TABLE,
+        section="results",
+        title="Results table",
+        caption="Table I. Scalar summary.",
+        data={"headers": ["Metric", "Value"], "rows": [95, 93]},
+        placement_hint="The system achieved 95% accuracy on the benchmark dataset.",
+        is_table=True,
+        table_number=1,
+    )
+    rendered = asyncio.run(generator.render_one(spec))
+    assert rendered.render_success
+    assert "95 &" in rendered.latex_block or "95" in rendered.latex_block
+
+
 def test_injector_is_idempotent():
     injector = ManuscriptInjector()
     text = (
@@ -277,6 +295,22 @@ def test_formatting_helper_injects_latex_blocks():
     )
     assert "\\begin{figure}" in latex
     assert "Results sentence." in latex
+
+
+def test_formatting_html_helper_handles_scalar_table_rows():
+    from formatting.utils import _html_block_for_asset
+
+    html = _html_block_for_asset(
+        {
+            "caption": "Table I. Scalar summary.",
+            "spec": {
+                "is_table": True,
+                "data": {"headers": ["Metric", "Value"], "rows": [95, 93]},
+            },
+        }
+    )
+    assert "<table>" in html
+    assert "95" in html
 
 
 def test_dispatch_figure_table_stage_is_non_blocking_on_error():

@@ -7,6 +7,7 @@ import base64
 import io
 import logging
 import math
+from collections.abc import Iterable
 from typing import Callable
 
 from figure_table.models import FigureSpec, FigureType, RenderedFigure
@@ -195,7 +196,7 @@ class FigureGenerator:
     def _render_table(self, spec: FigureSpec) -> RenderedFigure:
         try:
             headers = [str(item) for item in spec.data.get("headers", [])]
-            rows = [[str(value) for value in row] for row in spec.data.get("rows", [])]
+            rows = self._normalize_table_rows(spec.data.get("rows", []), column_count=len(headers))
             if not headers:
                 raise ValueError("table requires headers")
             column_spec = self._infer_table_alignment(headers=headers, rows=rows)
@@ -422,6 +423,27 @@ class FigureGenerator:
                     break
             alignments.append("c" if is_numeric else "l")
         return " ".join(alignments)
+
+    def _normalize_table_rows(self, rows: object, *, column_count: int) -> list[list[str]]:
+        normalized_rows: list[list[str]] = []
+        if not isinstance(rows, Iterable) or isinstance(rows, (str, bytes, dict)):
+            return normalized_rows
+
+        for row in rows:
+            if isinstance(row, dict):
+                values = [str(value) for value in row.values()]
+            elif isinstance(row, Iterable) and not isinstance(row, (str, bytes)):
+                values = [str(value) for value in row]
+            else:
+                values = [str(row)]
+
+            if column_count > 0:
+                if len(values) < column_count:
+                    values.extend([""] * (column_count - len(values)))
+                elif len(values) > column_count:
+                    values = values[:column_count]
+            normalized_rows.append(values)
+        return normalized_rows
 
     def _flowchart_patch(self, patches, *, x: float, y: float, shape: str):
         if shape == "diamond":

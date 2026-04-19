@@ -247,6 +247,8 @@ export default function EditorClientPage({
     [currentProject?.paper?.keywords, manuscriptValue],
   );
   const authorLines = useMemo(() => textToAuthors(authorsValue), [authorsValue]);
+  const generatedFigureCards = currentProject?.generated_figures ?? [];
+  const generatedTableCards = currentProject?.generated_tables ?? [];
 
   const persistCurrentProject = useCallback(async () => {
     const normalizedTitle = titleValue.trim();
@@ -573,6 +575,8 @@ export default function EditorClientPage({
                   authors={authorLines}
                   preview={manuscriptPreview}
                   figures={currentProject?.figures ?? []}
+                  generatedFigures={generatedFigureCards}
+                  generatedTables={generatedTableCards}
                   projectId={currentProject?.id ?? null}
                 />
               </TabsContent>
@@ -686,6 +690,54 @@ export default function EditorClientPage({
           ) : null}
 
           <div className="mt-5 space-y-3">
+            {generatedFigureCards.length || generatedTableCards.length ? (
+              <>
+                {generatedFigureCards.map((figure) => (
+                  <div
+                    key={figure.spec.id}
+                    className="overflow-hidden rounded-2xl border border-emerald-400/20 bg-emerald-500/5"
+                  >
+                    {figure.png_base64 ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={`data:image/png;base64,${figure.png_base64}`}
+                        alt={figure.spec.caption}
+                        className="h-36 w-full object-contain bg-white/80"
+                      />
+                    ) : null}
+                    <div className="space-y-1 p-3">
+                      <p className="text-xs uppercase tracking-[0.2em] text-emerald-200/70">
+                        Generated figure
+                      </p>
+                      <p className="text-sm font-semibold text-white">
+                        {figure.spec.caption}
+                      </p>
+                      <p className="text-xs uppercase tracking-[0.2em] text-indigo-200/60">
+                        Attached to {figure.spec.section.replace("_", " ")}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+
+                {generatedTableCards.map((table) => (
+                  <div
+                    key={table.spec.id}
+                    className="overflow-hidden rounded-2xl border border-sky-400/20 bg-sky-500/5 p-3"
+                  >
+                    <p className="text-xs uppercase tracking-[0.2em] text-sky-200/70">
+                      Generated table
+                    </p>
+                    <p className="mt-1 text-sm font-semibold text-white">
+                      {table.spec.caption}
+                    </p>
+                    <p className="mt-1 text-xs uppercase tracking-[0.2em] text-indigo-200/60">
+                      Attached to {table.spec.section.replace("_", " ")}
+                    </p>
+                  </div>
+                ))}
+              </>
+            ) : null}
+
             {currentProject?.figures.length ? (
               currentProject.figures.map((figure) => (
                 <div
@@ -710,7 +762,9 @@ export default function EditorClientPage({
               ))
             ) : (
               <div className="rounded-xl border border-dashed border-white/10 bg-white/5 px-4 py-6 text-sm text-zinc-400">
-                No figures attached yet.
+                {generatedFigureCards.length || generatedTableCards.length
+                  ? "No uploaded figures attached yet."
+                  : "No figures attached yet."}
               </div>
             )}
           </div>

@@ -256,6 +256,8 @@ def _build_formatting_visual_payload(
     tables: dict[str, list[dict[str, object]]] = {}
 
     for entry in output.figures:
+        if not entry.render_success:
+            continue
         asset_path = (
             output.extraction_metadata.get("asset_paths", {}).get(entry.spec.id)
             if isinstance(output.extraction_metadata, dict)
@@ -277,6 +279,8 @@ def _build_formatting_visual_payload(
         )
 
     for entry in output.tables:
+        if not entry.render_success:
+            continue
         tables.setdefault(entry.spec.section, []).append(
             {
                 "id": entry.spec.id,

@@ -4,8 +4,8 @@ import html
 import re
 import shutil
 import unicodedata
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 from uuid import uuid4
 
 from app.services.paper_service import build_editor_display_text, build_latex_ready_text, validate_research_paper
@@ -442,7 +442,10 @@ def _html_block_for_asset(asset: dict[str, object]) -> str:
     spec = asset.get("spec") or {}
     if isinstance(spec, dict) and spec.get("is_table"):
         headers = spec.get("data", {}).get("headers", [])
-        rows = spec.get("data", {}).get("rows", [])
+        rows = _normalize_table_rows_for_html(
+            spec.get("data", {}).get("rows", []),
+            column_count=len(headers),
+        )
         header_html = "".join(f"<th>{html.escape(str(item))}</th>" for item in headers)
         row_html = "".join(
             "<tr>" + "".join(f"<td>{html.escape(str(value))}</td>" for value in row) + "</tr>"
@@ -460,3 +463,25 @@ def _html_block_for_asset(asset: dict[str, object]) -> str:
         png_base64 = str(asset.get("png_base64") or "").strip()
         image_html = f'<img src="data:image/png;base64,{png_base64}" alt="{caption}" />' if png_base64 else ""
     return f'<figure class="generated-figure">{image_html}<figcaption>{caption}</figcaption></figure>'
+
+
+def _normalize_table_rows_for_html(rows: object, *, column_count: int) -> list[list[str]]:
+    normalized_rows: list[list[str]] = []
+    if not isinstance(rows, Iterable) or isinstance(rows, (str, bytes, dict)):
+        return normalized_rows
+
+    for row in rows:
+        if isinstance(row, dict):
+            values = [str(value) for value in row.values()]
+        elif isinstance(row, Iterable) and not isinstance(row, (str, bytes)):
+            values = [str(value) for value in row]
+        else:
+            values = [str(row)]
+
+        if column_count > 0:
+            if len(values) < column_count:
+                values.extend([""] * (column_count - len(values)))
+            elif len(values) > column_count:
+                values = values[:column_count]
+        normalized_rows.append(values)
+    return normalized_rows
