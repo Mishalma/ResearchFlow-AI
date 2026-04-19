@@ -49,7 +49,12 @@ class FigureTableRuntime:
         parsed_written_draft = self._parse_written_draft(written_draft)
         if parsed_written_draft is None:
             logger.warning("FigureTableRuntime received no usable written_draft payload.")
-            return FigureTableOutput(extraction_metadata={"status": "missing_written_draft"})
+            return FigureTableOutput(
+                figures=None,
+                tables=None,
+                extraction_metadata={"status": "missing_written_draft"},
+                status="skipped",
+            )
 
         resolved_paper = self._resolve_paper_snapshot(
             paper_snapshot=paper_snapshot,
@@ -63,14 +68,23 @@ class FigureTableRuntime:
         )
         rendered = await self.generator.render_all(specs)
         enriched_draft = self.injector.inject(manuscript_text, rendered)
-        enriched_written_draft = self._build_enriched_written_draft(
-            original=parsed_written_draft,
-            enriched_draft=enriched_draft,
-            source_paper=resolved_paper,
-        )
         asset_paths = self._persist_rendered_assets(project_id=project_id, rendered=rendered)
         figures = [item for item in rendered if not item.spec.is_table]
         tables = [item for item in rendered if item.spec.is_table]
+        enriched_written_draft = None
+        status = "succeeded"
+        error = None
+
+        try:
+            enriched_written_draft = self._build_enriched_written_draft(
+                original=parsed_written_draft,
+                enriched_draft=enriched_draft,
+                source_paper=resolved_paper,
+            )
+        except Exception as exc:
+            logger.warning("Figure enrichment rebuild incomplete; keeping generated visuals: %s", exc)
+            status = "partial"
+            error = str(exc)
 
         return FigureTableOutput(
             figures=figures,
@@ -85,7 +99,11 @@ class FigureTableRuntime:
                 "rendered_success_count": len([item for item in rendered if item.render_success]),
                 "asset_paths": asset_paths,
             },
-            enriched_written_draft=enriched_written_draft.model_dump(mode="python"),
+            enriched_written_draft=(
+                enriched_written_draft.model_dump(mode="python") if enriched_written_draft is not None else None
+            ),
+            status=status,
+            error=error,
         )
 
     def _parse_written_draft(self, written_draft: object) -> WrittenPaperDraft | None:
@@ -129,6 +147,8 @@ class FigureTableRuntime:
             content=enriched_draft,
             fallback_keywords=source_paper.keywords,
             fallback_references=source_paper.references,
+            fallback_paper=source_paper,
+            mode="figure_table",
         )
 
         updated_sections = {

@@ -28,8 +28,18 @@ async def generate_paper(
         owner_uid=current_user.user_id,
         generated_paper=pipeline_result.generated_paper,
         generation_metadata=pipeline_result.metadata,
-        generated_figures=[item.model_dump(mode="python") for item in pipeline_result.generated_figures],
-        generated_tables=[item.model_dump(mode="python") for item in pipeline_result.generated_tables],
+        generated_figures=(
+            [item.model_dump(mode="python") for item in pipeline_result.generated_figures]
+            if pipeline_result.generated_figures is not None
+            else None
+        ),
+        generated_tables=(
+            [item.model_dump(mode="python") for item in pipeline_result.generated_tables]
+            if pipeline_result.generated_tables is not None
+            else None
+        ),
+        figure_table_status=pipeline_result.figure_table_status,
+        figure_table_error=pipeline_result.figure_table_error,
     )
 
     return GenerateResponse.from_generation(

@@ -192,25 +192,34 @@ async def _dispatch_figure_table_stage(
             },
         )
         output = FigureTableAgentOutput.model_validate(dispatch_result.payload)
-        pipeline_context["generated_figures"] = output.figures
-        pipeline_context["generated_tables"] = output.tables
+        if output.figures is not None:
+            pipeline_context["generated_figures"] = output.figures
+        if output.tables is not None:
+            pipeline_context["generated_tables"] = output.tables
         pipeline_context["generated_figure_count"] = output.figure_count
         pipeline_context["generated_table_count"] = output.table_count
+        pipeline_context["figure_table_status"] = output.status
+        pipeline_context["figure_table_error"] = output.error
         return output, dispatch_result.duration_ms
     except Exception as exc:
-        logger.warning("figure_table_agent failed (non-blocking): %s", exc)
+        logger.warning(
+            "figure_table_agent failed (non-blocking); preserving existing generated visuals: %s",
+            exc,
+        )
         output = FigureTableAgentOutput(
-            figures=[],
-            tables=[],
+            figures=None,
+            tables=None,
             enriched_draft="",
             figure_count=0,
             table_count=0,
             extraction_metadata={"error": str(exc)},
+            status="failed",
+            error=str(exc),
         )
-        pipeline_context["generated_figures"] = []
-        pipeline_context["generated_tables"] = []
         pipeline_context["generated_figure_count"] = 0
         pipeline_context["generated_table_count"] = 0
+        pipeline_context["figure_table_status"] = "failed"
+        pipeline_context["figure_table_error"] = str(exc)
         return output, 0.0
 
 
@@ -255,7 +264,7 @@ def _build_formatting_visual_payload(
     figures: dict[str, list[dict[str, object]]] = {}
     tables: dict[str, list[dict[str, object]]] = {}
 
-    for entry in output.figures:
+    for entry in output.figures or []:
         if not entry.render_success:
             continue
         asset_path = (
@@ -278,7 +287,7 @@ def _build_formatting_visual_payload(
             }
         )
 
-    for entry in output.tables:
+    for entry in output.tables or []:
         if not entry.render_success:
             continue
         tables.setdefault(entry.spec.section, []).append(
@@ -581,6 +590,8 @@ async def run_pipeline(
     return PipelineResult(
         generated_paper=generated_paper,
         metadata=metadata,
-        generated_figures=list(pipeline_context.get("generated_figures") or []),
-        generated_tables=list(pipeline_context.get("generated_tables") or []),
+        generated_figures=pipeline_context.get("generated_figures"),
+        generated_tables=pipeline_context.get("generated_tables"),
+        figure_table_status=pipeline_context.get("figure_table_status"),
+        figure_table_error=pipeline_context.get("figure_table_error"),
     )

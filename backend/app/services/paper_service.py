@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from typing import Iterable, Literal
 
 from app.core.exceptions import ProjectContentValidationError
 from app.models.generation import IEEESectionMap, ResearchPaperSchema
@@ -23,6 +23,21 @@ IEEE_SECTION_HEADINGS = {
 
 BODY_SECTION_KEYS = tuple(key for _, key, _ in DISPLAY_SECTION_ORDER)
 DISPLAY_SECTION_LABELS = {key: heading.title() for _, key, heading in DISPLAY_SECTION_ORDER}
+HEADING_ALIASES = {
+    "methods": ("methodology",),
+    "materials and methods": ("methodology",),
+    "methods and materials": ("methodology",),
+    "experimental results": ("results",),
+    "findings": ("results",),
+    "results and discussion": ("results", "discussion"),
+    "discussion and results": ("results", "discussion"),
+    "discussion and conclusion": ("discussion", "conclusion"),
+    "discussion and conclusions": ("discussion", "conclusion"),
+    "discussion and policy implications": ("discussion",),
+    "policy implications": ("discussion",),
+    "conclusions": ("conclusion",),
+}
+_HEADING_PREFIX_PATTERN = re.compile(r"^(?:[ivxlcdm]+|\d+)\s*[\.\)]?\s*", re.IGNORECASE)
 
 
 def _normalize_keywords(values: Iterable[str] | None) -> list[str]:
@@ -47,6 +62,27 @@ def _normalize_paragraph_block(lines: list[str]) -> str:
         if collapsed:
             paragraphs.append(collapsed)
     return "\n\n".join(paragraphs)
+
+
+def _normalize_heading_label(value: str) -> str:
+    normalized = _HEADING_PREFIX_PATTERN.sub("", value.strip().lower())
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip(" :-")
+
+
+def _match_heading_targets(
+    line: str,
+    *,
+    mode: Literal["strict", "figure_table"],
+) -> tuple[str, ...] | None:
+    for key in (*BODY_SECTION_KEYS, "references"):
+        if IEEE_SECTION_HEADINGS[key].match(line):
+            return (key,)
+
+    if mode != "figure_table":
+        return None
+
+    return HEADING_ALIASES.get(_normalize_heading_label(line))
 
 
 def build_editor_display_text(paper: ResearchPaperSchema) -> str:
@@ -109,6 +145,8 @@ def parse_editor_content(
     content: str,
     fallback_keywords: list[str] | None = None,
     fallback_references: list[str] | None = None,
+    mode: Literal["strict", "figure_table"] = "strict",
+    fallback_paper: ResearchPaperSchema | None = None,
 ) -> ResearchPaperSchema:
     normalized_title = title.strip()
     normalized_content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -116,6 +154,9 @@ def parse_editor_content(
         raise ProjectContentValidationError("Paper title is required.")
     if not normalized_content:
         raise ProjectContentValidationError("Paper content is required.")
+
+    effective_fallback_keywords = fallback_keywords or (list(fallback_paper.keywords) if fallback_paper else None)
+    effective_fallback_references = fallback_references or (list(fallback_paper.references) if fallback_paper else None)
 
     buffers: dict[str, list[str]] = {
         "abstract": [],
@@ -130,32 +171,32 @@ def parse_editor_content(
     }
     keywords_line = ""
     current_section: str | None = None
+    active_sections: tuple[str, ...] = ()
 
     for raw_line in normalized_content.split("\n"):
         line = raw_line.strip()
 
         if IEEE_SECTION_HEADINGS["abstract"].match(line):
             current_section = "abstract"
+            active_sections = ("abstract",)
             continue
 
         keywords_inline_match = IEEE_SECTION_HEADINGS["keywords_inline"].match(line)
         if keywords_inline_match:
             keywords_line = keywords_inline_match.group(1).strip()
             current_section = "keywords"
+            active_sections = ()
             continue
 
         if IEEE_SECTION_HEADINGS["keywords_heading"].match(line):
             current_section = "keywords"
+            active_sections = ()
             continue
 
-        matched_heading = None
-        for key in (*BODY_SECTION_KEYS, "references"):
-            if IEEE_SECTION_HEADINGS[key].match(line):
-                matched_heading = key
-                break
-
-        if matched_heading is not None:
-            current_section = matched_heading
+        matched_targets = _match_heading_targets(line, mode=mode)
+        if matched_targets is not None:
+            current_section = matched_targets[0]
+            active_sections = matched_targets
             continue
 
         if current_section == "keywords":
@@ -164,14 +205,16 @@ def parse_editor_content(
             continue
 
         if current_section is not None:
-            buffers[current_section].append(raw_line)
+            targets = active_sections or (current_section,)
+            for target in targets:
+                buffers[target].append(raw_line)
 
     parsed_keywords = _normalize_keywords(
-        [keyword.strip() for keyword in keywords_line.split(",")] if keywords_line else (fallback_keywords or [])
+        [keyword.strip() for keyword in keywords_line.split(",")] if keywords_line else (effective_fallback_keywords or [])
     )
     parsed_references = [line.strip() for line in buffers["references"] if line.strip()]
     if not parsed_references:
-        parsed_references = _normalize_keywords(fallback_references or [])
+        parsed_references = _normalize_keywords(effective_fallback_references or [])
 
     normalized_sections = {
         "abstract": _normalize_paragraph_block(buffers["abstract"]),
@@ -184,17 +227,23 @@ def parse_editor_content(
         "conclusion": _normalize_paragraph_block(buffers["conclusion"]),
     }
 
-    missing = [
-        "Abstract" if key == "abstract" else DISPLAY_SECTION_LABELS[key]
-        for key, value in normalized_sections.items()
-        if not value
-    ]
-    if missing:
-        raise ProjectContentValidationError(
-            "Keep the IEEE manuscript headings intact. Missing or empty sections: " + ", ".join(missing)
-        )
+    if mode == "figure_table" and fallback_paper is not None:
+        normalized_sections["abstract"] = normalized_sections["abstract"] or fallback_paper.abstract
+        for key in BODY_SECTION_KEYS:
+            normalized_sections[key] = normalized_sections[key] or getattr(fallback_paper.sections, key)
 
-    if not parsed_keywords:
+    if mode == "strict":
+        missing = [
+            "Abstract" if key == "abstract" else DISPLAY_SECTION_LABELS[key]
+            for key, value in normalized_sections.items()
+            if not value
+        ]
+        if missing:
+            raise ProjectContentValidationError(
+                "Keep the IEEE manuscript headings intact. Missing or empty sections: " + ", ".join(missing)
+            )
+
+    if not parsed_keywords and mode == "strict":
         raise ProjectContentValidationError(
             "Index Terms are required in the paper body. Keep the 'Index Terms' line in the editor."
         )

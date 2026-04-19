@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -108,13 +108,15 @@ class FigureTableOutput(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    figures: list[RenderedFigure] = Field(default_factory=list)
-    tables: list[RenderedFigure] = Field(default_factory=list)
+    figures: list[RenderedFigure] | None = None
+    tables: list[RenderedFigure] | None = None
     enriched_draft: str = ""
     figure_count: int = 0
     table_count: int = 0
     extraction_metadata: dict[str, Any] = Field(default_factory=dict)
     enriched_written_draft: dict[str, Any] | None = None
+    status: Literal["succeeded", "partial", "failed", "skipped"] = "succeeded"
+    error: str | None = None
 
 
 def figure_reference_label(spec: FigureSpec) -> str:

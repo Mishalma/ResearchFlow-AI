@@ -16,6 +16,7 @@ from core.exceptions import (
     FigureStorageError,
     FileTooLargeError,
     InvalidUploadError,
+    PersistenceError,
     UnsupportedImageTypeError,
 )
 from persistence.base import ObjectStorage
@@ -108,6 +109,11 @@ async def store_project_figure(
             temp_path,
             content_type=upload_file.content_type or "application/octet-stream",
         )
+    except PersistenceError as exc:
+        delete_file(temp_path)
+        raise FigureStorageError(
+            "Unable to store the uploaded figure because object storage is unavailable."
+        ) from exc
     except Exception:
         delete_file(temp_path)
         raise

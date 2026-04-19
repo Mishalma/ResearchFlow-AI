@@ -61,6 +61,8 @@ class ProjectResponse(BaseModel):
     figures: list[FigureRecord] = Field(default_factory=list)
     generated_figures: list[dict] = Field(default_factory=list)
     generated_tables: list[dict] = Field(default_factory=list)
+    figure_table_status: str | None = None
+    figure_table_error: str | None = None
 
     @classmethod
     def from_project(cls, project: ProjectRecord) -> "ProjectResponse":
@@ -76,6 +78,8 @@ class ProjectResponse(BaseModel):
             figures=project.figures,
             generated_figures=project.generated_figures,
             generated_tables=project.generated_tables,
+            figure_table_status=project.figure_table_status,
+            figure_table_error=project.figure_table_error,
         )
 
 

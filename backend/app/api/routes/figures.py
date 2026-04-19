@@ -26,6 +26,8 @@ class GeneratedFiguresResponse(BaseModel):
     tables: list[dict[str, Any]] = Field(default_factory=list)
     figure_count: int = 0
     table_count: int = 0
+    figure_table_status: str | None = None
+    figure_table_error: str | None = None
 
 
 class FigureRegenerateResponse(BaseModel):
@@ -44,6 +46,8 @@ async def get_generated_figures(
         tables=list(project.generated_tables),
         figure_count=len(project.generated_figures),
         table_count=len(project.generated_tables),
+        figure_table_status=project.figure_table_status,
+        figure_table_error=project.figure_table_error,
     )
 
 

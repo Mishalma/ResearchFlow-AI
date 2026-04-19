@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from figure_table.models import FigureSpec, FigureTableOutput, RenderedFigure
 
 GenerationProvider = Literal["vertex_ai"]
+FigureTableStageStatus = Literal["succeeded", "partial", "failed", "skipped"]
 IEEE_SECTION_KEYS = (
     "introduction",
     "related_work",
@@ -351,13 +352,15 @@ class HumanizerAgentOutput(BaseModel):
 
 
 class FigureTableAgentOutput(BaseModel):
-    figures: list[RenderedFigure] = Field(default_factory=list)
-    tables: list[RenderedFigure] = Field(default_factory=list)
+    figures: list[RenderedFigure] | None = None
+    tables: list[RenderedFigure] | None = None
     enriched_draft: str = ""
     figure_count: int = Field(default=0, ge=0)
     table_count: int = Field(default=0, ge=0)
     extraction_metadata: dict[str, Any] = Field(default_factory=dict)
     enriched_written_draft: dict[str, Any] | None = None
+    status: FigureTableStageStatus = "succeeded"
+    error: str | None = None
 
 
 class OriginalityAgentOutput(BaseModel):
@@ -397,8 +400,10 @@ class OriginalityAgentOutput(BaseModel):
 class PipelineResult(BaseModel):
     generated_paper: GeneratedPaper
     metadata: GenerationMetadata
-    generated_figures: list[RenderedFigure] = Field(default_factory=list)
-    generated_tables: list[RenderedFigure] = Field(default_factory=list)
+    generated_figures: list[RenderedFigure] | None = None
+    generated_tables: list[RenderedFigure] | None = None
+    figure_table_status: FigureTableStageStatus | None = None
+    figure_table_error: str | None = None
 
 
 class GenerateRequest(BaseModel):

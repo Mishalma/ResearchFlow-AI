@@ -64,9 +64,9 @@ class FileStorageError(AppError):
 
 
 class FigureStorageError(AppError):
-    def __init__(self):
+    def __init__(self, message: str = "Unable to store the uploaded figure."):
         super().__init__(
-            "Unable to store the uploaded figure.",
+            message,
             status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 

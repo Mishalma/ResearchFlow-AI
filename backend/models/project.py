@@ -254,6 +254,8 @@ class ProjectRecord(BaseModel):
     generated_figures: list[dict] = Field(default_factory=list)
     generated_tables: list[dict] = Field(default_factory=list)
     generated_figure_assets: dict[str, str] = Field(default_factory=dict)
+    figure_table_status: str | None = None
+    figure_table_error: str | None = None
     exports: list[ExportArtifact] = Field(default_factory=list)
     generation_metadata: GenerationMetadata | None = None
     created_at: datetime = Field(default_factory=_default_timestamp)

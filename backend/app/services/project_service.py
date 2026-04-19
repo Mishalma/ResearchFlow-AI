@@ -45,6 +45,15 @@ def _normalize_string_list(values: list[str] | None) -> list[str]:
     return [value.strip() for value in values if value.strip()]
 
 
+def _build_generated_figure_assets(project_id: str, generated_figures: list[dict]) -> dict[str, str]:
+    return {
+        entry["spec"]["id"]: entry.get("asset_path")
+        or str(settings.local_projects_dir / project_id / "generated_figures" / f"{entry['spec']['id']}.png")
+        for entry in generated_figures
+        if isinstance(entry, dict) and isinstance(entry.get("spec"), dict)
+    }
+
+
 def _derive_project_title(project: ProjectRecord) -> str:
     title = project.title.strip()
     if title:
@@ -168,17 +177,34 @@ def save_generated_paper(
     generation_metadata: GenerationMetadata,
     generated_figures: list[dict] | None = None,
     generated_tables: list[dict] | None = None,
+    figure_table_status: str | None = None,
+    figure_table_error: str | None = None,
 ) -> ProjectRecord:
     project = get_project(project_id, owner_uid)
     display_paper_text = generated_paper.formatted_text.strip() or build_editor_display_text(generated_paper.paper)
-    normalized_generated_figures = list(generated_figures or [])
-    normalized_generated_tables = list(generated_tables or [])
-    generated_figure_assets = {
-        entry["spec"]["id"]: entry.get("asset_path")
-        or str(settings.local_projects_dir / project_id / "generated_figures" / f"{entry['spec']['id']}.png")
-        for entry in normalized_generated_figures
-        if isinstance(entry, dict) and isinstance(entry.get("spec"), dict)
-    }
+    next_generated_figures = project.generated_figures if generated_figures is None else list(generated_figures)
+    next_generated_tables = project.generated_tables if generated_tables is None else list(generated_tables)
+    generated_figure_assets = (
+        project.generated_figure_assets
+        if generated_figures is None
+        else _build_generated_figure_assets(project_id, next_generated_figures)
+    )
+    next_figure_table_status = project.figure_table_status if figure_table_status is None else figure_table_status
+    next_figure_table_error = (
+        project.figure_table_error
+        if figure_table_status is None and figure_table_error is None
+        else figure_table_error
+    )
+
+    if generated_figures is None or generated_tables is None:
+        logger.info(
+            "Preserving generated visuals for project %s (status=%s, figures_updated=%s, tables_updated=%s)",
+            project_id,
+            figure_table_status,
+            generated_figures is not None,
+            generated_tables is not None,
+        )
+
     updated_project = project.model_copy(
         update={
             "title": generated_paper.paper.title,
@@ -189,9 +215,11 @@ def save_generated_paper(
             "content": display_paper_text,
             "display_paper_text": display_paper_text,
             "latex_ready": generated_paper.latex_ready,
-            "generated_figures": normalized_generated_figures,
-            "generated_tables": normalized_generated_tables,
+            "generated_figures": next_generated_figures,
+            "generated_tables": next_generated_tables,
             "generated_figure_assets": generated_figure_assets,
+            "figure_table_status": next_figure_table_status,
+            "figure_table_error": next_figure_table_error,
             "updated_at": _timestamp(),
         }
     )
@@ -210,12 +238,7 @@ def save_project_generated_visuals(
     project = get_project(project_id, owner_uid)
     normalized_generated_figures = list(generated_figures)
     normalized_generated_tables = list(generated_tables)
-    generated_figure_assets = {
-        entry["spec"]["id"]: entry.get("asset_path")
-        or str(settings.local_projects_dir / project_id / "generated_figures" / f"{entry['spec']['id']}.png")
-        for entry in normalized_generated_figures
-        if isinstance(entry, dict) and isinstance(entry.get("spec"), dict)
-    }
+    generated_figure_assets = _build_generated_figure_assets(project_id, normalized_generated_figures)
     updated_project = project.model_copy(
         update={
             "generated_figures": normalized_generated_figures,
