@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from figure_table.models import FigureSpec, FigureTableOutput, RenderedFigure
+
 GenerationProvider = Literal["vertex_ai"]
 IEEE_SECTION_KEYS = (
     "introduction",
@@ -97,6 +99,8 @@ class GenerationMetadata(BaseModel):
     citation_match_count: int | None = Field(default=None, ge=0)
     citation_bibliography_count: int | None = Field(default=None, ge=0)
     citation_provider_summary: dict[str, int] = Field(default_factory=dict)
+    figure_table_figure_count: int | None = Field(default=None, ge=0)
+    figure_table_table_count: int | None = Field(default=None, ge=0)
     formatting_compile_success: bool | None = None
     formatting_retry_recommended: bool | None = None
     formatting_diagnostic_summary: dict[str, int] = Field(default_factory=dict)
@@ -346,6 +350,16 @@ class HumanizerAgentOutput(BaseModel):
         return self
 
 
+class FigureTableAgentOutput(BaseModel):
+    figures: list[RenderedFigure] = Field(default_factory=list)
+    tables: list[RenderedFigure] = Field(default_factory=list)
+    enriched_draft: str = ""
+    figure_count: int = Field(default=0, ge=0)
+    table_count: int = Field(default=0, ge=0)
+    extraction_metadata: dict[str, Any] = Field(default_factory=dict)
+    enriched_written_draft: dict[str, Any] | None = None
+
+
 class OriginalityAgentOutput(BaseModel):
     approved_snapshot: GeneratedPaper | None = None
     originality_report: dict[str, Any] | None = None
@@ -383,6 +397,8 @@ class OriginalityAgentOutput(BaseModel):
 class PipelineResult(BaseModel):
     generated_paper: GeneratedPaper
     metadata: GenerationMetadata
+    generated_figures: list[RenderedFigure] = Field(default_factory=list)
+    generated_tables: list[RenderedFigure] = Field(default_factory=list)
 
 
 class GenerateRequest(BaseModel):

@@ -35,6 +35,7 @@ LATEX_SPECIAL_CHARACTERS = {
     "~": r"\textasciitilde{}",
     "^": r"\textasciicircum{}",
 }
+FIGURE_MARKER_PATTERN = re.compile(r"^\s*%% FIGURE_PLACEMENT:\s*([A-Za-z0-9_-]+)\s*$")
 
 
 @dataclass(frozen=True)
@@ -71,15 +72,57 @@ def escape_latex(value: str) -> str:
     return "".join(LATEX_SPECIAL_CHARACTERS.get(character, character) for character in ascii_value)
 
 
-def _normalize_text_for_latex(value: str) -> str:
+def _normalize_text_for_latex(
+    value: str,
+    *,
+    asset_map: dict[str, dict[str, object]] | None = None,
+    append_assets: list[dict[str, object]] | None = None,
+) -> str:
     normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
-    paragraphs: list[str] = []
-    for paragraph in normalized.split("\n\n"):
-        line = " ".join(segment.strip() for segment in paragraph.splitlines() if segment.strip())
-        if line:
-            paragraphs.append(escape_latex(line))
+    if not normalized and not append_assets:
+        return "No content provided."
 
-    return "\n\n".join(paragraphs) if paragraphs else "No content provided."
+    if not asset_map:
+        paragraphs: list[str] = []
+        for paragraph in normalized.split("\n\n"):
+            line = " ".join(segment.strip() for segment in paragraph.splitlines() if segment.strip())
+            if line:
+                paragraphs.append(escape_latex(line))
+        if append_assets:
+            paragraphs.extend(_latex_block_for_asset(asset) for asset in append_assets)
+        return "\n\n".join(paragraphs) if paragraphs else "No content provided."
+
+    parts: list[str] = []
+    buffer: list[str] = []
+    used_ids: set[str] = set()
+    for raw_line in normalized.splitlines():
+        marker_match = FIGURE_MARKER_PATTERN.match(raw_line.strip())
+        if marker_match:
+            if buffer:
+                line = " ".join(segment.strip() for segment in "\n".join(buffer).splitlines() if segment.strip())
+                if line:
+                    parts.append(escape_latex(line))
+                buffer = []
+            spec_id = marker_match.group(1)
+            asset = asset_map.get(spec_id)
+            if asset is not None:
+                parts.append(_latex_block_for_asset(asset))
+                used_ids.add(spec_id)
+            continue
+        buffer.append(raw_line)
+
+    if buffer:
+        line = " ".join(segment.strip() for segment in "\n".join(buffer).splitlines() if segment.strip())
+        if line:
+            parts.append(escape_latex(line))
+
+    for asset in append_assets or []:
+        asset_id = str(asset.get("id", "")).strip()
+        if asset_id and asset_id in used_ids:
+            continue
+        parts.append(_latex_block_for_asset(asset))
+
+    return "\n\n".join(parts) if parts else "No content provided."
 
 
 def _slugify(value: str) -> str:
@@ -120,18 +163,30 @@ def _build_author_blocks(project: ProjectRecord) -> list[dict[str, object]]:
 
 def _build_sections(
     project: ProjectRecord,
-    figures_by_section: dict[str, list[dict[str, str]]],
+    figures_by_section: dict[str, list[dict[str, object]]],
+    tables_by_section: dict[str, list[dict[str, object]]] | None = None,
 ) -> list[dict[str, object]]:
     paper = get_effective_paper(project)
     section_entries: list[dict[str, object]] = []
+    resolved_tables = tables_by_section or {}
 
     for key, heading in SECTION_ORDER:
+        section_assets = [*figures_by_section.get(key, []), *resolved_tables.get(key, [])]
+        asset_map = {
+            str(asset.get("id", "")).strip(): asset
+            for asset in section_assets
+            if str(asset.get("id", "")).strip()
+        }
         section_entries.append(
             {
                 "key": key,
                 "heading": heading,
-                "content": _normalize_text_for_latex(getattr(paper.sections, key)),
-                "figures": figures_by_section.get(key, []),
+                "content": _normalize_text_for_latex(
+                    getattr(paper.sections, key),
+                    asset_map=asset_map,
+                    append_assets=[] if _has_figure_markers(getattr(paper.sections, key)) else section_assets,
+                ),
+                "figures": [],
             }
         )
 
@@ -150,7 +205,8 @@ def generate_latex(
     project: ProjectRecord,
     template_dir: Path,
     work_dir: Path,
-    figures_by_section: dict[str, list[dict[str, str]]] | None = None,
+    figures_by_section: dict[str, list[dict[str, object]]] | None = None,
+    tables_by_section: dict[str, list[dict[str, object]]] | None = None,
 ) -> LatexBuildResult:
     environment = _get_jinja_environment(template_dir)
 
@@ -167,15 +223,17 @@ def generate_latex(
     base_name = _slugify(title)
     tex_path = work_dir / f"{base_name}.tex"
     figures = figures_by_section or {"abstract": [], **{key: [] for key, _ in SECTION_ORDER}}
+    tables = tables_by_section or {"abstract": [], **{key: [] for key, _ in SECTION_ORDER}}
 
     context = {
         "title": escape_latex(title),
         "authors": _build_author_blocks(project),
         "keywords": [escape_latex(keyword) for keyword in paper.keywords],
         "abstract": _normalize_text_for_latex(paper.abstract),
-        "sections": _build_sections(project, figures),
+        "sections": _build_sections(project, figures, tables),
         "references": [escape_latex(reference) for reference in paper.references],
         "figures": figures,
+        "tables": tables,
     }
 
     try:
@@ -191,5 +249,27 @@ def generate_latex(
         tex_path=tex_path,
         file_name=tex_path.name,
         content=content,
+    )
+
+
+def _has_figure_markers(value: str) -> bool:
+    return any(FIGURE_MARKER_PATTERN.match(line.strip()) for line in value.splitlines())
+
+
+def _latex_block_for_asset(asset: dict[str, object]) -> str:
+    latex = str(asset.get("latex_block") or asset.get("latex") or "").strip()
+    if latex:
+        return latex
+    path = str(asset.get("path") or "").strip()
+    caption = escape_latex(str(asset.get("caption") or "").strip())
+    label = escape_latex(str(asset.get("label") or asset.get("id") or "").strip())
+    return (
+        "\\begin{figure}[htbp]\n"
+        "\\centerline{\\includegraphics[width=\\linewidth]{ "
+        f"{path}"
+        " }}\n"
+        f"\\caption{{ {caption} }}\n"
+        f"\\label{{fig:{label}}}\n"
+        "\\end{figure}"
     )
 

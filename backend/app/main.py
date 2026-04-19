@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.routes.export import router as export_router
 from app.api.routes.figure import router as figure_router
+from app.api.routes.figures import router as generated_figures_router
 from app.api.routes.generate import router as generate_router
 from app.api.routes.health import router as health_router
 from app.api.routes.originality import router as originality_router
@@ -131,5 +132,6 @@ app.include_router(upload_router)
 app.include_router(project_router)
 app.include_router(save_router)
 app.include_router(figure_router)
+app.include_router(generated_figures_router)
 app.include_router(export_router)
 app.include_router(generate_router)

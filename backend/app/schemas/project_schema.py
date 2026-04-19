@@ -59,6 +59,8 @@ class ProjectResponse(BaseModel):
     display_paper_text: str = Field(default="")
     paper: ResearchPaperSchema | None = None
     figures: list[FigureRecord] = Field(default_factory=list)
+    generated_figures: list[dict] = Field(default_factory=list)
+    generated_tables: list[dict] = Field(default_factory=list)
 
     @classmethod
     def from_project(cls, project: ProjectRecord) -> "ProjectResponse":
@@ -72,6 +74,8 @@ class ProjectResponse(BaseModel):
             display_paper_text=project.display_paper_text or project.content,
             paper=effective_paper,
             figures=project.figures,
+            generated_figures=project.generated_figures,
+            generated_tables=project.generated_tables,
         )
 
 

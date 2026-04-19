@@ -6,6 +6,7 @@
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
 \usepackage{booktabs}
+\usepackage{multirow}
 \usepackage{array}
 \usepackage{url}
 \usepackage[hidelinks]{hyperref}
@@ -64,24 +65,6 @@ Abstract---{{ abstract }}
 {% for section in sections %}
 \section{ {{ section.heading }} }
 {{ section.content }}
-
-{% for figure in section.figures %}
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=\linewidth]{ {{ figure.path }} }
-\caption{ {{ figure.caption }} }
-\label{fig:{{ figure.label }}}
-\end{figure}
-{% endfor %}
-
-{% for table in section.tables %}
-\begin{table}[htbp]
-\caption{ {{ table.caption }} }
-\label{tab:{{ table.label }}}
-\centering
-{{ table.latex }}
-\end{table}
-{% endfor %}
 {% endfor %}
 
 \begin{thebibliography}{99}

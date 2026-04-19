@@ -22,8 +22,10 @@ from app.services.paper_service import (
     validate_research_paper,
 )
 from persistence import get_project_repository
+from core.config import get_settings
 
 logger = logging.getLogger("papereasy.backend.project")
+settings = get_settings()
 
 INVALID_FILE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -164,9 +166,19 @@ def save_generated_paper(
     owner_uid: str,
     generated_paper: GeneratedPaper,
     generation_metadata: GenerationMetadata,
+    generated_figures: list[dict] | None = None,
+    generated_tables: list[dict] | None = None,
 ) -> ProjectRecord:
     project = get_project(project_id, owner_uid)
     display_paper_text = generated_paper.formatted_text.strip() or build_editor_display_text(generated_paper.paper)
+    normalized_generated_figures = list(generated_figures or [])
+    normalized_generated_tables = list(generated_tables or [])
+    generated_figure_assets = {
+        entry["spec"]["id"]: entry.get("asset_path")
+        or str(settings.local_projects_dir / project_id / "generated_figures" / f"{entry['spec']['id']}.png")
+        for entry in normalized_generated_figures
+        if isinstance(entry, dict) and isinstance(entry.get("spec"), dict)
+    }
     updated_project = project.model_copy(
         update={
             "title": generated_paper.paper.title,
@@ -177,6 +189,38 @@ def save_generated_paper(
             "content": display_paper_text,
             "display_paper_text": display_paper_text,
             "latex_ready": generated_paper.latex_ready,
+            "generated_figures": normalized_generated_figures,
+            "generated_tables": normalized_generated_tables,
+            "generated_figure_assets": generated_figure_assets,
+            "updated_at": _timestamp(),
+        }
+    )
+    return persist_project(updated_project)
+
+
+def save_project_generated_visuals(
+    project_id: str,
+    owner_uid: str,
+    *,
+    generated_figures: list[dict],
+    generated_tables: list[dict],
+) -> ProjectRecord:
+    """Persist generated figure/table metadata without touching manual uploads."""
+
+    project = get_project(project_id, owner_uid)
+    normalized_generated_figures = list(generated_figures)
+    normalized_generated_tables = list(generated_tables)
+    generated_figure_assets = {
+        entry["spec"]["id"]: entry.get("asset_path")
+        or str(settings.local_projects_dir / project_id / "generated_figures" / f"{entry['spec']['id']}.png")
+        for entry in normalized_generated_figures
+        if isinstance(entry, dict) and isinstance(entry.get("spec"), dict)
+    }
+    updated_project = project.model_copy(
+        update={
+            "generated_figures": normalized_generated_figures,
+            "generated_tables": normalized_generated_tables,
+            "generated_figure_assets": generated_figure_assets,
             "updated_at": _timestamp(),
         }
     )

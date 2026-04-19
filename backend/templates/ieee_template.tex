@@ -5,6 +5,9 @@
 \usepackage{amsmath,amssymb,amsfonts}
 \usepackage{algorithmic}
 \usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
 \usepackage{textcomp}
 \usepackage{xcolor}
 {% raw %}\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
@@ -31,13 +34,6 @@
 
 \begin{abstract}
 {{ abstract }}
-{% for figure in figures.abstract %}
-\begin{figure}[htbp]
-\centerline{\includegraphics[width=\linewidth]{ {{ figure.path }} }}
-\caption{ {{ figure.caption }} }
-\label{fig:{{ figure.label }}}
-\end{figure}
-{% endfor %}
 \end{abstract}
 
 {% if keywords %}
@@ -49,13 +45,6 @@
 {% for section in sections %}
 \section{ {{ section.heading }} }
 {{ section.content }}
-{% for figure in section.figures %}
-\begin{figure}[htbp]
-\centerline{\includegraphics[width=\linewidth]{ {{ figure.path }} }}
-\caption{ {{ figure.caption }} }
-\label{fig:{{ figure.label }}}
-\end{figure}
-{% endfor %}
 
 {% endfor %}
 \begin{thebibliography}{00}

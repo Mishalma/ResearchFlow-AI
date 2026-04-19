@@ -7,6 +7,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from agents.citation_agent import CitationAgent
+from agents.figure_table_agent import FigureTableAgent
 from agents.humanizer_agent import HumanizerAgent
 from agents.ieee_formatting_agent import IEEEFormattingAgent
 from agents.originality_agent import OriginalityAgent
@@ -28,6 +29,7 @@ from mcp.mcp_server import build_default_mcp_server
 from models.generation import (
     AgentTiming,
     CitationAgentOutput,
+    FigureTableAgentOutput,
     FormattingAgentOutput,
     GeneratedPaper,
     GenerationMetadata,
@@ -167,6 +169,129 @@ async def _dispatch_validated_stage(
     raise PaperValidationError(recipient, ["unknown validation failure"])
 
 
+async def _dispatch_figure_table_stage(
+    *,
+    a2a_manager: A2AManager,
+    figure_table_agent: FigureTableAgent,
+    writing_output: WritingAgentOutput,
+    project_id: str,
+    trace_id: str,
+    pipeline_context: dict[str, object],
+) -> tuple[FigureTableAgentOutput, float]:
+    """Run the non-blocking figure/table stage and preserve pipeline continuity on failure."""
+
+    try:
+        dispatch_result = await a2a_manager.dispatch(
+            sender="pipeline",
+            recipient=figure_table_agent.agent_name,
+            task="extract_figure_table_assets",
+            trace_id=trace_id,
+            payload={
+                "paper": writing_output.model_dump(mode="python"),
+                "project_id": project_id,
+            },
+        )
+        output = FigureTableAgentOutput.model_validate(dispatch_result.payload)
+        pipeline_context["generated_figures"] = output.figures
+        pipeline_context["generated_tables"] = output.tables
+        pipeline_context["generated_figure_count"] = output.figure_count
+        pipeline_context["generated_table_count"] = output.table_count
+        return output, dispatch_result.duration_ms
+    except Exception as exc:
+        logger.warning("figure_table_agent failed (non-blocking): %s", exc)
+        output = FigureTableAgentOutput(
+            figures=[],
+            tables=[],
+            enriched_draft="",
+            figure_count=0,
+            table_count=0,
+            extraction_metadata={"error": str(exc)},
+        )
+        pipeline_context["generated_figures"] = []
+        pipeline_context["generated_tables"] = []
+        pipeline_context["generated_figure_count"] = 0
+        pipeline_context["generated_table_count"] = 0
+        return output, 0.0
+
+
+def _merge_writing_with_figures(
+    *,
+    writing_output: WritingAgentOutput,
+    figure_table_output: FigureTableAgentOutput,
+) -> WritingAgentOutput:
+    """Merge enriched figure references into the writing output while preserving its shape."""
+
+    if not figure_table_output.enriched_written_draft:
+        return writing_output
+
+    merged = writing_output.model_copy(deep=True)
+    merged.written_draft = figure_table_output.enriched_written_draft
+
+    enriched_draft = figure_table_output.enriched_written_draft
+    abstract_section = enriched_draft.get("abstract") or {}
+    body_sections = enriched_draft.get("sections") or {}
+    if isinstance(abstract_section, dict):
+        merged.abstract = str(abstract_section.get("text", merged.abstract)).strip() or merged.abstract
+    for section_name in (
+        "introduction",
+        "related_work",
+        "methodology",
+        "results",
+        "discussion",
+        "limitations",
+        "conclusion",
+    ):
+        section_payload = body_sections.get(section_name) or {}
+        if isinstance(section_payload, dict):
+            section_text = str(section_payload.get("text", getattr(merged.sections, section_name))).strip()
+            if section_text:
+                setattr(merged.sections, section_name, section_text)
+    return merged
+
+
+def _build_formatting_visual_payload(
+    output: FigureTableAgentOutput,
+) -> tuple[dict[str, list[dict[str, object]]], dict[str, list[dict[str, object]]]]:
+    figures: dict[str, list[dict[str, object]]] = {}
+    tables: dict[str, list[dict[str, object]]] = {}
+
+    for entry in output.figures:
+        asset_path = (
+            output.extraction_metadata.get("asset_paths", {}).get(entry.spec.id)
+            if isinstance(output.extraction_metadata, dict)
+            else None
+        )
+        figures.setdefault(entry.spec.section, []).append(
+            {
+                "id": entry.spec.id,
+                "caption": entry.spec.caption,
+                "label": entry.spec.id,
+                "path": f"figures/{entry.spec.id}.png",
+                "latex_block": entry.latex_block,
+                "png_base64": entry.png_base64,
+                "svg_content": entry.svg_content,
+                "asset_path": asset_path,
+                "placement_hint": entry.spec.placement_hint,
+                "spec": entry.spec.model_dump(mode="python"),
+            }
+        )
+
+    for entry in output.tables:
+        tables.setdefault(entry.spec.section, []).append(
+            {
+                "id": entry.spec.id,
+                "caption": entry.spec.caption,
+                "label": entry.spec.id,
+                "latex": entry.latex_table or entry.latex_block,
+                "latex_block": entry.latex_block,
+                "placement_hint": entry.spec.placement_hint,
+                "spec": entry.spec.model_dump(mode="python"),
+            }
+        )
+
+    return figures, tables
+
+
 def _execute_humanizer_loop(
     *,
     humanizer_agent: HumanizerAgent,
@@ -223,7 +348,12 @@ def _execute_humanizer_loop(
     return HumanizerAgentOutput.model_validate(output)
 
 
-async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineResult:
+async def run_pipeline(
+    text: str,
+    settings: Settings | None = None,
+    *,
+    project_id: str = "",
+) -> PipelineResult:
     resolved_settings = settings or get_settings()
     trace_id = str(uuid4())
     start_time = perf_counter()
@@ -241,6 +371,11 @@ async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineR
         resolved_settings,
     )
     writing_agent = WritingAgent(vertex_client, registry.get("writing_agent"))
+    figure_table_agent = FigureTableAgent(
+        vertex_client,
+        registry.get("figure_table_agent"),
+        mcp_server,
+    )
     citation_agent = CitationAgent(
         mcp_server,
         registry.get("citation_agent"),
@@ -250,7 +385,15 @@ async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineR
     humanizer_agent = HumanizerAgent(vertex_client, registry.get("humanizer_agent"))
     originality_agent = OriginalityAgent(registry.get("originality_agent"))
 
-    for agent in [structuring_agent, writing_agent, citation_agent, formatting_agent, humanizer_agent, originality_agent]:
+    for agent in [
+        structuring_agent,
+        writing_agent,
+        figure_table_agent,
+        citation_agent,
+        formatting_agent,
+        humanizer_agent,
+        originality_agent,
+    ]:
         a2a_manager.register(agent)
 
     logger.info("Pipeline trace %s started with %s source characters", trace_id, len(text))
@@ -279,13 +422,27 @@ async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineR
         validation_events=validation_events,
     )
 
+    figure_table_result, figure_table_duration_ms = await _dispatch_figure_table_stage(
+        a2a_manager=a2a_manager,
+        figure_table_agent=figure_table_agent,
+        writing_output=writing_result,
+        project_id=project_id,
+        trace_id=trace_id,
+        pipeline_context=pipeline_context,
+    )
+    merged_writing_result = _merge_writing_with_figures(
+        writing_output=writing_result,
+        figure_table_output=figure_table_result,
+    )
+    formatting_figures, formatting_tables = _build_formatting_visual_payload(figure_table_result)
+
     citation_result, citation_dispatch = await _dispatch_validated_stage(
         a2a_manager=a2a_manager,
-        sender=writing_agent.agent_name,
+        sender=figure_table_agent.agent_name,
         recipient=citation_agent.agent_name,
         task="attach_citations",
         trace_id=trace_id,
-        payload={"paper": writing_result.model_dump()},
+        payload={"paper": merged_writing_result.model_dump(mode="python")},
         response_model=CitationAgentOutput,
         require_references=True,
         validation_events=validation_events,
@@ -297,7 +454,11 @@ async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineR
         recipient=formatting_agent.agent_name,
         task="format_ieee_paper",
         trace_id=trace_id,
-        payload={"paper": citation_result.model_dump()},
+        payload={
+            "paper": citation_result.model_dump(mode="python"),
+            "figures": formatting_figures,
+            "tables": formatting_tables,
+        },
         response_model=FormattingAgentOutput,
         require_references=True,
         validation_events=validation_events,
@@ -364,6 +525,7 @@ async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineR
         agent_timings=[
             AgentTiming(agent=structuring_agent.agent_name, duration_ms=structuring_dispatch.duration_ms),
             AgentTiming(agent=writing_agent.agent_name, duration_ms=writing_dispatch.duration_ms),
+            AgentTiming(agent=figure_table_agent.agent_name, duration_ms=figure_table_duration_ms),
             AgentTiming(agent=citation_agent.agent_name, duration_ms=citation_dispatch.duration_ms),
             AgentTiming(agent=formatting_agent.agent_name, duration_ms=formatting_dispatch.duration_ms),
             AgentTiming(agent=humanizer_agent.agent_name, duration_ms=humanizer_duration_ms),
@@ -380,6 +542,8 @@ async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineR
         citation_match_count=citation_result.matched_claim_count,
         citation_bibliography_count=citation_result.bibliography_count,
         citation_provider_summary=citation_result.provider_summary,
+        figure_table_figure_count=int(pipeline_context.get("generated_figure_count") or 0),
+        figure_table_table_count=int(pipeline_context.get("generated_table_count") or 0),
         formatting_compile_success=formatting_result.compile_success,
         formatting_retry_recommended=formatting_result.retry_recommended,
         formatting_diagnostic_summary=formatting_result.diagnostic_summary,
@@ -410,4 +574,9 @@ async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineR
     generated_paper = originality_result.approved_snapshot
 
     logger.info("Pipeline trace %s completed in %.2f ms", trace_id, total_duration_ms)
-    return PipelineResult(generated_paper=generated_paper, metadata=metadata)
+    return PipelineResult(
+        generated_paper=generated_paper,
+        metadata=metadata,
+        generated_figures=list(pipeline_context.get("generated_figures") or []),
+        generated_tables=list(pipeline_context.get("generated_tables") or []),
+    )

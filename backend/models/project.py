@@ -251,6 +251,9 @@ class ProjectRecord(BaseModel):
     generated_paper: GeneratedPaper | None = None
     edited_paper: ResearchPaperSchema | None = None
     figures: list[FigureRecord] = Field(default_factory=list)
+    generated_figures: list[dict] = Field(default_factory=list)
+    generated_tables: list[dict] = Field(default_factory=list)
+    generated_figure_assets: dict[str, str] = Field(default_factory=dict)
     exports: list[ExportArtifact] = Field(default_factory=list)
     generation_metadata: GenerationMetadata | None = None
     created_at: datetime = Field(default_factory=_default_timestamp)

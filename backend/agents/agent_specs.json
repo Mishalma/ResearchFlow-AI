@@ -27,6 +27,19 @@
       }
     },
     {
+      "name": "figure_table_agent",
+      "role": "Extracts and renders IEEE figures, tables, and charts from the written draft.",
+      "prompt_template": "The Figure Table Agent uses the backend/figure_table runtime. Extract figure/table opportunities from the written draft, render IEEE-friendly assets, and inject non-blocking manuscript references.",
+      "input_schema": "WritingAgentOutput",
+      "output_schema": "FigureTableAgentOutput",
+      "enabled_tools": [],
+      "timeout_seconds": 120,
+      "retry_policy": {
+        "attempts": 1,
+        "backoff_seconds": 5.0
+      }
+    },
+    {
       "name": "citation_agent",
       "role": "Ground claim-level scholarly citations using real academic APIs and keep the formatter-facing paper schema stable.",
       "prompt_template": "The Citation Agent now uses the backend/citation runtime. Match claims to real scholarly references, preserve the legacy paper snapshot, and expose the richer citation_draft metadata for future agents.",

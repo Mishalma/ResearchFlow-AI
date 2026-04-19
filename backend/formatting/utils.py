@@ -38,6 +38,7 @@ LATEX_SPECIAL_CHARACTERS = {
 }
 
 REFERENCE_PREFIX_PATTERN = re.compile(r"^\[\d+\]\s*")
+FIGURE_MARKER_PATTERN = re.compile(r"^\s*%% FIGURE_PLACEMENT:\s*([A-Za-z0-9_-]+)\s*$")
 
 
 def escape_latex(value: str) -> str:
@@ -46,16 +47,57 @@ def escape_latex(value: str) -> str:
     return "".join(LATEX_SPECIAL_CHARACTERS.get(character, character) for character in ascii_value)
 
 
-def normalize_paragraphs_for_latex(value: str) -> str:
+def normalize_paragraphs_for_latex(
+    value: str,
+    *,
+    asset_map: dict[str, dict[str, object]] | None = None,
+    append_assets: list[dict[str, object]] | None = None,
+) -> str:
     normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not normalized:
+    if not normalized and not append_assets:
         return ""
-    paragraphs: list[str] = []
-    for paragraph in re.split(r"\n\s*\n", normalized):
-        collapsed = " ".join(segment.strip() for segment in paragraph.splitlines() if segment.strip())
+
+    if not asset_map:
+        paragraphs: list[str] = []
+        for paragraph in re.split(r"\n\s*\n", normalized):
+            collapsed = " ".join(segment.strip() for segment in paragraph.splitlines() if segment.strip())
+            if collapsed:
+                paragraphs.append(escape_latex(collapsed))
+        if append_assets:
+            paragraphs.extend(_latex_block_for_asset(asset) for asset in append_assets)
+        return "\n\n".join(paragraphs)
+
+    parts: list[str] = []
+    buffer: list[str] = []
+    used_ids: set[str] = set()
+    for raw_line in normalized.splitlines():
+        marker_match = FIGURE_MARKER_PATTERN.match(raw_line.strip())
+        if marker_match:
+            if buffer:
+                collapsed = " ".join(segment.strip() for segment in "\n".join(buffer).splitlines() if segment.strip())
+                if collapsed:
+                    parts.append(escape_latex(collapsed))
+                buffer = []
+            spec_id = marker_match.group(1)
+            asset = asset_map.get(spec_id)
+            if asset is not None:
+                parts.append(_latex_block_for_asset(asset))
+                used_ids.add(spec_id)
+            continue
+        buffer.append(raw_line)
+
+    if buffer:
+        collapsed = " ".join(segment.strip() for segment in "\n".join(buffer).splitlines() if segment.strip())
         if collapsed:
-            paragraphs.append(escape_latex(collapsed))
-    return "\n\n".join(paragraphs)
+            parts.append(escape_latex(collapsed))
+
+    for asset in append_assets or []:
+        asset_id = str(asset.get("id", "")).strip()
+        if asset_id and asset_id in used_ids:
+            continue
+        parts.append(_latex_block_for_asset(asset))
+
+    return "\n\n".join(part for part in parts if part.strip())
 
 
 def normalize_keywords(keywords: Iterable[str], *, sort_alpha: bool) -> list[str]:
@@ -153,14 +195,27 @@ def build_section_entries(
     resolved_tables = tables or {}
     entries: list[dict[str, object]] = []
     for section_key, heading in SECTION_ORDER:
+        section_assets = [
+            *resolved_figures.get(section_key, []),
+            *resolved_tables.get(section_key, []),
+        ]
+        asset_map = {
+            str(asset.get("id", "")).strip(): asset
+            for asset in section_assets
+            if str(asset.get("id", "")).strip()
+        }
         entries.append(
             {
                 "key": section_key,
                 "heading": heading,
-                "content": normalize_paragraphs_for_latex(getattr(paper.sections, section_key)),
+                "content": normalize_paragraphs_for_latex(
+                    getattr(paper.sections, section_key),
+                    asset_map=asset_map,
+                    append_assets=[] if _has_figure_markers(getattr(paper.sections, section_key)) else section_assets,
+                ),
                 "html_content": html.escape(getattr(paper.sections, section_key)).replace("\n", "<br />"),
-                "figures": resolved_figures.get(section_key, []),
-                "tables": resolved_tables.get(section_key, []),
+                "figures": [],
+                "tables": [],
             }
         )
     return entries
@@ -176,13 +231,26 @@ def build_preview_section_entries(
     resolved_tables = tables or {}
     entries: list[dict[str, object]] = []
     for section_key, heading in SECTION_ORDER:
+        section_assets = [
+            *resolved_figures.get(section_key, []),
+            *resolved_tables.get(section_key, []),
+        ]
+        asset_map = {
+            str(asset.get("id", "")).strip(): asset
+            for asset in section_assets
+            if str(asset.get("id", "")).strip()
+        }
         entries.append(
             {
                 "key": section_key,
                 "heading": heading,
-                "content_html": format_html_paragraphs(getattr(paper.sections, section_key)),
-                "figures": resolved_figures.get(section_key, []),
-                "tables": resolved_tables.get(section_key, []),
+                "content_html": format_html_paragraphs(
+                    getattr(paper.sections, section_key),
+                    asset_map=asset_map,
+                    append_assets=[] if _has_figure_markers(getattr(paper.sections, section_key)) else section_assets,
+                ),
+                "figures": [],
+                "tables": [],
             }
         )
     return entries
@@ -287,16 +355,57 @@ def maybe_cleanup_work_dir(*, work_dir: Path, should_cleanup: bool) -> None:
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def format_html_paragraphs(value: str) -> str:
+def format_html_paragraphs(
+    value: str,
+    *,
+    asset_map: dict[str, dict[str, object]] | None = None,
+    append_assets: list[dict[str, object]] | None = None,
+) -> str:
     normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not normalized:
+    if not normalized and not append_assets:
         return ""
-    paragraphs: list[str] = []
-    for paragraph in re.split(r"\n\s*\n", normalized):
-        collapsed = " ".join(segment.strip() for segment in paragraph.splitlines() if segment.strip())
+
+    if not asset_map:
+        paragraphs: list[str] = []
+        for paragraph in re.split(r"\n\s*\n", normalized):
+            collapsed = " ".join(segment.strip() for segment in paragraph.splitlines() if segment.strip())
+            if collapsed:
+                paragraphs.append(f"<p>{html.escape(collapsed)}</p>")
+        if append_assets:
+            paragraphs.extend(_html_block_for_asset(asset) for asset in append_assets)
+        return "\n".join(paragraphs)
+
+    parts: list[str] = []
+    buffer: list[str] = []
+    used_ids: set[str] = set()
+    for raw_line in normalized.splitlines():
+        marker_match = FIGURE_MARKER_PATTERN.match(raw_line.strip())
+        if marker_match:
+            if buffer:
+                collapsed = " ".join(segment.strip() for segment in "\n".join(buffer).splitlines() if segment.strip())
+                if collapsed:
+                    parts.append(f"<p>{html.escape(collapsed)}</p>")
+                buffer = []
+            spec_id = marker_match.group(1)
+            asset = asset_map.get(spec_id)
+            if asset is not None:
+                parts.append(_html_block_for_asset(asset))
+                used_ids.add(spec_id)
+            continue
+        buffer.append(raw_line)
+
+    if buffer:
+        collapsed = " ".join(segment.strip() for segment in "\n".join(buffer).splitlines() if segment.strip())
         if collapsed:
-            paragraphs.append(f"<p>{html.escape(collapsed)}</p>")
-    return "\n".join(paragraphs)
+            parts.append(f"<p>{html.escape(collapsed)}</p>")
+
+    for asset in append_assets or []:
+        asset_id = str(asset.get("id", "")).strip()
+        if asset_id and asset_id in used_ids:
+            continue
+        parts.append(_html_block_for_asset(asset))
+
+    return "\n".join(parts)
 
 
 def summarize_diagnostics(diagnostics: Iterable[CompilerDiagnostic]) -> dict[str, int]:
@@ -305,3 +414,49 @@ def summarize_diagnostics(diagnostics: Iterable[CompilerDiagnostic]) -> dict[str
         key = f"{diagnostic.severity}:{diagnostic.category}"
         summary[key] = summary.get(key, 0) + 1
     return summary
+
+
+def _has_figure_markers(value: str) -> bool:
+    return any(FIGURE_MARKER_PATTERN.match(line.strip()) for line in value.splitlines())
+
+
+def _latex_block_for_asset(asset: dict[str, object]) -> str:
+    latex = str(asset.get("latex_block") or asset.get("latex") or "").strip()
+    if latex:
+        return latex
+    path = str(asset.get("path") or "").strip()
+    caption = escape_latex(str(asset.get("caption") or "").strip())
+    label = escape_latex(str(asset.get("label") or asset.get("id") or "").strip())
+    return (
+        "\\begin{figure}[htbp]\n"
+        "\\centering\n"
+        f"\\includegraphics[width=\\linewidth]{{ {path} }}\n"
+        f"\\caption{{ {caption} }}\n"
+        f"\\label{{fig:{label}}}\n"
+        "\\end{figure}"
+    )
+
+
+def _html_block_for_asset(asset: dict[str, object]) -> str:
+    caption = html.escape(str(asset.get("caption") or "").strip())
+    spec = asset.get("spec") or {}
+    if isinstance(spec, dict) and spec.get("is_table"):
+        headers = spec.get("data", {}).get("headers", [])
+        rows = spec.get("data", {}).get("rows", [])
+        header_html = "".join(f"<th>{html.escape(str(item))}</th>" for item in headers)
+        row_html = "".join(
+            "<tr>" + "".join(f"<td>{html.escape(str(value))}</td>" for value in row) + "</tr>"
+            for row in rows
+        )
+        return (
+            '<figure class="generated-table">'
+            f'<table><thead><tr>{header_html}</tr></thead><tbody>{row_html}</tbody></table>'
+            f"<figcaption>{caption}</figcaption>"
+            "</figure>"
+        )
+    if asset.get("svg_content"):
+        image_html = str(asset["svg_content"])
+    else:
+        png_base64 = str(asset.get("png_base64") or "").strip()
+        image_html = f'<img src="data:image/png;base64,{png_base64}" alt="{caption}" />' if png_base64 else ""
+    return f'<figure class="generated-figure">{image_html}<figcaption>{caption}</figcaption></figure>'

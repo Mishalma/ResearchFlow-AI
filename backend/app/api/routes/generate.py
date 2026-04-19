@@ -22,12 +22,14 @@ async def generate_paper(
     if not project.extracted_text.strip():
         raise EmptyGenerationSourceError(request.project_id)
 
-    pipeline_result = await run_pipeline(project.extracted_text)
+    pipeline_result = await run_pipeline(project.extracted_text, project_id=project.id)
     updated_project = save_generated_paper(
         project_id=project.id,
         owner_uid=current_user.user_id,
         generated_paper=pipeline_result.generated_paper,
         generation_metadata=pipeline_result.metadata,
+        generated_figures=[item.model_dump(mode="python") for item in pipeline_result.generated_figures],
+        generated_tables=[item.model_dump(mode="python") for item in pipeline_result.generated_tables],
     )
 
     return GenerateResponse.from_generation(
