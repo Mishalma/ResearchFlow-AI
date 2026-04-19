@@ -1,0 +1,8 @@
+backend/.tmp
+.tmp
+backend/outputs
+backend/uploads
+backend/data/projects
+backend/static/figures
+backend/__pycache__
+backend/app/__pycache__

@@ -147,6 +147,65 @@ def test_table_renderer_handles_scalar_rows():
     assert "95 &" in rendered.latex_block or "95" in rendered.latex_block
 
 
+def test_chart_renderer_synthesizes_missing_series_data():
+    generator = FigureGenerator()
+    spec = FigureSpec(
+        id="fig1",
+        type=FigureType.BAR_CHART,
+        section="results",
+        title="Policy intervention impact",
+        caption="Fig. 1. Policy intervention impact.",
+        data={},
+        placement_hint="The system achieved 95% accuracy on the benchmark dataset.",
+        figure_number=1,
+    )
+
+    rendered = asyncio.run(generator.render_one(spec))
+
+    assert rendered.render_success
+    assert rendered.png_base64 is not None
+    assert "\\includegraphics" in rendered.latex_block
+
+
+def test_architecture_renderer_synthesizes_missing_components():
+    generator = FigureGenerator()
+    spec = FigureSpec(
+        id="fig2",
+        type=FigureType.ARCHITECTURE_DIAGRAM,
+        section="methodology",
+        title="System architecture",
+        caption="Fig. 2. System architecture.",
+        data={},
+        placement_hint="Methodology text.",
+        figure_number=2,
+    )
+
+    rendered = asyncio.run(generator.render_one(spec))
+
+    assert rendered.render_success
+    assert rendered.png_base64 is not None
+
+
+def test_table_renderer_synthesizes_missing_headers():
+    generator = FigureGenerator()
+    spec = FigureSpec(
+        id="tab2",
+        type=FigureType.TABLE,
+        section="results",
+        title="Summary table",
+        caption="Table II. Summary values.",
+        data={},
+        placement_hint="The system achieved 95% accuracy on the benchmark dataset.",
+        is_table=True,
+        table_number=2,
+    )
+
+    rendered = asyncio.run(generator.render_one(spec))
+
+    assert rendered.render_success
+    assert "Metric" in rendered.latex_block
+
+
 def test_injector_is_idempotent():
     injector = ManuscriptInjector()
     text = (

@@ -55,3 +55,4 @@ backend/data/*
 !backend/data/projects/
 backend/data/projects/*
 !backend/data/projects/.gitkeep
+.vercel

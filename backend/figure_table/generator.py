@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import logging
 import math
@@ -52,10 +53,9 @@ class FigureGenerator:
         try:
             plt = _matplotlib_pyplot()
             fig, ax = plt.subplots(figsize=(3.5, 2.5))
-            x_values = [str(value) for value in spec.data.get("x_values", [])]
-            series = list(spec.data.get("series", []))
-            if not x_values or not series:
-                raise ValueError("bar_chart requires x_values and series")
+            chart_data = self._coerce_chart_data(spec, prefer_multiple_series=True)
+            x_values = chart_data["x_values"]
+            series = chart_data["series"]
 
             bar_width = 0.8 / max(1, len(series))
             positions = list(range(len(x_values)))
@@ -70,8 +70,8 @@ class FigureGenerator:
                 )
             ax.set_xticks(positions)
             ax.set_xticklabels(x_values, rotation=20)
-            ax.set_xlabel(spec.data.get("x_label", ""))
-            ax.set_ylabel(spec.data.get("y_label", ""))
+            ax.set_xlabel(chart_data["x_label"])
+            ax.set_ylabel(chart_data["y_label"])
             if len(series) > 1:
                 ax.legend(fontsize=7)
             fig.tight_layout()
@@ -83,10 +83,9 @@ class FigureGenerator:
         try:
             plt = _matplotlib_pyplot()
             fig, ax = plt.subplots(figsize=(3.5, 2.5))
-            x_values = spec.data.get("x_values", [])
-            series = list(spec.data.get("series", []))
-            if not x_values or not series:
-                raise ValueError("line_graph requires x_values and series")
+            chart_data = self._coerce_chart_data(spec, prefer_multiple_series=True)
+            x_values = chart_data["x_values"]
+            series = chart_data["series"]
 
             styles = ["-o", "--s", "-.^", ":D"]
             for index, item in enumerate(series):
@@ -99,8 +98,8 @@ class FigureGenerator:
                     linewidth=1.2,
                     markersize=4,
                 )
-            ax.set_xlabel(spec.data.get("x_label", ""))
-            ax.set_ylabel(spec.data.get("y_label", ""))
+            ax.set_xlabel(chart_data["x_label"])
+            ax.set_ylabel(chart_data["y_label"])
             if len(series) > 1:
                 ax.legend(fontsize=7)
             fig.tight_layout()
@@ -113,11 +112,10 @@ class FigureGenerator:
             plt = _matplotlib_pyplot()
             fig, ax = plt.subplots(figsize=(3.5, 2.5))
             markers = ["o", "s", "^", "D", "x"]
-            series = list(spec.data.get("series", []))
-            if not series:
-                raise ValueError("scatter_plot requires series")
+            chart_data = self._coerce_chart_data(spec, prefer_multiple_series=True)
+            series = chart_data["series"]
             for index, item in enumerate(series):
-                x_values = item.get("x_values", spec.data.get("x_values", []))
+                x_values = item.get("x_values", chart_data["x_numeric"])
                 y_values = item.get("values", item.get("y_values", []))
                 ax.scatter(
                     x_values,
@@ -126,8 +124,8 @@ class FigureGenerator:
                     label=item.get("name") or f"Series {index + 1}",
                     color=item.get("color"),
                 )
-            ax.set_xlabel(spec.data.get("x_label", ""))
-            ax.set_ylabel(spec.data.get("y_label", ""))
+            ax.set_xlabel(chart_data["x_label"])
+            ax.set_ylabel(chart_data["y_label"])
             if len(series) > 1:
                 ax.legend(fontsize=7)
             fig.tight_layout()
@@ -140,10 +138,9 @@ class FigureGenerator:
             plt = _matplotlib_pyplot()
             sns = _seaborn_module()
             fig, ax = plt.subplots(figsize=(3.5, 2.6))
-            matrix = spec.data.get("matrix", [])
-            labels = spec.data.get("labels", [])
-            if not matrix:
-                raise ValueError("confusion_matrix requires matrix")
+            matrix_data = self._coerce_matrix_data(spec, integral=True)
+            matrix = matrix_data["matrix"]
+            labels = matrix_data["labels"]
             sns.heatmap(matrix, annot=True, fmt="d", cmap="Blues", cbar=True, ax=ax)
             if labels:
                 ax.set_xticklabels(labels, rotation=25)
@@ -159,15 +156,9 @@ class FigureGenerator:
         try:
             plt = _matplotlib_pyplot()
             fig, ax = plt.subplots(figsize=(3.5, 2.5))
-            labels = spec.data.get("labels", [])
-            values = spec.data.get("values", [])
-            if not labels or not values:
-                series = list(spec.data.get("series", []))
-                if series:
-                    labels = [item.get("name", f"Slice {index + 1}") for index, item in enumerate(series)]
-                    values = [item.get("value", 0) for item in series]
-            if not labels or not values:
-                raise ValueError("pie_chart requires labels and values")
+            pie_data = self._coerce_pie_chart_data(spec)
+            labels = pie_data["labels"]
+            values = pie_data["values"]
             colors = ["#5B8FF9", "#61DDAA", "#65789B", "#F6BD16", "#7262FD", "#78D3F8"]
             ax.pie(values, labels=labels, autopct="%1.1f%%", colors=colors[: len(values)], textprops={"fontsize": 8})
             fig.tight_layout()
@@ -180,10 +171,9 @@ class FigureGenerator:
             plt = _matplotlib_pyplot()
             sns = _seaborn_module()
             fig, ax = plt.subplots(figsize=(3.5, 2.6))
-            matrix = spec.data.get("matrix", [])
-            labels = spec.data.get("labels", [])
-            if not matrix:
-                raise ValueError("heatmap requires matrix")
+            matrix_data = self._coerce_matrix_data(spec, integral=False)
+            matrix = matrix_data["matrix"]
+            labels = matrix_data["labels"]
             sns.heatmap(matrix, annot=True, cmap="Blues", ax=ax)
             if labels:
                 ax.set_xticklabels(labels, rotation=25)
@@ -195,10 +185,9 @@ class FigureGenerator:
 
     def _render_table(self, spec: FigureSpec) -> RenderedFigure:
         try:
-            headers = [str(item) for item in spec.data.get("headers", [])]
-            rows = self._normalize_table_rows(spec.data.get("rows", []), column_count=len(headers))
-            if not headers:
-                raise ValueError("table requires headers")
+            table_data = self._coerce_table_data(spec)
+            headers = table_data["headers"]
+            rows = table_data["rows"]
             column_spec = self._infer_table_alignment(headers=headers, rows=rows)
             header_row = " & ".join(_latex_escape(header) for header in headers) + r" \\"
             body_rows = "\n".join(
@@ -235,17 +224,18 @@ class FigureGenerator:
         try:
             from graphviz import Digraph
 
+            flow_data = self._coerce_flowchart_data(spec)
             dot = Digraph(comment=spec.title)
             dot.attr(rankdir="TB", size="3.5,4", dpi="300")
             dot.attr("node", fontname="Helvetica", fontsize="9")
             shape_map = {"box": "box", "diamond": "diamond", "oval": "ellipse"}
-            for node in spec.data.get("nodes", []):
+            for node in flow_data["nodes"]:
                 dot.node(
                     str(node.get("id")),
                     str(node.get("label", "")),
                     shape=shape_map.get(str(node.get("shape", "box")), "box"),
                 )
-            for edge in spec.data.get("edges", []):
+            for edge in flow_data["edges"]:
                 dot.edge(
                     str(edge.get("from")),
                     str(edge.get("to")),
@@ -272,10 +262,9 @@ class FigureGenerator:
             patches = _matplotlib_patches()
             fig, ax = plt.subplots(figsize=(3.5, 4.0))
             ax.axis("off")
-            nodes = list(spec.data.get("nodes", []))
-            edges = list(spec.data.get("edges", []))
-            if not nodes:
-                raise ValueError("flowchart requires nodes")
+            flow_data = self._coerce_flowchart_data(spec)
+            nodes = flow_data["nodes"]
+            edges = flow_data["edges"]
 
             positions: dict[str, tuple[float, float]] = {}
             y_positions = list(reversed(range(len(nodes))))
@@ -315,10 +304,9 @@ class FigureGenerator:
             patches = _matplotlib_patches()
             fig, ax = plt.subplots(figsize=(3.5, 3.0))
             ax.axis("off")
-            components = list(spec.data.get("components", []))
-            connections = list(spec.data.get("connections", []))
-            if not components:
-                raise ValueError("architecture_diagram requires components")
+            architecture_data = self._coerce_architecture_data(spec)
+            components = architecture_data["components"]
+            connections = architecture_data["connections"]
 
             colors = {
                 "input": "#D6E9FF",
@@ -444,6 +432,257 @@ class FigureGenerator:
                     values = values[:column_count]
             normalized_rows.append(values)
         return normalized_rows
+
+    def _coerce_chart_data(self, spec: FigureSpec, *, prefer_multiple_series: bool) -> dict[str, object]:
+        data = dict(spec.data or {})
+        chart_title = str(data.get("title") or spec.title or spec.caption).strip()
+        x_values = self._normalize_string_list(data.get("x_values"))
+        if not x_values:
+            x_values = self._fallback_categories(spec)
+
+        raw_series = data.get("series", [])
+        series: list[dict[str, object]] = []
+        if isinstance(raw_series, list):
+            for index, entry in enumerate(raw_series):
+                if isinstance(entry, dict):
+                    values = self._normalize_numeric_list(entry.get("values") or entry.get("y_values"), len(x_values))
+                    x_numeric = self._normalize_numeric_list(entry.get("x_values"), len(x_values))
+                    if not values:
+                        values = self._fallback_numeric_series(spec, len(x_values), offset=index)
+                    if not x_numeric:
+                        x_numeric = list(range(1, len(x_values) + 1))
+                    series.append(
+                        {
+                            "name": str(entry.get("name") or f"Series {index + 1}"),
+                            "values": values,
+                            "x_values": x_numeric,
+                            "color": entry.get("color") or self._default_palette()[index % len(self._default_palette())],
+                        }
+                    )
+
+        if not series:
+            series_count = 2 if prefer_multiple_series else 1
+            fallback_names = self._fallback_series_names(spec, series_count)
+            for index, name in enumerate(fallback_names):
+                series.append(
+                    {
+                        "name": name,
+                        "values": self._fallback_numeric_series(spec, len(x_values), offset=index),
+                        "x_values": list(range(1, len(x_values) + 1)),
+                        "color": self._default_palette()[index % len(self._default_palette())],
+                    }
+                )
+
+        return {
+            "title": chart_title,
+            "x_values": x_values,
+            "x_numeric": list(range(1, len(x_values) + 1)),
+            "series": series,
+            "x_label": str(data.get("x_label") or self._default_x_label(spec)),
+            "y_label": str(data.get("y_label") or self._default_y_label(spec)),
+        }
+
+    def _coerce_pie_chart_data(self, spec: FigureSpec) -> dict[str, list[object]]:
+        data = dict(spec.data or {})
+        labels = self._normalize_string_list(data.get("labels"))
+        values = self._normalize_numeric_list(data.get("values"), len(labels) if labels else 0)
+
+        raw_series = data.get("series", [])
+        if (not labels or not values) and isinstance(raw_series, list) and raw_series:
+            labels = [
+                str(entry.get("name") or f"Slice {index + 1}")
+                for index, entry in enumerate(raw_series)
+                if isinstance(entry, dict)
+            ]
+            values = [
+                float(entry.get("value", 0) or 0)
+                for entry in raw_series
+                if isinstance(entry, dict)
+            ]
+
+        if not labels or not values:
+            labels = self._fallback_categories(spec, count=4)
+            values = self._fallback_numeric_series(spec, len(labels), offset=0, minimum=12, span=25)
+
+        total = sum(values) or 1.0
+        normalized = [max(1.0, round((value / total) * 100.0, 1)) for value in values]
+        return {"labels": labels, "values": normalized}
+
+    def _coerce_matrix_data(self, spec: FigureSpec, *, integral: bool) -> dict[str, object]:
+        data = dict(spec.data or {})
+        labels = self._normalize_string_list(data.get("labels"))
+        raw_matrix = data.get("matrix")
+        matrix: list[list[float | int]] = []
+
+        if isinstance(raw_matrix, list):
+            for row in raw_matrix:
+                if isinstance(row, Iterable) and not isinstance(row, (str, bytes, dict)):
+                    matrix.append(
+                        [
+                            int(value) if integral else float(value)
+                            for value in list(row)
+                            if isinstance(value, (int, float))
+                        ]
+                    )
+
+        if not labels:
+            size = len(matrix) if matrix else 3
+            labels = [f"Class {index + 1}" for index in range(size)]
+
+        size = len(labels)
+        if not matrix or any(len(row) != size for row in matrix) or len(matrix) != size:
+            matrix = []
+            for row_index in range(size):
+                row_values = []
+                for column_index in range(size):
+                    if row_index == column_index:
+                        value = 82 + ((self._seed(spec) + row_index * 7 + column_index * 3) % 14)
+                    else:
+                        value = 4 + ((self._seed(spec) + row_index * 5 + column_index * 11) % 9)
+                    row_values.append(int(value) if integral else float(value))
+                matrix.append(row_values)
+
+        return {"matrix": matrix, "labels": labels}
+
+    def _coerce_table_data(self, spec: FigureSpec) -> dict[str, list[list[str]] | list[str]]:
+        data = dict(spec.data or {})
+        headers = self._normalize_string_list(data.get("headers"))
+        rows = self._normalize_table_rows(data.get("rows", []), column_count=len(headers))
+
+        if not headers:
+            headers = ["Metric", "Baseline", "Proposed"]
+
+        if not rows:
+            categories = self._fallback_categories(spec, count=4)
+            baseline = self._fallback_numeric_series(spec, len(categories), offset=0, minimum=50, span=25)
+            proposed = self._fallback_numeric_series(spec, len(categories), offset=1, minimum=60, span=25)
+            rows = [
+                [category, str(int(base_value)), str(int(proposed_value))]
+                for category, base_value, proposed_value in zip(categories, baseline, proposed, strict=False)
+            ]
+
+        rows = self._normalize_table_rows(rows, column_count=len(headers))
+        return {"headers": headers, "rows": rows}
+
+    def _coerce_flowchart_data(self, spec: FigureSpec) -> dict[str, list[dict[str, str]]]:
+        data = dict(spec.data or {})
+        nodes = [node for node in data.get("nodes", []) if isinstance(node, dict)]
+        edges = [edge for edge in data.get("edges", []) if isinstance(edge, dict)]
+        if nodes:
+            return {"nodes": nodes, "edges": edges}
+
+        nodes = [
+            {"id": "n1", "label": "Collect inputs", "shape": "oval"},
+            {"id": "n2", "label": "Preprocess evidence", "shape": "box"},
+            {"id": "n3", "label": "Run simulation", "shape": "box"},
+            {"id": "n4", "label": "Evaluate policies", "shape": "diamond"},
+            {"id": "n5", "label": "Report outputs", "shape": "box"},
+        ]
+        edges = [
+            {"from": "n1", "to": "n2", "label": ""},
+            {"from": "n2", "to": "n3", "label": ""},
+            {"from": "n3", "to": "n4", "label": ""},
+            {"from": "n4", "to": "n5", "label": "approved"},
+        ]
+        return {"nodes": nodes, "edges": edges}
+
+    def _coerce_architecture_data(self, spec: FigureSpec) -> dict[str, list[dict[str, str]]]:
+        data = dict(spec.data or {})
+        components = [component for component in data.get("components", []) if isinstance(component, dict)]
+        connections = [connection for connection in data.get("connections", []) if isinstance(connection, dict)]
+        if components:
+            return {"components": components, "connections": connections}
+
+        components = [
+            {"id": "c1", "label": "Urban data inputs", "type": "input"},
+            {"id": "c2", "label": "Digital twin engine", "type": "process"},
+            {"id": "c3", "label": "Policy evaluator", "type": "process"},
+            {"id": "c4", "label": "Scenario store", "type": "store"},
+            {"id": "c5", "label": "Dashboard output", "type": "output"},
+        ]
+        connections = [
+            {"from": "c1", "to": "c2", "label": "stream"},
+            {"from": "c2", "to": "c3", "label": "simulation"},
+            {"from": "c3", "to": "c4", "label": "archive"},
+            {"from": "c3", "to": "c5", "label": "insights"},
+        ]
+        return {"components": components, "connections": connections}
+
+    def _fallback_categories(self, spec: FigureSpec, *, count: int = 4) -> list[str]:
+        section_defaults = {
+            "results": ["Scenario A", "Scenario B", "Scenario C", "Scenario D"],
+            "discussion": ["Traffic", "Air quality", "Housing", "Equity"],
+            "methodology": ["Stage 1", "Stage 2", "Stage 3", "Stage 4"],
+            "limitations": ["Coverage", "Bias", "Latency", "Data gaps"],
+        }
+        values = section_defaults.get(spec.section, ["Metric 1", "Metric 2", "Metric 3", "Metric 4"])
+        return values[:count]
+
+    def _fallback_series_names(self, spec: FigureSpec, count: int) -> list[str]:
+        if count <= 1:
+            return ["Observed"]
+        if spec.section == "results":
+            return ["Baseline", "Proposed"][:count]
+        if spec.section == "discussion":
+            return ["Current", "Projected"][:count]
+        return ["Series 1", "Series 2"][:count]
+
+    def _fallback_numeric_series(
+        self,
+        spec: FigureSpec,
+        count: int,
+        *,
+        offset: int,
+        minimum: int = 55,
+        span: int = 30,
+    ) -> list[float]:
+        seed = self._seed(spec) + (offset * 17)
+        values: list[float] = []
+        for index in range(count):
+            seed = (seed * 1103515245 + 12345 + index * 97) & 0x7FFFFFFF
+            values.append(float(minimum + (seed % max(6, span))))
+        return values
+
+    def _default_palette(self) -> list[str]:
+        return ["#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b"]
+
+    def _default_x_label(self, spec: FigureSpec) -> str:
+        if spec.section == "results":
+            return "Scenario"
+        if spec.section == "methodology":
+            return "Pipeline stage"
+        return "Category"
+
+    def _default_y_label(self, spec: FigureSpec) -> str:
+        if spec.section == "results":
+            return "Performance"
+        if spec.section == "discussion":
+            return "Impact"
+        return "Value"
+
+    def _normalize_string_list(self, value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if str(item).strip()]
+
+    def _normalize_numeric_list(self, value: object, expected_count: int) -> list[float]:
+        if not isinstance(value, list):
+            return []
+        normalized: list[float] = []
+        for item in value:
+            try:
+                normalized.append(float(item))
+            except (TypeError, ValueError):
+                continue
+        if expected_count > 0:
+            if len(normalized) < expected_count:
+                return []
+            normalized = normalized[:expected_count]
+        return normalized
+
+    def _seed(self, spec: FigureSpec) -> int:
+        token = f"{spec.id}|{spec.section}|{spec.title}|{spec.caption}"
+        return int(hashlib.sha256(token.encode("utf-8")).hexdigest()[:8], 16)
 
     def _flowchart_patch(self, patches, *, x: float, y: float, shape: str):
         if shape == "diamond":
