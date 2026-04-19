@@ -8,3 +8,6 @@ outputs/
 static/figures/
 data/
 .tmp-*
+pytest-cache-files-*
+pytest-temp/
+verify-temp/

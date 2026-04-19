@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import html
 import re
 import shutil
@@ -348,6 +349,69 @@ def copy_support_assets(*, config: FormattingConfig, work_dir: Path) -> None:
         source = Path(asset_dir) / asset_name
         if source.exists():
             shutil.copy2(source, work_dir / asset_name)
+
+
+def materialize_figure_assets(
+    *,
+    figures: dict[str, list[dict[str, object]]] | None,
+    work_dir: Path,
+) -> list[CompilerDiagnostic]:
+    diagnostics: list[CompilerDiagnostic] = []
+    if not figures:
+        return diagnostics
+
+    figure_dir = work_dir / "figures"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+
+    for section_assets in figures.values():
+        for asset in section_assets:
+            asset_id = str(asset.get("id") or "").strip()
+            if not asset_id:
+                spec = asset.get("spec")
+                if isinstance(spec, dict):
+                    asset_id = str(spec.get("id") or "").strip()
+            if not asset_id:
+                continue
+
+            target_path = figure_dir / f"{asset_id}.png"
+            if target_path.exists():
+                continue
+
+            asset_path = str(asset.get("asset_path") or "").strip()
+            if asset_path:
+                source_path = Path(asset_path)
+                if source_path.exists():
+                    shutil.copy2(source_path, target_path)
+                    continue
+
+            png_base64 = str(asset.get("png_base64") or "").strip()
+            if png_base64:
+                try:
+                    target_path.write_bytes(base64.b64decode(png_base64))
+                    continue
+                except ValueError:
+                    diagnostics.append(
+                        CompilerDiagnostic(
+                            severity="error",
+                            category="invalid_asset_payload",
+                            message=f"Generated figure '{asset_id}' had invalid PNG data.",
+                            retryable=True,
+                            remediation_target="assets",
+                        )
+                    )
+                    continue
+
+            diagnostics.append(
+                CompilerDiagnostic(
+                    severity="error",
+                    category="missing_asset",
+                    message=f"Missing figure or asset file 'figures/{asset_id}.png'.",
+                    retryable=True,
+                    remediation_target="assets",
+                )
+            )
+
+    return diagnostics
 
 
 def maybe_cleanup_work_dir(*, work_dir: Path, should_cleanup: bool) -> None:

@@ -26,6 +26,7 @@ from formatting.utils import (
     build_document_context,
     build_legacy_paper_snapshot,
     create_work_dir,
+    materialize_figure_assets,
     maybe_cleanup_work_dir,
     summarize_diagnostics,
     validate_input_content,
@@ -107,6 +108,7 @@ async def run_formatting_pipeline(
         )
 
     work_dir = create_work_dir(resolved_settings, resolved_trace_id)
+    asset_diagnostics = materialize_figure_assets(figures=figures, work_dir=work_dir)
     context = build_document_context(
         paper=parsed_paper,
         profile=profile,
@@ -150,6 +152,15 @@ async def run_formatting_pipeline(
         formatted_paper.compile_report.retry_recommended = (
             formatted_paper.compile_report.retry_recommended
             or any(item.retryable for item in input_diagnostics)
+        )
+    if asset_diagnostics:
+        formatted_paper.compile_report.diagnostics = [
+            *asset_diagnostics,
+            *formatted_paper.compile_report.diagnostics,
+        ]
+        formatted_paper.compile_report.retry_recommended = (
+            formatted_paper.compile_report.retry_recommended
+            or any(item.retryable for item in asset_diagnostics)
         )
 
     paper_snapshot = build_legacy_paper_snapshot(parsed_paper)

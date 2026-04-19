@@ -66,6 +66,48 @@ def _paper_summary(paper: ResearchPaperSchema) -> str:
     )
 
 
+def _extract_agent_error_details(error_payload: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(error_payload, dict):
+        return {}
+
+    details_payload = error_payload.get("details")
+    details = dict(details_payload) if isinstance(details_payload, dict) else {}
+
+    for key in ("code", "trace_id"):
+        value = error_payload.get(key)
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized:
+                details.setdefault(key, normalized)
+
+    return details
+
+
+def _raise_agent_runtime_error(
+    *,
+    agent_name: str,
+    error_payload: dict[str, object] | None,
+    default_message: str,
+) -> None:
+    message = default_message
+    if isinstance(error_payload, dict):
+        candidate_message = error_payload.get("message")
+        if isinstance(candidate_message, str):
+            normalized_message = candidate_message.strip()
+            if normalized_message:
+                message = normalized_message
+
+    details = _extract_agent_error_details(error_payload)
+    if details:
+        logger.warning("Agent %s failed with details: %s", agent_name, details)
+
+    raise AgentExecutionError(
+        agent_name,
+        message=message,
+        details=details or None,
+    )
+
+
 async def _dispatch_validated_stage(
     *,
     a2a_manager: A2AManager,
@@ -478,9 +520,10 @@ async def run_pipeline(
     )
 
     if formatting_result.error is not None:
-        raise AgentExecutionError(
-            formatting_agent.agent_name,
-            message=str(formatting_result.error.get("message") or "Formatting failed."),
+        _raise_agent_runtime_error(
+            agent_name=formatting_agent.agent_name,
+            error_payload=formatting_result.error,
+            default_message="Formatting failed.",
         )
 
     humanizer_started = perf_counter()
@@ -521,9 +564,10 @@ async def run_pipeline(
     )
 
     if originality_result.error is not None:
-        raise AgentExecutionError(
-            originality_agent.agent_name,
-            message=str(originality_result.error.get("message") or "Originality review failed."),
+        _raise_agent_runtime_error(
+            agent_name=originality_agent.agent_name,
+            error_payload=originality_result.error,
+            default_message="Originality review failed.",
         )
 
     total_duration_ms = (perf_counter() - start_time) * 1000

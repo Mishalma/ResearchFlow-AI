@@ -139,8 +139,12 @@ class GenerationConfigurationError(AppError):
 
 
 class GenerationError(AppError):
-    def __init__(self, message: str = "Unable to generate structured paper"):
-        super().__init__(message, status.HTTP_502_BAD_GATEWAY)
+    def __init__(
+        self,
+        message: str = "Unable to generate structured paper",
+        details: dict[str, object] | None = None,
+    ):
+        super().__init__(message, status.HTTP_502_BAD_GATEWAY, details=details)
 
 
 class PaperValidationError(GenerationError):
@@ -175,9 +179,14 @@ class InvalidAgentResponseError(GenerationError):
 
 
 class AgentExecutionError(GenerationError):
-    def __init__(self, agent_name: str, message: str | None = None):
+    def __init__(
+        self,
+        agent_name: str,
+        message: str | None = None,
+        details: dict[str, object] | None = None,
+    ):
         detail = message or "Agent processing failed."
-        super().__init__(f"Agent '{agent_name}' failed. {detail}")
+        super().__init__(f"Agent '{agent_name}' failed. {detail}", details=details)
 
 
 class MCPToolError(GenerationError):
