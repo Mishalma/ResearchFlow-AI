@@ -98,6 +98,44 @@ def test_extractor_parses_valid_payload():
     assert specs[1].table_number == 1
 
 
+def test_extractor_normalizes_section_aliases():
+    extractor = FigureExtractor()
+    specs = asyncio.run(
+        extractor.extract(
+            "Sample draft",
+            _FakeGeminiClient(
+                {
+                    "figures": [
+                        {
+                            "id": "figX",
+                            "type": "architecture_diagram",
+                            "section": "Methods",
+                            "title": "System architecture",
+                            "caption": "Architecture overview",
+                            "is_table": False,
+                            "placement_hint": "Methodology text.",
+                            "data": {},
+                        },
+                        {
+                            "id": "figY",
+                            "type": "bar_chart",
+                            "section": "Experimental Results",
+                            "title": "Accuracy comparison",
+                            "caption": "Accuracy comparison",
+                            "is_table": False,
+                            "placement_hint": "Results text.",
+                            "data": {},
+                        },
+                    ]
+                }
+            ),
+        )
+    )
+
+    assert specs[0].section == "methodology"
+    assert specs[1].section == "results"
+
+
 def test_extractor_returns_empty_list_on_failure():
     extractor = FigureExtractor()
 

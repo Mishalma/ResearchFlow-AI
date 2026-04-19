@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Iterable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class FigureType(str, Enum):
@@ -18,6 +18,53 @@ class FigureType(str, Enum):
     CONFUSION_MATRIX = "confusion_matrix"
     PIE_CHART = "pie_chart"
     HEATMAP = "heatmap"
+
+
+_SECTION_ALIAS_MAP = {
+    "abstract": "abstract",
+    "intro": "introduction",
+    "introduction": "introduction",
+    "related work": "related_work",
+    "related works": "related_work",
+    "background": "related_work",
+    "literature review": "related_work",
+    "method": "methodology",
+    "methods": "methodology",
+    "methodology": "methodology",
+    "approach": "methodology",
+    "materials methods": "methodology",
+    "materials and methods": "methodology",
+    "experimental setup": "methodology",
+    "system architecture": "methodology",
+    "results": "results",
+    "result": "results",
+    "evaluation": "results",
+    "experiments": "results",
+    "experimental results": "results",
+    "findings": "results",
+    "discussion": "discussion",
+    "analysis": "discussion",
+    "limitations": "limitations",
+    "limitation": "limitations",
+    "threats to validity": "limitations",
+    "conclusion": "conclusion",
+    "conclusions": "conclusion",
+    "future work": "conclusion",
+}
+
+
+def normalize_section_name(value: object) -> str:
+    normalized = (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("_", " ")
+        .replace("-", " ")
+        .replace("&", " and ")
+        .replace("/", " and ")
+    )
+    normalized = " ".join(normalized.split())
+    return _SECTION_ALIAS_MAP.get(normalized, normalized.replace(" ", "_"))
 
 
 class FigureSpec(BaseModel):
@@ -35,6 +82,11 @@ class FigureSpec(BaseModel):
     figure_number: int | None = None
     table_number: int | None = None
     is_table: bool = False
+
+    @field_validator("section", mode="before")
+    @classmethod
+    def normalize_section(cls, value: object) -> str:
+        return normalize_section_name(value)
 
 
 class RenderedFigure(BaseModel):

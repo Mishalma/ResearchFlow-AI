@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 
-from figure_table.models import RenderedFigure, figure_reference_label
+from figure_table.models import RenderedFigure, figure_reference_label, normalize_section_name
 
 logger = logging.getLogger("papereasy.backend.figure_table.injector")
 
@@ -90,7 +90,8 @@ class ManuscriptInjector:
         return updated
 
     def _append_to_section(self, text: str, *, section_name: str, reference: str, marker: str) -> str:
-        pattern = _SECTION_HEADING_MAP.get(section_name)
+        normalized_section_name = normalize_section_name(section_name)
+        pattern = _SECTION_HEADING_MAP.get(normalized_section_name)
         if pattern is None:
             return self._append_to_tail(text, reference=reference, marker=marker)
 
@@ -102,7 +103,7 @@ class ManuscriptInjector:
         next_positions = [
             next_match.start()
             for key, next_pattern in _SECTION_HEADING_MAP.items()
-            if key != section_name
+            if key != normalized_section_name
             for next_match in [next_pattern.search(text, section_start)]
             if next_match is not None
         ]
