@@ -22,6 +22,8 @@ from core.exceptions import (
     PaperValidationError,
 )
 from core.vertex_client import VertexGeminiClient
+from humanizer.config import MAX_ITERATIONS
+from humanizer.utils import build_section_text_map
 from mcp.mcp_server import build_default_mcp_server
 from models.generation import (
     AgentTiming,
@@ -39,6 +41,7 @@ from models.generation import (
 from orchestration.a2a_manager import A2AManager, InProcessTransport
 
 logger = logging.getLogger("papereasy.backend.pipeline")
+MAX_HUMANIZER_RETRIES = MAX_ITERATIONS
 
 
 def _paper_summary(paper: ResearchPaperSchema) -> str:
@@ -164,11 +167,68 @@ async def _dispatch_validated_stage(
     raise PaperValidationError(recipient, ["unknown validation failure"])
 
 
+def _execute_humanizer_loop(
+    *,
+    humanizer_agent: HumanizerAgent,
+    paper: ResearchPaperSchema,
+    trace_id: str,
+    pipeline_context: dict[str, object],
+) -> HumanizerAgentOutput:
+    result = humanizer_agent.run(
+        build_section_text_map(paper),
+        paper=paper,
+        iteration=0,
+    )
+
+    for attempt in range(1, MAX_HUMANIZER_RETRIES + 1):
+        action = str(result.get("graph_action") or "accept")
+        logger.info(
+            "[Humanizer] attempt=%s action=%s composite_after=%s",
+            attempt,
+            action,
+            result.get("scores_after", {}).get("composite_score", "?"),
+        )
+
+        if action == "accept":
+            logger.info("[Humanizer] accepted after %s attempt(s)", attempt)
+            break
+
+        if action == "retry_humanizer":
+            result = humanizer_agent.run(
+                result["updated_sections"],
+                paper=paper,
+                iteration=attempt,
+            )
+            continue
+
+        if action == "loopback_writing":
+            logger.warning(
+                "[Humanizer] loopback_writing triggered - signalling writing agent",
+            )
+            pipeline_context["humanizer_loopback"] = True
+            pipeline_context["humanizer_feedback"] = result.get("scores_after", {})
+            break
+
+    else:
+        logger.warning(
+            "[Humanizer] max retries (%s) reached, proceeding with best result",
+            MAX_HUMANIZER_RETRIES,
+        )
+
+    output = humanizer_agent.build_output(
+        paper=paper,
+        runtime_result=result,
+        trace_id=trace_id,
+    )
+    return HumanizerAgentOutput.model_validate(output)
+
+
 async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineResult:
     resolved_settings = settings or get_settings()
     trace_id = str(uuid4())
     start_time = perf_counter()
     validation_events: list[str] = []
+    pipeline_context: dict[str, object] = {}
 
     vertex_client = VertexGeminiClient(resolved_settings)
     mcp_server = build_default_mcp_server()
@@ -249,20 +309,26 @@ async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineR
             message=str(formatting_result.error.get("message") or "Formatting failed."),
         )
 
-    humanizer_result, humanizer_dispatch = await _dispatch_validated_stage(
-        a2a_manager=a2a_manager,
-        sender=formatting_agent.agent_name,
-        recipient=humanizer_agent.agent_name,
-        task="humanize_ieee_paper",
+    humanizer_started = perf_counter()
+    humanizer_result = _execute_humanizer_loop(
+        humanizer_agent=humanizer_agent,
+        paper=formatting_result.paper,
         trace_id=trace_id,
-        payload={
-            "paper": formatting_result.model_dump(),
-            "written_draft": writing_result.written_draft,
-            "section_confidences": writing_result.section_confidences,
-        },
-        response_model=HumanizerAgentOutput,
+        pipeline_context=pipeline_context,
+    )
+    humanizer_duration_ms = (perf_counter() - humanizer_started) * 1000
+    humanizer_issues = validate_research_paper(
+        humanizer_result.paper,
         require_references=True,
-        validation_events=validation_events,
+    )
+    if not humanizer_result.formatted_text.strip():
+        humanizer_issues.append("formatted_text is empty")
+    if not humanizer_result.latex_ready.strip():
+        humanizer_issues.append("latex_ready is empty")
+    if humanizer_issues:
+        raise PaperValidationError(humanizer_agent.agent_name, humanizer_issues)
+    validation_events.append(
+        f"{humanizer_agent.agent_name}: completed with action {humanizer_result.graph_action or 'accept'}"
     )
 
     originality_result, originality_dispatch = await _dispatch_validated_stage(
@@ -300,7 +366,7 @@ async def run_pipeline(text: str, settings: Settings | None = None) -> PipelineR
             AgentTiming(agent=writing_agent.agent_name, duration_ms=writing_dispatch.duration_ms),
             AgentTiming(agent=citation_agent.agent_name, duration_ms=citation_dispatch.duration_ms),
             AgentTiming(agent=formatting_agent.agent_name, duration_ms=formatting_dispatch.duration_ms),
-            AgentTiming(agent=humanizer_agent.agent_name, duration_ms=humanizer_dispatch.duration_ms),
+            AgentTiming(agent=humanizer_agent.agent_name, duration_ms=humanizer_duration_ms),
             AgentTiming(agent=originality_agent.agent_name, duration_ms=originality_dispatch.duration_ms),
         ],
         mcp_tools_used=registry.get("citation_agent").enabled_tools,

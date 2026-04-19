@@ -1,15 +1,14 @@
-"""Humanizer runtime plus the guarded ADK-facing entrypoint.
+"""Runtime entrypoint for the upgraded humanizer agent.
 
-The runtime is intentionally independent from ADK so the current in-process
-pipeline, future LangGraph nodes, and tests can all reuse the same logic.
+This module exposes a synchronous humanizer core used by the pipeline bridge,
+an async compatibility wrapper for existing callers, and an optional guarded
+ADK entrypoint.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-from dataclasses import dataclass
 from statistics import mean
 from typing import Any
 from uuid import uuid4
@@ -17,10 +16,17 @@ from uuid import uuid4
 from pydantic import Field, ValidationError
 
 from core.config import Settings, get_settings
-from core.vertex_client import VertexGeminiClient
-from humanizer.config import HumanizerConfig
-from humanizer.rewriter import HybridSectionRewriter
+from humanizer.config import (
+    HUMANIZER_MODE,
+    LOG_MODE_ON_EVERY_RUN,
+    MAX_AI_PATTERN_SCORE_TO_PASS,
+    MAX_ITERATIONS,
+    MIN_BURSTINESS_TO_PASS,
+    HumanizerConfig,
+)
+from humanizer.detectors import analyze_section, composite_ai_score
 from humanizer.perplexity import PerplexityScorer
+from humanizer.rewriter import HumanizerRewriter
 from humanizer.schemas import (
     HumanizedPaperDraft,
     HumanizedSection,
@@ -37,7 +43,7 @@ from humanizer.utils import (
 )
 from models.generation import GeneratedPaper, ResearchPaperSchema
 
-logger = logging.getLogger("papereasy.backend.humanizer.agent")
+logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover - environment dependent import
     from google.adk.agents import BaseAgent as ADKBaseAgent
@@ -52,11 +58,129 @@ except Exception as exc:  # pragma: no cover - environment dependent
     ADK_IMPORT_ERROR = exc
 
 
-@dataclass(frozen=True)
-class HumanizerRuntime:
-    settings: Settings
-    config: HumanizerConfig
-    vertex_client: VertexGeminiClient
+class HumanizerRuntimeAgent:
+    """Synchronous multi-pass humanizer runtime."""
+
+    def __init__(
+        self,
+        config: HumanizerConfig | None = None,
+        settings: Settings | None = None,
+    ):
+        self.settings = settings or get_settings()
+        self.config = config or HumanizerConfig.from_settings(self.settings)
+        self.rewriter = HumanizerRewriter(self.config)
+        self.perplexity = PerplexityScorer()
+        if LOG_MODE_ON_EVERY_RUN or self.config.log_mode_on_every_run:
+            logger.info("Humanizer runtime initialized in %s mode.", self.config.runtime_mode)
+
+    def run(self, section_map: dict[str, str], iteration: int = 0) -> dict[str, Any]:
+        """Humanize a section map and return scores plus orchestration metadata."""
+
+        if LOG_MODE_ON_EVERY_RUN or self.config.log_mode_on_every_run:
+            logger.info(
+                "Humanizer run started in %s mode at iteration %s.",
+                self.config.runtime_mode,
+                iteration,
+            )
+
+        updated_sections: dict[str, str] = {}
+        scores_before_sections: dict[str, dict[str, float]] = {}
+        scores_after_sections: dict[str, dict[str, float]] = {}
+        run_log: list[str] = []
+        perplexity_before_values: list[float] = []
+        perplexity_after_values: list[float] = []
+        sections_skipped = 0
+        sections_rewritten = 0
+        actual_modes: set[str] = set()
+
+        for section_name in SECTION_ORDER:
+            original_text = str(section_map.get(section_name, "") or "").strip()
+            before_scores = composite_ai_score(original_text)
+            scores_before_sections[section_name] = before_scores
+            run_log.append(
+                f"{section_name}: before composite={before_scores.get('composite_score', 0.0):.3f}, "
+                f"burstiness={before_scores.get('burstiness', 0.0):.3f}"
+            )
+
+            if self.config.perplexity_enabled:
+                before_perplexity = self.perplexity.score(original_text)
+                if before_perplexity is not None:
+                    perplexity_before_values.append(before_perplexity)
+
+            if (
+                before_scores.get("composite_score", 0.0) <= self.config.max_ai_pattern_score_to_pass
+                and before_scores.get("burstiness", 0.0) >= self.config.min_burstiness_to_pass
+            ):
+                updated_sections[section_name] = original_text
+                scores_after_sections[section_name] = before_scores
+                sections_skipped += 1
+                run_log.append(f"{section_name}: pass without rewrite")
+                continue
+
+            rewrite_result = self.rewriter.rewrite_section(
+                section_text=original_text,
+                ai_scores=before_scores,
+                style_persona=_style_persona(section_name),
+                section_name=section_name,
+            )
+            rewritten_text = rewrite_result["rewritten_text"]
+            after_scores = composite_ai_score(rewritten_text)
+            scores_after_sections[section_name] = after_scores
+            updated_sections[section_name] = rewritten_text
+            if rewritten_text.strip() != original_text.strip():
+                sections_rewritten += 1
+            actual_modes.add(str(rewrite_result["rewriter_used"]))
+
+            if self.config.perplexity_enabled:
+                after_perplexity = self.perplexity.score(rewritten_text)
+                if after_perplexity is not None:
+                    perplexity_after_values.append(after_perplexity)
+
+            run_log.append(
+                f"{section_name}: after composite={after_scores.get('composite_score', 0.0):.3f}, "
+                f"targeted={rewrite_result['paragraphs_targeted']}, "
+                f"accepted={rewrite_result['paragraphs_accepted']}, "
+                f"rejected_drift={rewrite_result['paragraphs_rejected_drift']}, "
+                f"mode={rewrite_result['rewriter_used']}"
+            )
+
+        overall_before = max(
+            (scores.get("composite_score", 0.0) for scores in scores_before_sections.values()),
+            default=0.0,
+        )
+        overall_after = max(
+            (scores.get("composite_score", 0.0) for scores in scores_after_sections.values()),
+            default=0.0,
+        )
+        graph_action = _select_graph_action(
+            composite_score=overall_after,
+            iteration=iteration,
+        )
+        rewriter_mode = _resolve_rewriter_mode(actual_modes, self.config.resolved_mode)
+
+        return {
+            "updated_sections": updated_sections,
+            "graph_action": graph_action,
+            "scores_before": {
+                "sections": scores_before_sections,
+                "composite_score": round(overall_before, 4),
+            },
+            "scores_after": {
+                "sections": scores_after_sections,
+                "composite_score": round(overall_after, 4),
+            },
+            "perplexity_before": round(mean(perplexity_before_values), 4)
+            if perplexity_before_values
+            else None,
+            "perplexity_after": round(mean(perplexity_after_values), 4)
+            if perplexity_after_values
+            else None,
+            "iteration": iteration,
+            "sections_skipped": sections_skipped,
+            "sections_rewritten": sections_rewritten,
+            "rewriter_mode": rewriter_mode,
+            "run_log": run_log,
+        }
 
 
 async def run_humanizer_pipeline(
@@ -69,13 +193,16 @@ async def run_humanizer_pipeline(
     trace_id: str | None = None,
     settings: Settings | None = None,
     config: HumanizerConfig | None = None,
-    vertex_client: VertexGeminiClient | None = None,
+    vertex_client: object | None = None,
     logger_: logging.Logger | None = None,
 ) -> HumanizerAgentResult:
+    """Compatibility async wrapper that returns the legacy structured result."""
+
+    del formatted_text, latex_ready, written_draft, section_confidences, vertex_client
+
     active_logger = logger_ or logger
     resolved_settings = settings or get_settings()
     resolved_config = config or HumanizerConfig.from_settings(resolved_settings)
-    resolved_vertex_client = vertex_client or VertexGeminiClient(resolved_settings)
     resolved_trace_id = trace_id or str(uuid4())
 
     if paper in (None, "", {}):
@@ -96,126 +223,230 @@ async def run_humanizer_pipeline(
             details={"validation_errors": exc.errors()},
         )
 
-    if not (formatted_text or "").strip():
-        formatted_text = build_generated_paper(source_paper=parsed_paper, section_texts=build_section_text_map(parsed_paper)).formatted_text
-    if not (latex_ready or "").strip():
-        latex_ready = build_generated_paper(source_paper=parsed_paper, section_texts=build_section_text_map(parsed_paper)).latex_ready
-
-    if not formatted_text.strip():
-        return _build_error_result(
-            code="missing_formatted_text",
-            message="The humanizer agent requires non-empty formatted text.",
-            trace_id=resolved_trace_id,
-            details={},
-        )
-
-    active_logger.info("Humanizer trace %s started for paper '%s'.", resolved_trace_id, parsed_paper.title[:80])
-
-    section_texts = build_section_text_map(parsed_paper)
-    confidence_map = _normalize_section_confidences(section_confidences)
-    if written_draft not in (None, "", {}):
-        confidence_map = _merge_confidences_from_written_draft(
-            written_draft=written_draft,
-            existing=confidence_map,
-            logger_=active_logger,
-        )
-
-    perplexity_scorer = PerplexityScorer(resolved_config)
-    rewriter = HybridSectionRewriter(
-        config=resolved_config,
-        vertex_client=resolved_vertex_client if resolved_config.use_model_rewriter else None,
-        perplexity_scorer=perplexity_scorer,
+    section_map = build_section_text_map(parsed_paper)
+    runtime = HumanizerRuntimeAgent(config=resolved_config, settings=resolved_settings)
+    runtime_result = runtime.run(section_map, iteration=0)
+    output = build_humanizer_output(
+        paper=parsed_paper,
+        runtime_result=runtime_result,
+        trace_id=resolved_trace_id,
     )
 
-    humanized_sections: dict[str, HumanizedSection] = {}
-    ai_before_scores: list[float] = []
-    ai_after_scores: list[float] = []
-    perplexity_before_scores: list[float] = []
-    perplexity_after_scores: list[float] = []
-    total_iterations = 0
-    section_semaphore = asyncio.Semaphore(resolved_config.max_parallel_sections)
-    section_tasks = [
-        _humanize_section(
-            section_name=section_name,
-            original_text=section_texts[section_name],
-            section_confidence=confidence_map.get(section_name),
-            trace_id=resolved_trace_id,
-            rewriter=rewriter,
-            config=resolved_config,
-            logger_=active_logger,
-            semaphore=section_semaphore,
-        )
-        for section_name in SECTION_ORDER
-    ]
-    for humanized_section, metrics in await asyncio.gather(*section_tasks):
-        humanized_sections[humanized_section.section_name] = humanized_section
-        ai_before_scores.append(metrics["ai_before"])
-        ai_after_scores.append(metrics["ai_after"])
-        if metrics["perplexity_before_available"]:
-            perplexity_before_scores.append(metrics["perplexity_before"])
-        if metrics["perplexity_after_available"]:
-            perplexity_after_scores.append(metrics["perplexity_after"])
-        total_iterations += int(metrics["iterations"])
+    active_logger.info(
+        "Humanizer pipeline trace %s finished with action=%s composite_after=%.3f mode=%s",
+        resolved_trace_id,
+        output.graph_action,
+        output.ai_pattern_score_after or 0.0,
+        runtime_result.get("rewriter_mode", HUMANIZER_MODE),
+    )
 
-    final_section_texts = {
-        section_name: section.text
-        for section_name, section in humanized_sections.items()
-    }
-    paper_snapshot = build_generated_paper(source_paper=parsed_paper, section_texts=final_section_texts)
-    graph_action = _select_graph_action(
-        sections=humanized_sections,
-        config=resolved_config,
-    )
-    humanized_draft = HumanizedPaperDraft(
-        sections=humanized_sections,
-        global_ai_pattern_score_before=round(mean(ai_before_scores), 4) if ai_before_scores else 0.0,
-        global_ai_pattern_score_after=round(mean(ai_after_scores), 4) if ai_after_scores else 0.0,
-        global_perplexity_before=round(mean(perplexity_before_scores), 4) if perplexity_before_scores else 0.0,
-        global_perplexity_after=round(mean(perplexity_after_scores), 4) if perplexity_after_scores else 0.0,
-        passed_threshold=graph_action == "accept",
-        graph_action=graph_action,
-        metadata={
-            "trace_id": resolved_trace_id,
-            "iteration_count": total_iterations,
-            "formatted_text_length": len(formatted_text),
-            "latex_ready_length": len(latex_ready or ""),
-            "perplexity_available": bool(perplexity_before_scores or perplexity_after_scores),
-        },
-    )
     return HumanizerAgentResult(
-        humanized_draft=humanized_draft,
-        paper_snapshot=paper_snapshot,
+        humanized_draft=HumanizedPaperDraft.model_validate(output.humanized_draft or {}),
+        paper_snapshot=GeneratedPaper(
+            paper=output.paper,
+            formatted_text=output.formatted_text,
+            latex_ready=output.latex_ready,
+        ),
         trace_id=resolved_trace_id,
         metadata={
-            "graph_action": graph_action,
-            "iteration_count": total_iterations,
+            "graph_action": output.graph_action,
+            "iteration": output.iteration_count,
+            "rewriter_mode": runtime_result.get("rewriter_mode", HUMANIZER_MODE),
+            "run_log": runtime_result.get("run_log", []),
         },
     )
+
+
+def build_humanizer_output(
+    *,
+    paper: ResearchPaperSchema,
+    runtime_result: dict[str, Any],
+    trace_id: str | None = None,
+) -> "HumanizerAgentOutput":
+    """Build the pipeline-facing humanizer output from the raw runtime result."""
+
+    from models.generation import HumanizerAgentOutput
+
+    original_section_map = build_section_text_map(paper)
+    updated_sections = {
+        key: str(value or "").strip()
+        for key, value in dict(runtime_result.get("updated_sections", {})).items()
+    }
+    generated_paper = build_generated_paper(
+        source_paper=paper,
+        section_texts=updated_sections,
+    )
+
+    section_reports: dict[str, HumanizedSection] = {}
+    before_sections = runtime_result.get("scores_before", {}).get("sections", {})
+    after_sections = runtime_result.get("scores_after", {}).get("sections", {})
+    for section_name in SECTION_ORDER:
+        original_text = original_section_map.get(section_name, "").strip()
+        final_text = updated_sections.get(section_name, original_text)
+        analysis = analyze_section(
+            section_name=section_name,
+            text=final_text,
+        )
+        before_scores = before_sections.get(section_name, composite_ai_score(original_text))
+        after_scores = after_sections.get(section_name, composite_ai_score(final_text))
+        passed_threshold = (
+            after_scores.get("composite_score", 0.0) <= MAX_AI_PATTERN_SCORE_TO_PASS
+            and after_scores.get("burstiness", 0.0) >= MIN_BURSTINESS_TO_PASS
+        )
+        needs_writer_loopback = after_scores.get("composite_score", 0.0) > 0.75
+        needs_graph_retry = (
+            not passed_threshold
+            and not needs_writer_loopback
+            and runtime_result.get("graph_action") == "retry_humanizer"
+        )
+        section_reports[section_name] = HumanizedSection(
+            section_name=section_name,
+            text=final_text,
+            diff_summary=build_diff_summary(original_text, final_text),
+            report=SectionHumanizationReport(
+                section_name=section_name,
+                original_text=original_text,
+                final_text=final_text,
+                original_perplexity=0.0,
+                final_perplexity=0.0,
+                detected_patterns=analysis.detected_patterns,
+                paragraph_reports=[
+                    ParagraphHumanizationReport(
+                        paragraph_index=index,
+                        original_perplexity=0.0,
+                        final_perplexity=0.0,
+                        cadence_score_before=before_scores.get("cadence_uniformity", 0.0),
+                        cadence_score_after=after_scores.get("cadence_uniformity", 0.0),
+                        ai_pattern_score_before=before_scores.get("composite_score", 0.0),
+                        ai_pattern_score_after=after_scores.get("composite_score", 0.0),
+                        rewrites_applied=[],
+                    )
+                    for index, _ in enumerate(
+                        [part for part in final_text.split("\n\n") if part.strip()]
+                    )
+                ],
+                rewrite_iterations=int(runtime_result.get("iteration", 0)),
+                passed_threshold=passed_threshold,
+                needs_graph_retry=needs_graph_retry,
+                needs_writer_loopback=needs_writer_loopback,
+            ),
+        )
+
+    humanized_draft = HumanizedPaperDraft(
+        sections=section_reports,
+        global_ai_pattern_score_before=float(
+            runtime_result.get("scores_before", {}).get("composite_score", 0.0)
+        ),
+        global_ai_pattern_score_after=float(
+            runtime_result.get("scores_after", {}).get("composite_score", 0.0)
+        ),
+        global_perplexity_before=float(runtime_result.get("perplexity_before") or 0.0),
+        global_perplexity_after=float(runtime_result.get("perplexity_after") or 0.0),
+        passed_threshold=runtime_result.get("graph_action") == "accept",
+        graph_action=str(runtime_result.get("graph_action", "accept")),
+        metadata={
+            "iteration_count": int(runtime_result.get("iteration", 0)),
+            "sections_skipped": int(runtime_result.get("sections_skipped", 0)),
+            "sections_rewritten": int(runtime_result.get("sections_rewritten", 0)),
+            "rewriter_mode": runtime_result.get("rewriter_mode", HUMANIZER_MODE),
+            "run_log": list(runtime_result.get("run_log", [])),
+            "scores_before": runtime_result.get("scores_before", {}),
+            "scores_after": runtime_result.get("scores_after", {}),
+        },
+    )
+    return HumanizerAgentOutput(
+        paper=generated_paper.paper,
+        formatted_text=generated_paper.formatted_text,
+        latex_ready=generated_paper.latex_ready,
+        humanized_draft=humanized_draft.model_dump(mode="python"),
+        ai_pattern_score_before=humanized_draft.global_ai_pattern_score_before,
+        ai_pattern_score_after=humanized_draft.global_ai_pattern_score_after,
+        perplexity_before=runtime_result.get("perplexity_before"),
+        perplexity_after=runtime_result.get("perplexity_after"),
+        iteration_count=int(runtime_result.get("iteration", 0)),
+        graph_action=humanized_draft.graph_action,
+        trace_id=trace_id,
+        error=None,
+    )
+
+
+def _build_error_result(
+    *,
+    code: str,
+    message: str,
+    trace_id: str,
+    details: dict[str, Any],
+) -> HumanizerAgentResult:
+    return HumanizerAgentResult(
+        error=HumanizerAgentError(
+            code=code,
+            message=message,
+            trace_id=trace_id,
+            details=details,
+        ),
+        trace_id=trace_id,
+        metadata={"status": "error"},
+    )
+
+
+def _style_persona(section_name: str) -> str:
+    personas = {
+        "abstract": "Compact and natural academic prose with a crisp opening cadence.",
+        "introduction": "Scholarly but human, with more variety in sentence rhythm.",
+        "related_work": "Balanced comparative prose that avoids stock survey phrasing.",
+        "methodology": "Precise technical writing with less robotic repetition.",
+        "results": "Measured, evidence-led prose with stronger cadence variety.",
+        "discussion": "Analytical and reflective, closer to an experienced researcher voice.",
+        "limitations": "Direct, candid language that still reads naturally.",
+        "conclusion": "Concise synthesis with human-sounding emphasis and control.",
+    }
+    return personas.get(section_name, "Academic but conversational")
+
+
+def _select_graph_action(*, composite_score: float, iteration: int) -> str:
+    if composite_score > 0.75:
+        return "loopback_writing"
+    if composite_score > MAX_AI_PATTERN_SCORE_TO_PASS and iteration < MAX_ITERATIONS:
+        return "retry_humanizer"
+    return "accept"
+
+
+def _resolve_rewriter_mode(actual_modes: set[str], configured_mode: str) -> str:
+    """Resolve the effective rewrite mode used during a humanizer run."""
+
+    normalized = {mode.strip().lower() for mode in actual_modes if str(mode).strip()}
+    if not normalized:
+        return configured_mode
+    if len(normalized) == 1:
+        return next(iter(normalized))
+    return "mixed"
 
 
 if ADKBaseAgent is not None:
 
     class HumanizerAgent(ADKBaseAgent):
+        """Guarded ADK wrapper for the humanizer runtime."""
+
         settings: Settings = Field(default_factory=get_settings, exclude=True)
         config: HumanizerConfig = Field(default_factory=HumanizerConfig.from_settings, exclude=True)
-        vertex_client: VertexGeminiClient | None = Field(default=None, exclude=True)
 
         def __init__(
             self,
             *,
             settings: Settings | None = None,
             config: HumanizerConfig | None = None,
-            vertex_client: VertexGeminiClient | None = None,
         ):
             resolved_settings = settings or get_settings()
             resolved_config = config or HumanizerConfig.from_settings(resolved_settings)
-            resolved_client = vertex_client or VertexGeminiClient(resolved_settings)
             super().__init__(
                 name="humanizer_agent",
-                description="Reduces AI-writing signals in formatted IEEE paper text while preserving meaning, citations, LaTeX safety, and section intent.",
+                description="Humanizes formatted academic manuscript sections using a multi-pass rewrite loop.",
                 settings=resolved_settings,
                 config=resolved_config,
-                vertex_client=resolved_client,
+            )
+            self._runtime = HumanizerRuntimeAgent(
+                config=resolved_config,
+                settings=resolved_settings,
             )
 
         async def _run_async_impl(self, ctx) -> Any:
@@ -225,14 +456,13 @@ if ADKBaseAgent is not None:
 
             result = await run_humanizer_pipeline(
                 paper=state.get("paper"),
-                formatted_text=_coerce_optional_text(state.get("formatted_text")),
-                latex_ready=_coerce_optional_text(state.get("latex_ready")),
+                formatted_text=str(state.get("formatted_text") or ""),
+                latex_ready=str(state.get("latex_ready") or ""),
                 written_draft=state.get("written_draft"),
                 section_confidences=state.get("section_confidences"),
                 trace_id=trace_id,
                 settings=self.settings,
                 config=self.config,
-                vertex_client=self.vertex_client,
             )
 
             if result.humanized_draft is not None:
@@ -263,181 +493,11 @@ else:
             )
 
 
-def build_runtime(
-    settings: Settings | None = None,
-    config: HumanizerConfig | None = None,
-    vertex_client: VertexGeminiClient | None = None,
-) -> HumanizerRuntime:
-    resolved_settings = settings or get_settings()
-    resolved_config = config or HumanizerConfig.from_settings(resolved_settings)
-    resolved_client = vertex_client or VertexGeminiClient(resolved_settings)
-    return HumanizerRuntime(
-        settings=resolved_settings,
-        config=resolved_config,
-        vertex_client=resolved_client,
-    )
-
-
-def _build_error_result(
-    *,
-    code: str,
-    message: str,
-    trace_id: str,
-    details: dict[str, Any],
-) -> HumanizerAgentResult:
-    return HumanizerAgentResult(
-        error=HumanizerAgentError(
-            code=code,
-            message=message,
-            trace_id=trace_id,
-            details=details,
-        ),
-        trace_id=trace_id,
-        metadata={"status": "error"},
-    )
-
-
-def _normalize_section_confidences(value: dict[str, float] | None) -> dict[str, float]:
-    if not value:
-        return {}
-    normalized: dict[str, float] = {}
-    for key, score in value.items():
-        try:
-            bounded = float(score)
-        except (TypeError, ValueError):
-            continue
-        if 0.0 <= bounded <= 1.0:
-            normalized[str(key)] = bounded
-    return normalized
-
-
-async def _humanize_section(
-    *,
-    section_name: str,
-    original_text: str,
-    section_confidence: float | None,
-    trace_id: str,
-    rewriter: HybridSectionRewriter,
-    config: HumanizerConfig,
-    logger_: logging.Logger,
-    semaphore: asyncio.Semaphore,
-) -> tuple[HumanizedSection, dict[str, float | int | bool]]:
-    async with semaphore:
-        outcome = await rewriter.humanize_section(
-            section_name=section_name,
-            text=original_text,
-            section_confidence=section_confidence,
-            trace_id=trace_id,
-            logger_=logger_,
-        )
-
-    paragraph_reports = _build_paragraph_reports(outcome)
-    passed_threshold = outcome.analysis_after.ai_pattern_score <= config.ai_pattern_threshold
-    needs_writer_loopback = outcome.analysis_after.ai_pattern_score >= config.writer_loopback_threshold
-    needs_graph_retry = not passed_threshold and not needs_writer_loopback
-
-    report = SectionHumanizationReport(
-        section_name=section_name,
-        original_text=original_text,
-        final_text=outcome.text,
-        original_perplexity=outcome.section_perplexity_before.value if outcome.section_perplexity_before.available else 0.0,
-        final_perplexity=outcome.section_perplexity_after.value if outcome.section_perplexity_after.available else 0.0,
-        detected_patterns=outcome.analysis_after.detected_patterns,
-        paragraph_reports=paragraph_reports,
-        rewrite_iterations=outcome.iterations,
-        passed_threshold=passed_threshold,
-        needs_graph_retry=needs_graph_retry,
-        needs_writer_loopback=needs_writer_loopback,
-    )
-    return (
-        HumanizedSection(
-            section_name=section_name,
-            text=outcome.text,
-            diff_summary=build_diff_summary(original_text, outcome.text),
-            report=report,
-        ),
-        {
-            "ai_before": outcome.analysis_before.ai_pattern_score,
-            "ai_after": outcome.analysis_after.ai_pattern_score,
-            "perplexity_before": outcome.section_perplexity_before.value,
-            "perplexity_after": outcome.section_perplexity_after.value,
-            "perplexity_before_available": outcome.section_perplexity_before.available,
-            "perplexity_after_available": outcome.section_perplexity_after.available,
-            "iterations": outcome.iterations,
-        },
-    )
-
-
-def _merge_confidences_from_written_draft(
-    *,
-    written_draft: object,
-    existing: dict[str, float],
-    logger_: logging.Logger,
-) -> dict[str, float]:
-    merged = dict(existing)
-    try:
-        from writing.schemas import WrittenPaperDraft
-
-        parsed = WrittenPaperDraft.model_validate(written_draft)
-    except Exception as exc:
-        logger_.warning("Humanizer could not parse written_draft for confidence hints: %s", exc)
-        return merged
-
-    merged.setdefault("abstract", parsed.abstract.confidence)
-    for section_name, section in parsed.sections.items():
-        merged.setdefault(section_name, section.confidence)
-    return merged
-
-
-def _build_paragraph_reports(outcome) -> list[ParagraphHumanizationReport]:
-    reports: list[ParagraphHumanizationReport] = []
-    before_lookup = {metric_idx: metric for metric_idx, metric in enumerate(outcome.paragraph_perplexities_before)}
-    after_lookup = {metric_idx: metric for metric_idx, metric in enumerate(outcome.paragraph_perplexities_after)}
-    for paragraph in outcome.analysis_after.paragraphs:
-        before_analysis = next(
-            (item for item in outcome.analysis_before.paragraphs if item.paragraph_index == paragraph.paragraph_index),
-            paragraph,
-        )
-        before_metric = before_lookup.get(paragraph.paragraph_index)
-        after_metric = after_lookup.get(paragraph.paragraph_index)
-        reports.append(
-            ParagraphHumanizationReport(
-                paragraph_index=paragraph.paragraph_index,
-                original_perplexity=before_metric.value if before_metric and before_metric.available else 0.0,
-                final_perplexity=after_metric.value if after_metric and after_metric.available else 0.0,
-                cadence_score_before=before_analysis.cadence_score,
-                cadence_score_after=paragraph.cadence_score,
-                ai_pattern_score_before=before_analysis.ai_pattern_score,
-                ai_pattern_score_after=paragraph.ai_pattern_score,
-                rewrites_applied=list(outcome.applied_changes),
-            )
-        )
-    return reports
-
-
-def _select_graph_action(
-    *,
-    sections: dict[str, HumanizedSection],
-    config: HumanizerConfig,
-) -> str:
-    if any(section.report.needs_writer_loopback for section in sections.values()):
-        return "loopback_writing"
-    if any(section.report.needs_graph_retry for section in sections.values()):
-        return "retry_humanizer"
-    return "accept"
-
-
-def _coerce_optional_text(value: object) -> str | None:
-    normalized = str(value or "").strip()
-    return normalized or None
-
-
-runtime = build_runtime()
+runtime = HumanizerRuntimeAgent()
 if ADKBaseAgent is not None:  # pragma: no branch
     agent = HumanizerAgent(
         settings=runtime.settings,
         config=runtime.config,
-        vertex_client=runtime.vertex_client,
     )
 
     try:  # pragma: no cover - optional A2A runtime wiring

@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import replace
+import logging
 from typing import Any
 
 from agents.base import BaseAgent
 from core.config import get_settings
 from core.vertex_client import VertexGeminiClient
-from humanizer.agent import run_humanizer_pipeline
-from humanizer.config import HumanizerConfig
+from humanizer.agent import HumanizerRuntimeAgent, build_humanizer_output, run_humanizer_pipeline
+from humanizer.config import HUMANIZER_MODE, HumanizerConfig
+from humanizer.utils import build_section_text_map
 from models.a2a import A2AMessage
 from models.agent_runtime import AgentSpec
-from models.generation import FormattingAgentOutput, HumanizerAgentOutput
+from models.generation import FormattingAgentOutput, HumanizerAgentOutput, ResearchPaperSchema
 
 
 class HumanizerAgent(BaseAgent):
@@ -22,10 +23,48 @@ class HumanizerAgent(BaseAgent):
         super().__init__(agent_name=spec.name, spec=spec)
         self.client = client
         self.settings = get_settings()
-        base_config = HumanizerConfig.from_settings(self.settings)
-        self.humanizer_config = replace(
-            base_config,
-            rewriter_model=spec.model or base_config.rewriter_model,
+        self.humanizer_config = HumanizerConfig.from_settings(self.settings)
+        self.runtime = HumanizerRuntimeAgent(
+            config=self.humanizer_config,
+            settings=self.settings,
+        )
+        self.logger.info(
+            "Humanizer bridge initialized in mode=%s",
+            self.humanizer_config.runtime_mode,
+        )
+
+    def run(
+        self,
+        section_map: dict[str, str],
+        *,
+        paper: ResearchPaperSchema,
+        iteration: int = 0,
+    ) -> dict[str, Any]:
+        result = self.runtime.run(section_map, iteration=iteration)
+        self.logger.info(
+            {
+                "event": "humanizer_run",
+                "iteration": iteration,
+                "mode": HUMANIZER_MODE,
+                "effective_mode": self.humanizer_config.runtime_mode,
+                "action": result.get("graph_action"),
+                "composite_before": result.get("scores_before", {}).get("composite_score"),
+                "composite_after": result.get("scores_after", {}).get("composite_score"),
+            }
+        )
+        return result
+
+    def build_output(
+        self,
+        *,
+        paper: ResearchPaperSchema,
+        runtime_result: dict[str, Any],
+        trace_id: str | None = None,
+    ) -> HumanizerAgentOutput:
+        return build_humanizer_output(
+            paper=paper,
+            runtime_result=runtime_result,
+            trace_id=trace_id,
         )
 
     async def process_task(self, message: A2AMessage) -> dict[str, Any]:
@@ -40,25 +79,21 @@ class HumanizerAgent(BaseAgent):
             trace_id=message.trace_id,
             settings=self.settings,
             config=self.humanizer_config,
-            vertex_client=self.client,
         )
-
-        paper_snapshot = result.paper_snapshot
-        humanized_draft = result.humanized_draft
-        if paper_snapshot is None or humanized_draft is None:
+        if result.paper_snapshot is None or result.humanized_draft is None:
             raise ValueError("Humanizer runtime returned no paper snapshot.")
 
         output = HumanizerAgentOutput(
-            paper=paper_snapshot.paper,
-            formatted_text=paper_snapshot.formatted_text,
-            latex_ready=paper_snapshot.latex_ready,
-            humanized_draft=humanized_draft.model_dump(mode="python"),
-            ai_pattern_score_before=humanized_draft.global_ai_pattern_score_before,
-            ai_pattern_score_after=humanized_draft.global_ai_pattern_score_after,
-            perplexity_before=humanized_draft.global_perplexity_before,
-            perplexity_after=humanized_draft.global_perplexity_after,
-            iteration_count=int(humanized_draft.metadata.get("iteration_count", 0)),
-            graph_action=humanized_draft.graph_action,
+            paper=result.paper_snapshot.paper,
+            formatted_text=result.paper_snapshot.formatted_text,
+            latex_ready=result.paper_snapshot.latex_ready,
+            humanized_draft=result.humanized_draft.model_dump(mode="python"),
+            ai_pattern_score_before=result.humanized_draft.global_ai_pattern_score_before,
+            ai_pattern_score_after=result.humanized_draft.global_ai_pattern_score_after,
+            perplexity_before=result.humanized_draft.global_perplexity_before,
+            perplexity_after=result.humanized_draft.global_perplexity_after,
+            iteration_count=int(result.metadata.get("iteration", 0)),
+            graph_action=result.humanized_draft.graph_action,
             trace_id=result.trace_id,
             error=result.error.model_dump(mode="python") if result.error is not None else None,
         )

@@ -1,91 +1,457 @@
+"""Paragraph rewriting backends for the humanizer agent."""
+
 from __future__ import annotations
 
 import logging
+import random
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, Field
-
-from core.exceptions import GenerationError
-from core.vertex_client import VertexGeminiClient
-from humanizer.config import HumanizerConfig
-from humanizer.detectors import ParagraphAnalysis, SectionAnalysis, analyze_section
-from humanizer.perplexity import PerplexityMetric, PerplexityScorer
+from humanizer.config import (
+    HUMANIZER_MODE,
+    MAX_AI_PATTERN_SCORE_TO_PASS,
+    MAX_TARGET_PARAGRAPHS_PER_SECTION,
+    MIN_BURSTINESS_TO_PASS,
+    SEMANTIC_DRIFT_THRESHOLD,
+    HumanizerConfig,
+)
+from humanizer.detectors import composite_ai_score
+from humanizer.semantic_drift import SemanticDriftChecker
 from humanizer.utils import (
-    SECTION_LABELS,
     extract_protected_spans,
-    join_paragraphs,
     restore_protected_spans,
-    split_paragraphs,
     split_sentences,
     verify_rewrite_safety,
 )
 
-logger = logging.getLogger("papereasy.backend.humanizer.rewriter")
+logger = logging.getLogger(__name__)
+_RANDOM = random.Random()
 
-VERBOSE_HEDGE_REWRITES = {
-    "it is worth noting that": "notably,",
-    "it is important to note that": "importantly,",
-    "it can be observed that": "",
-    "it should be noted that": "",
+TRANSITION_REPLACEMENTS = {
+    "Furthermore,": ["Beyond this,", "What's more,", "Building on this,", ""],
+    "Moreover,": ["Equally,", "At the same time,", "On top of this,"],
+    "In addition,": ["Also,", "Alongside this,", ""],
+    "It is worth noting that": ["Notably,", "Worth highlighting:"],
+    "It is important to note that": ["Crucially,", "Of note,"],
+    "In conclusion,": ["Taken together,", "All things considered,"],
+    "Notably,": ["Here,", "In this case,"],
+    "Importantly,": ["Critically,", "Of significance,"],
+    "Additionally,": ["Also,", "On top of this,", ""],
 }
-TRANSITION_REWRITES = {
-    "furthermore": "in addition",
-    "moreover": "also",
-    "additionally": "in addition",
-    "therefore": "as a result",
-    "overall": "taken together",
-    "notably": "in practice",
-    "consequently": "accordingly",
+QUALIFIER_REPLACEMENTS = {
+    "shows": ["demonstrates", "reveals", "indicates", "suggests"],
+    "helps": ["supports", "facilitates", "partially addresses", "contributes to"],
+    "uses": ["employs", "leverages", "applies", "draws on"],
+    "is important": ["plays a key role", "carries weight", "holds significance"],
+    "confirms": ["corroborates", "lends support to", "aligns with"],
 }
-LEXICAL_REWRITES = {
-    "significant": "substantial",
-    "important": "salient",
-    "various": "multiple",
-    "numerous": "several",
-    "shows": "indicates",
-    "demonstrates": "indicates",
+FRONTING_ADVERBS = [
+    "Strikingly,",
+    "In practice,",
+    "Across the dataset,",
+    "At closer inspection,",
+    "When examined carefully,",
+    "Empirically,",
+]
+SECTION_STYLE_PERSONAS = {
+    "abstract": "Compact, fluent, and publication-ready without sounding templated.",
+    "introduction": "Academic but conversational, with a confident opening rhythm.",
+    "related_work": "Comparative, balanced, and less formulaic than generic survey prose.",
+    "methodology": "Precise, technical, and readable without repetitive sentence templates.",
+    "results": "Evidence-led, measured, and varied in cadence.",
+    "discussion": "Reflective, analytical, and naturally human in pacing.",
+    "limitations": "Candid, restrained, and direct without defensive filler.",
+    "conclusion": "Concise, human-sounding synthesis with controlled emphasis.",
 }
-LOW_CONFIDENCE_HEDGES = ("may", "might", "appears", "suggests", "could", "tentative", "limited")
-
-
-class ModelRewriteResponse(BaseModel):
-    rewritten_text: str = Field(min_length=1)
-    rewrite_notes: list[str] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
-class RewriteOutcome:
-    text: str
-    applied_changes: list[str]
-    backend: str
+class CompatibilityAnalysis:
+    """Minimal analysis snapshot for compatibility callers."""
+
+    ai_pattern_score: float
 
 
 @dataclass(frozen=True)
-class SectionRewriteOutcome:
+class CompatibilityRewriteOutcome:
+    """Minimal compatibility rewrite outcome for legacy tests."""
+
     text: str
-    iterations: int
     applied_changes: list[str]
-    analysis_before: SectionAnalysis
-    analysis_after: SectionAnalysis
-    paragraph_perplexities_before: list[PerplexityMetric]
-    paragraph_perplexities_after: list[PerplexityMetric]
-    section_perplexity_before: PerplexityMetric
-    section_perplexity_after: PerplexityMetric
+    analysis_before: CompatibilityAnalysis
+    analysis_after: CompatibilityAnalysis
+
+
+class VertexRewriter:
+    """Primary Vertex-backed paragraph rewriter."""
+
+    def __init__(self, project: str, location: str, model: str = "gemini-1.5-pro"):
+        self.project = project
+        self.location = location
+        self.model = model
+        self.available = False
+        self._client = None
+
+        if not project or not location:
+            logger.warning(
+                "VertexRewriter disabled because project or location is missing.",
+            )
+            return
+
+        try:
+            from google import genai
+            from google.genai import types
+
+            self._genai_types = types
+            self._client = genai.Client(
+                vertexai=True,
+                project=project,
+                location=location,
+                http_options=types.HttpOptions(api_version="v1"),
+            )
+            self.available = True
+        except Exception as exc:  # pragma: no cover - dependency/runtime dependent
+            logger.warning("VertexRewriter initialization failed: %s", exc)
+
+    def rewrite_paragraph(
+        self,
+        target_para: str,
+        section_context: str,
+        style_persona: str,
+        ai_scores: dict[str, float],
+    ) -> str:
+        """Rewrite one paragraph with Vertex while preserving meaning and citations."""
+
+        if not self.available or self._client is None:
+            return target_para
+
+        prompt = (
+            "You are rewriting one paragraph from an academic manuscript to sound authentically "
+            "human-written. Do not change the meaning, citations, or factual content.\n\n"
+            f"STYLE TARGET: {style_persona}\n\n"
+            "DETECTED AI PATTERNS TO FIX:\n"
+            f"- Burstiness score: {ai_scores.get('burstiness', 0.0):.2f} (target > 0.45)\n"
+            f"- Cadence uniformity: {ai_scores.get('cadence_uniformity', 0.0):.2f} (target < 0.4)\n"
+            f"- Flagged transitions: {ai_scores.get('transition_uniformity', 0.0):.2f} (target < 0.1)\n\n"
+            "FULL SECTION CONTEXT (read for tone and flow — do not rewrite):\n"
+            f"{section_context}\n\n"
+            "PARAGRAPH TO REWRITE:\n"
+            f"{target_para}\n\n"
+            "REWRITING RULES:\n"
+            "1. Vary sentence length aggressively — mix short punchy sentences (5–8 words) "
+            "with longer complex ones (25–40 words). Aim for burstiness > 0.5.\n"
+            "2. Break subject-verb-object monotony — use fronted adverbials, participial "
+            "phrases, and inverted syntax occasionally.\n"
+            "3. Remove ALL of these phrases: \"Furthermore\", \"Moreover\", \"In addition\", "
+            "\"It is worth noting\", \"It is important to note\", \"Notably\", \"Importantly\","
+            "\n   \"In conclusion\", \"This study aims to\".\n"
+            "4. Add ONE concrete real-world anchor or sensory detail if it fits naturally.\n"
+            "5. Use em-dashes and parentheticals at least once if the paragraph is > 4 sentences.\n"
+            "6. Preserve all citation markers exactly (e.g. [1], (Smith, 2020), etc.)\n"
+            "7. Output ONLY the rewritten paragraph. No preamble, no explanation.\n"
+        )
+
+        def _call_vertex() -> str:
+            response = self._client.models.generate_content(  # type: ignore[union-attr]
+                model=self.model,
+                contents=prompt,
+            )
+            return (getattr(response, "text", "") or "").strip()
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_call_vertex)
+                rewritten = future.result(timeout=15)
+            return rewritten or target_para
+        except FuturesTimeoutError:
+            logger.error("Vertex rewrite timed out after 15 seconds.")
+            return target_para
+        except Exception as exc:  # pragma: no cover - provider dependent
+            logger.error("Vertex rewrite failed: %s", exc)
+            return target_para
+
+
+class DeterministicRewriter:
+    """Fallback paragraph rewriter using layered structural transforms."""
+
+    def transition_strip(self, text: str) -> str:
+        """Replace repeated stock transitions with more varied alternatives."""
+
+        rewritten = text
+        for source, choices in TRANSITION_REPLACEMENTS.items():
+            replacement = _RANDOM.choice(choices)
+            rewritten = re.sub(
+                re.escape(source),
+                replacement,
+                rewritten,
+                flags=re.IGNORECASE,
+            )
+        rewritten = re.sub(r"\s{2,}", " ", rewritten)
+        rewritten = re.sub(r"\s+([,.;:])", r"\1", rewritten)
+        return rewritten.strip()
+
+    def sentence_split(self, text: str) -> str:
+        """Split long sentences once at the first eligible conjunction."""
+
+        sentences = split_sentences(text)
+        updated: list[str] = []
+        for sentence in sentences:
+            tokens = sentence.split()
+            if len(tokens) <= 30:
+                updated.append(sentence)
+                continue
+            replaced = False
+            for marker in (", and ", ", but ", ", which ", ", while "):
+                if marker in sentence:
+                    left, right = sentence.split(marker, 1)
+                    right = right.strip()
+                    if right:
+                        right = right[0].upper() + right[1:]
+                    updated.append(left.strip().rstrip(","))
+                    updated.append(right)
+                    replaced = True
+                    break
+            if not replaced:
+                updated.append(sentence)
+        return " ".join(part for part in updated if part).strip()
+
+    def sentence_fuse(self, text: str) -> str:
+        """Fuse consecutive short sentences into more varied combined lines."""
+
+        sentences = split_sentences(text)
+        if len(sentences) < 2:
+            return text
+
+        conjunctions = ["and", "but", "while", "though"]
+        fused: list[str] = []
+        index = 0
+        while index < len(sentences):
+            current = sentences[index]
+            if index + 1 < len(sentences):
+                nxt = sentences[index + 1]
+                current_len = len(current.split())
+                next_len = len(nxt.split())
+                if current_len < 10 and next_len < 10 and (current_len + next_len) < 35:
+                    conjunction = _RANDOM.choice(conjunctions)
+                    merged = f"{current.rstrip('.!?')}, {conjunction} {nxt[:1].lower()}{nxt[1:]}"
+                    fused.append(merged)
+                    index += 2
+                    continue
+            fused.append(current)
+            index += 1
+        return " ".join(fused).strip()
+
+    def fronting(self, text: str) -> str:
+        """Front up to two result-style sentences with adverbial variation."""
+
+        sentences = split_sentences(text)
+        fronted: list[str] = []
+        rewrites = 0
+        pattern = re.compile(
+            r"^(The\s+(?:results|data|analysis|findings)\b.*)$",
+            re.IGNORECASE,
+        )
+        for sentence in sentences:
+            if rewrites < 2 and pattern.match(sentence):
+                adverb = _RANDOM.choice(FRONTING_ADVERBS)
+                fronted.append(f"{adverb} {sentence[:1].lower()}{sentence[1:]}")
+                rewrites += 1
+            else:
+                fronted.append(sentence)
+        return " ".join(fronted).strip()
+
+    def qualifier_variation(self, text: str) -> str:
+        """Vary a small set of overused academic verbs and stock phrases."""
+
+        rewritten = text
+        for source, choices in QUALIFIER_REPLACEMENTS.items():
+            replacement = _RANDOM.choice(choices)
+            rewritten = re.sub(
+                rf"\b{re.escape(source)}\b",
+                replacement,
+                rewritten,
+                flags=re.IGNORECASE,
+            )
+        return rewritten
+
+    def apply_all(self, text: str) -> str:
+        """Apply all deterministic rewriting passes in sequence."""
+
+        rewritten = self.transition_strip(text)
+        rewritten = self.sentence_split(rewritten)
+        rewritten = self.sentence_fuse(rewritten)
+        rewritten = self.fronting(rewritten)
+        rewritten = self.qualifier_variation(rewritten)
+        rewritten = re.sub(r"\s{2,}", " ", rewritten)
+        rewritten = re.sub(r"\s+([,.;:])", r"\1", rewritten)
+        return rewritten.strip()
+
+
+class HumanizerRewriter:
+    """Main humanizer rewriting interface with Vertex + deterministic fallback."""
+
+    def __init__(self, config: HumanizerConfig | None):
+        self.config = config or HumanizerConfig.from_settings()
+        self.mode = self.config.runtime_mode
+        self.deterministic = DeterministicRewriter()
+        self.semantic_drift = SemanticDriftChecker()
+        self.vertex = None
+        if self.config.model_rewriter_enabled:
+            self.vertex = VertexRewriter(
+                project=self.config.google_project,
+                location=self.config.google_location,
+                model=self.config.vertex_model or "gemini-1.5-pro",
+            )
+        logger.info("HumanizerRewriter initialized in %s mode.", self.mode)
+
+    def rewrite_section(
+        self,
+        section_text: str,
+        ai_scores: dict[str, float],
+        style_persona: str = "Academic but conversational",
+        *,
+        section_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Rewrite the most AI-like paragraphs in one section."""
+
+        paragraphs = _split_paragraphs(section_text)
+        if not paragraphs:
+            return {
+                "rewritten_text": section_text,
+                "paragraphs_targeted": 0,
+                "paragraphs_accepted": 0,
+                "paragraphs_rejected_drift": 0,
+                "rewriter_used": "deterministic" if self.mode == "lite" else "vertex",
+            }
+
+        scored_paragraphs: list[tuple[int, dict[str, float], str]] = []
+        for index, paragraph in enumerate(paragraphs):
+            paragraph_scores = composite_ai_score(paragraph)
+            if (
+                paragraph_scores.get("composite_score", 0.0) > self.config.max_ai_pattern_score_to_pass
+                or paragraph_scores.get("burstiness", 0.0) < self.config.min_burstiness_to_pass
+            ):
+                scored_paragraphs.append((index, paragraph_scores, paragraph))
+
+        scored_paragraphs.sort(
+            key=lambda item: (
+                item[1].get("composite_score", 0.0),
+                1.0 - item[1].get("burstiness", 0.0),
+            ),
+            reverse=True,
+        )
+        targets = scored_paragraphs[: self.config.max_target_paragraphs_per_section]
+
+        accepted = 0
+        rejected_drift = 0
+        rewriter_modes: set[str] = set()
+        updated = list(paragraphs)
+        persona = style_persona or SECTION_STYLE_PERSONAS.get(
+            section_name or "",
+            "Academic but conversational",
+        )
+
+        for index, paragraph_scores, original_paragraph in targets:
+            rewritten = original_paragraph
+            rewriter_used = "deterministic"
+            if self.vertex is not None and self.vertex.available:
+                candidate = self.vertex.rewrite_paragraph(
+                    target_para=original_paragraph,
+                    section_context=section_text,
+                    style_persona=persona,
+                    ai_scores=paragraph_scores,
+                )
+                if candidate.strip() != original_paragraph.strip():
+                    rewritten = candidate.strip()
+                    rewriter_used = "vertex"
+                else:
+                    protected_text, spans = extract_protected_spans(original_paragraph)
+                    rewritten = restore_protected_spans(
+                        self.deterministic.apply_all(protected_text),
+                        spans,
+                    )
+            else:
+                protected_text, spans = extract_protected_spans(original_paragraph)
+                rewritten = restore_protected_spans(
+                    self.deterministic.apply_all(protected_text),
+                    spans,
+                )
+
+            drift_value = self.semantic_drift.drift(original_paragraph, rewritten)
+            if drift_value is not None and drift_value > self.config.semantic_drift_threshold:
+                rejected_drift += 1
+                logger.warning(
+                    "Rejected humanizer rewrite for paragraph %s because semantic drift %.3f exceeded threshold %.3f.",
+                    index,
+                    drift_value,
+                    self.config.semantic_drift_threshold,
+                )
+                if self.config.retry_on_drift and rewriter_used == "vertex":
+                    protected_text, spans = extract_protected_spans(original_paragraph)
+                    fallback = restore_protected_spans(
+                        self.deterministic.apply_all(protected_text),
+                        spans,
+                    )
+                    fallback_drift = self.semantic_drift.drift(original_paragraph, fallback)
+                    if fallback_drift is None or fallback_drift <= self.config.semantic_drift_threshold:
+                        rewritten = fallback
+                        rewriter_used = "deterministic"
+                    else:
+                        continue
+                else:
+                    continue
+
+            safety = verify_rewrite_safety(
+                original=original_paragraph,
+                rewritten=rewritten,
+                similarity_threshold=max(
+                    0.0,
+                    1.0 - max(0.0, min(1.0, SEMANTIC_DRIFT_THRESHOLD)),
+                ),
+            )
+            if not safety.passed:
+                rejected_drift += 1
+                logger.warning(
+                    "Rejected humanizer rewrite for paragraph %s because safety checks failed: %s",
+                    index,
+                    ",".join(safety.reasons),
+                )
+                continue
+
+            updated[index] = rewritten
+            accepted += 1
+            rewriter_modes.add(rewriter_used)
+
+        if not rewriter_modes:
+            used = "deterministic" if self.mode == "lite" else ("vertex" if self.vertex and self.vertex.available else "deterministic")
+        elif len(rewriter_modes) == 1:
+            used = next(iter(rewriter_modes))
+        else:
+            used = "mixed"
+
+        return {
+            "rewritten_text": "\n\n".join(updated).strip(),
+            "paragraphs_targeted": len(targets),
+            "paragraphs_accepted": accepted,
+            "paragraphs_rejected_drift": rejected_drift,
+            "rewriter_used": used,
+        }
 
 
 class HybridSectionRewriter:
+    """Compatibility wrapper around the new humanizer rewriter."""
+
     def __init__(
         self,
         *,
-        config: HumanizerConfig,
-        vertex_client: VertexGeminiClient | None,
-        perplexity_scorer: PerplexityScorer,
+        config: HumanizerConfig | None = None,
+        vertex_client: Any | None = None,
+        perplexity_scorer: Any | None = None,
     ):
-        self.config = config
-        self.vertex_client = vertex_client
-        self.perplexity_scorer = perplexity_scorer
+        self.config = config or HumanizerConfig.from_settings()
+        self._rewriter = HumanizerRewriter(self.config)
 
     async def humanize_section(
         self,
@@ -95,331 +461,44 @@ class HybridSectionRewriter:
         section_confidence: float | None = None,
         trace_id: str,
         logger_: logging.Logger | None = None,
-    ) -> SectionRewriteOutcome:
-        active_logger = logger_ or logger
-        analysis_before = analyze_section(
+    ) -> CompatibilityRewriteOutcome:
+        del section_confidence, trace_id, logger_
+        before = composite_ai_score(text)
+        rewrite_result = self._rewriter.rewrite_section(
+            section_text=text,
+            ai_scores=before,
+            style_persona=SECTION_STYLE_PERSONAS.get(
+                section_name,
+                "Academic but conversational",
+            ),
             section_name=section_name,
-            text=text,
-            config=self.config,
-            logger_=active_logger,
         )
-        current_text = text.strip()
-        current_analysis = analysis_before
-        current_paragraph_scores = self.perplexity_scorer.score_paragraphs(current_text)
-        current_section_score = self.perplexity_scorer.score_text(current_text)
-        accepted_changes: list[str] = []
-        iterations_completed = 0
-
-        for iteration in range(1, self.config.max_iterations + 1):
-            if current_analysis.ai_pattern_score <= self.config.ai_pattern_threshold:
-                break
-            iterations_completed = iteration
-
-            paragraphs = split_paragraphs(current_text)
-            target_paragraphs = _select_target_paragraphs(
-                current_analysis.paragraphs,
-                limit=self.config.max_target_paragraphs_per_section,
+        after_text = rewrite_result["rewritten_text"]
+        after = composite_ai_score(after_text)
+        applied_changes: list[str] = []
+        if rewrite_result["paragraphs_targeted"]:
+            applied_changes.append(
+                f"Targeted {rewrite_result['paragraphs_targeted']} paragraph(s) with {rewrite_result['rewriter_used']} rewriting."
             )
-            if not target_paragraphs:
-                break
-
-            improved = False
-            for paragraph_analysis in target_paragraphs:
-                paragraph_text = paragraphs[paragraph_analysis.paragraph_index]
-                outcome = await self._rewrite_paragraph(
-                    section_name=section_name,
-                    paragraph_text=paragraph_text,
-                    paragraph_analysis=paragraph_analysis,
-                    section_confidence=section_confidence,
-                    trace_id=trace_id,
-                )
-                if outcome.text.strip() == paragraph_text.strip():
-                    continue
-
-                safety = verify_rewrite_safety(
-                    original=paragraph_text,
-                    rewritten=outcome.text,
-                    similarity_threshold=self.config.semantic_similarity_threshold,
-                )
-                if not safety.passed:
-                    active_logger.info(
-                        "Humanizer rejected rewrite for %s paragraph %s because %s",
-                        section_name,
-                        paragraph_analysis.paragraph_index,
-                        ",".join(safety.reasons),
-                    )
-                    continue
-                if section_confidence is not None and section_confidence < 0.65:
-                    if _removed_required_hedging(paragraph_text, outcome.text):
-                        active_logger.info(
-                            "Humanizer rejected rewrite for %s paragraph %s because required hedging was removed.",
-                            section_name,
-                            paragraph_analysis.paragraph_index,
-                        )
-                        continue
-
-                candidate_paragraphs = list(paragraphs)
-                candidate_paragraphs[paragraph_analysis.paragraph_index] = outcome.text
-                candidate_text = join_paragraphs(candidate_paragraphs)
-                candidate_analysis = analyze_section(
-                    section_name=section_name,
-                    text=candidate_text,
-                    config=self.config,
-                    logger_=active_logger,
-                )
-                improvement = current_analysis.ai_pattern_score - candidate_analysis.ai_pattern_score
-                if improvement < self.config.min_section_improvement and candidate_analysis.ai_pattern_score > self.config.ai_pattern_threshold:
-                    continue
-
-                current_text = candidate_text
-                current_analysis = candidate_analysis
-                current_paragraph_scores = self.perplexity_scorer.score_paragraphs(current_text)
-                current_section_score = self.perplexity_scorer.score_text(current_text)
-                accepted_changes.extend(outcome.applied_changes)
-                improved = True
-                break
-
-            if not improved:
-                break
-
-        return SectionRewriteOutcome(
-            text=current_text,
-            iterations=iterations_completed,
-            applied_changes=accepted_changes,
-            analysis_before=analysis_before,
-            analysis_after=current_analysis,
-            paragraph_perplexities_before=self.perplexity_scorer.score_paragraphs(text),
-            paragraph_perplexities_after=current_paragraph_scores,
-            section_perplexity_before=self.perplexity_scorer.score_text(text),
-            section_perplexity_after=current_section_score,
+        if rewrite_result["paragraphs_rejected_drift"]:
+            applied_changes.append(
+                f"Rejected {rewrite_result['paragraphs_rejected_drift']} paragraph(s) for semantic drift."
+            )
+        return CompatibilityRewriteOutcome(
+            text=after_text,
+            applied_changes=applied_changes,
+            analysis_before=CompatibilityAnalysis(ai_pattern_score=before["composite_score"]),
+            analysis_after=CompatibilityAnalysis(ai_pattern_score=after["composite_score"]),
         )
 
-    async def _rewrite_paragraph(
-        self,
-        *,
-        section_name: str,
-        paragraph_text: str,
-        paragraph_analysis: ParagraphAnalysis,
-        section_confidence: float | None,
-        trace_id: str,
-    ) -> RewriteOutcome:
-        if self.config.use_model_rewriter and self.vertex_client is not None:
-            try:
-                return await self._rewrite_with_model(
-                    section_name=section_name,
-                    paragraph_text=paragraph_text,
-                    paragraph_analysis=paragraph_analysis,
-                    section_confidence=section_confidence,
-                    trace_id=trace_id,
-                )
-            except GenerationError:
-                logger.warning("Vertex paragraph rewrite failed for %s; falling back to deterministic rules.", section_name)
-            except Exception as exc:  # pragma: no cover - defensive runtime guard
-                logger.warning("Unexpected model rewrite failure for %s: %s", section_name, exc)
 
-        return self._rewrite_deterministically(
-            section_name=section_name,
-            paragraph_text=paragraph_text,
-            paragraph_analysis=paragraph_analysis,
-            section_confidence=section_confidence,
-        )
-
-    async def _rewrite_with_model(
-        self,
-        *,
-        section_name: str,
-        paragraph_text: str,
-        paragraph_analysis: ParagraphAnalysis,
-        section_confidence: float | None,
-        trace_id: str,
-    ) -> RewriteOutcome:
-        protected_text, spans = extract_protected_spans(paragraph_text)
-        prompt = (
-            "You are the Humanizer Agent for IEEE manuscript polishing.\n"
-            "Rewrite the paragraph to reduce repetitive AI-like cadence while preserving meaning, "
-            "numbers, protected placeholders, citations, equations, and technical entities exactly.\n"
-            "Return only JSON with rewritten_text and rewrite_notes.\n\n"
-            f"Section: {SECTION_LABELS.get(section_name, section_name.title())}\n"
-            f"Section constraints: {_section_constraints(section_name)}\n"
-            f"Section confidence: {section_confidence if section_confidence is not None else 'unknown'}\n"
-            f"Detected paragraph issues: {_serialize_paragraph_issues(paragraph_analysis)}\n"
-            "Do not remove cautious uncertainty language if it is already present.\n"
-            "Do not introduce new claims.\n"
-            "Do not alter placeholders such as __PAPEREASY_PROTECTED_XXXX__.\n\n"
-            f"Paragraph:\n{protected_text}"
-        )
-        response = await self.vertex_client.generate_json(
-            prompt=prompt,
-            response_schema=ModelRewriteResponse,
-            model_name=self.config.rewriter_model,
-        )
-        rewritten = restore_protected_spans(response.rewritten_text, spans)
-        return RewriteOutcome(
-            text=rewritten,
-            applied_changes=response.rewrite_notes or [f"Applied Vertex rewrite to {section_name} paragraph."],
-            backend="vertex",
-        )
-
-    def _rewrite_deterministically(
-        self,
-        *,
-        section_name: str,
-        paragraph_text: str,
-        paragraph_analysis: ParagraphAnalysis,
-        section_confidence: float | None,
-    ) -> RewriteOutcome:
-        protected_text, spans = extract_protected_spans(paragraph_text)
-        rewritten = protected_text
-        changes: list[str] = []
-
-        rewritten, transition_changes = _rewrite_transitions(rewritten)
-        changes.extend(transition_changes)
-
-        rewritten, hedge_changes = _rewrite_verbose_hedges(rewritten)
-        changes.extend(hedge_changes)
-
-        rewritten, cadence_changes = _diversify_cadence(
-            rewritten,
-            section_name=section_name,
-            paragraph_analysis=paragraph_analysis,
-        )
-        changes.extend(cadence_changes)
-
-        rewritten, lexical_changes = _diversify_lexicon(rewritten)
-        changes.extend(lexical_changes)
-
-        rewritten = _section_specific_cleanup(
-            rewritten,
-            section_name=section_name,
-            section_confidence=section_confidence,
-        )
-        restored = restore_protected_spans(rewritten, spans)
-        return RewriteOutcome(
-            text=restored,
-            applied_changes=changes or [f"Applied deterministic fallback rewrite to {section_name} paragraph."],
-            backend="deterministic",
-        )
-
-def _serialize_paragraph_issues(paragraph_analysis: ParagraphAnalysis) -> list[str]:
-    return [pattern.pattern_type for pattern in paragraph_analysis.detected_patterns] or ["stylistic_uniformity"]
+def _split_paragraphs(text: str) -> list[str]:
+    return [paragraph.strip() for paragraph in re.split(r"\n\s*\n", (text or "").strip()) if paragraph.strip()]
 
 
-def _select_target_paragraphs(
-    paragraphs: list[ParagraphAnalysis],
-    *,
-    limit: int,
-) -> list[ParagraphAnalysis]:
-    ranked = sorted(
-        paragraphs,
-        key=lambda paragraph: (paragraph.ai_pattern_score, paragraph.cadence_score),
-        reverse=True,
-    )
-    return [paragraph for paragraph in ranked if paragraph.ai_pattern_score > 0][:limit]
-
-
-def _section_constraints(section_name: str) -> str:
-    constraints = {
-        "abstract": "Keep the paragraph compact, dense, and contribution-focused.",
-        "methodology": "Preserve precise procedural language and reproducibility.",
-        "results": "Keep evidence-first wording with no rhetorical inflation.",
-        "discussion": "Allow modest rhetorical variety but preserve interpretation boundaries.",
-        "limitations": "Preserve candid admissions and do not soften weaknesses.",
-        "conclusion": "Keep the closing synthesis concise and avoid new claims.",
-    }
-    return constraints.get(section_name, "Use formal IEEE tone with restrained stylistic variation.")
-
-
-def _rewrite_transitions(text: str) -> tuple[str, list[str]]:
-    rewritten = text
-    changes: list[str] = []
-    for source, target in TRANSITION_REWRITES.items():
-        pattern = re.compile(rf"(?im)^\s*{re.escape(source)}\b[:,]?\s*")
-        if pattern.search(rewritten):
-            replacement = f"{target}, " if target else ""
-            rewritten = pattern.sub(replacement, rewritten)
-            changes.append(f"Varied repeated transition '{source}'.")
-    return rewritten, changes
-
-
-def _rewrite_verbose_hedges(text: str) -> tuple[str, list[str]]:
-    rewritten = text
-    changes: list[str] = []
-    for source, target in VERBOSE_HEDGE_REWRITES.items():
-        pattern = re.compile(re.escape(source), re.IGNORECASE)
-        if pattern.search(rewritten):
-            rewritten = pattern.sub(target, rewritten)
-            changes.append(f"Condensed stock hedge '{source}'.")
-    rewritten = re.sub(r"\s{2,}", " ", rewritten).strip()
-    return rewritten, changes
-
-
-def _diversify_cadence(
-    text: str,
-    *,
-    section_name: str,
-    paragraph_analysis: ParagraphAnalysis,
-) -> tuple[str, list[str]]:
-    sentences = split_sentences(text)
-    if len(sentences) < 2:
-        return text, []
-
-    rewritten_sentences = list(sentences)
-    changes: list[str] = []
-    if paragraph_analysis.cadence_score >= 0.62:
-        for index, sentence in enumerate(list(rewritten_sentences)):
-            if len(sentence.split()) > 26 and ", and " in sentence:
-                parts = sentence.split(", and ", 1)
-                rewritten_sentences[index:index + 1] = [parts[0].strip() + ".", parts[1].strip().capitalize()]
-                changes.append("Split an overly uniform long sentence to vary cadence.")
-                break
-
-    if section_name == "discussion" and len(rewritten_sentences) >= 2:
-        first = rewritten_sentences[0]
-        if first.lower().startswith("this"):
-            rewritten_sentences[0] = "Taken together, " + first[0].lower() + first[1:]
-            changes.append("Varied the discussion paragraph opening.")
-
-    if section_name == "abstract" and len(rewritten_sentences) > 3:
-        rewritten_sentences = rewritten_sentences[:3]
-        changes.append("Kept the abstract compact during cadence cleanup.")
-
-    return " ".join(rewritten_sentences).strip(), changes
-
-
-def _diversify_lexicon(text: str) -> tuple[str, list[str]]:
-    rewritten = text
-    changes: list[str] = []
-    for source, target in LEXICAL_REWRITES.items():
-        pattern = re.compile(rf"\b{re.escape(source)}\b", re.IGNORECASE)
-        matches = list(pattern.finditer(rewritten))
-        if len(matches) >= 2:
-            rewritten = pattern.sub(target, rewritten, count=1)
-            changes.append(f"Reduced repeated academic word '{source}'.")
-    return rewritten, changes
-
-
-def _section_specific_cleanup(
-    text: str,
-    *,
-    section_name: str,
-    section_confidence: float | None,
-) -> str:
-    rewritten = re.sub(r"\s{2,}", " ", text).strip()
-    if section_name == "methodology":
-        rewritten = rewritten.replace("In practice,", "")
-    if section_name == "results":
-        rewritten = rewritten.replace("clearly ", "")
-    if section_name == "limitations":
-        rewritten = rewritten.replace("however,", "")
-    if section_confidence is not None and section_confidence < 0.4:
-        if not any(marker in rewritten.lower() for marker in LOW_CONFIDENCE_HEDGES):
-            rewritten = "The available evidence suggests " + rewritten[0].lower() + rewritten[1:]
-    return rewritten.strip()
-
-
-def _removed_required_hedging(original: str, rewritten: str) -> bool:
-    original_lower = original.lower()
-    rewritten_lower = rewritten.lower()
-    original_has_hedge = any(marker in original_lower for marker in LOW_CONFIDENCE_HEDGES)
-    rewritten_has_hedge = any(marker in rewritten_lower for marker in LOW_CONFIDENCE_HEDGES)
-    return original_has_hedge and not rewritten_has_hedge
+__all__ = [
+    "VertexRewriter",
+    "DeterministicRewriter",
+    "HumanizerRewriter",
+    "HybridSectionRewriter",
+]

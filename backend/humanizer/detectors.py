@@ -1,28 +1,75 @@
+"""Multi-signal AI-pattern detection utilities for the humanizer agent."""
+
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from functools import lru_cache
 from statistics import mean, pstdev
-from typing import Iterable
+
+try:
+    import nltk
+except ImportError as exc:  # pragma: no cover - dependency dependent
+    nltk = None
+    logging.getLogger(__name__).warning(
+        "nltk is not installed; detector module will use regex-based fallbacks: %s",
+        exc,
+    )
+
+if nltk is not None:
+    try:
+        nltk.data.find("tokenizers/punkt")
+    except LookupError:
+        try:
+            nltk.download("punkt", quiet=True)
+        except Exception as exc:  # pragma: no cover - environment dependent
+            logging.getLogger(__name__).warning(
+                "Unable to download nltk punkt tokenizer: %s",
+                exc,
+            )
+    try:
+        nltk.data.find("corpora/stopwords")
+    except LookupError:
+        try:
+            nltk.download("stopwords", quiet=True)
+        except Exception as exc:  # pragma: no cover - environment dependent
+            logging.getLogger(__name__).warning(
+                "Unable to download nltk stopwords corpus: %s",
+                exc,
+            )
+    try:
+        from nltk.corpus import stopwords
+        from nltk.tokenize import sent_tokenize, word_tokenize
+    except Exception as exc:  # pragma: no cover - dependency dependent
+        stopwords = None
+        sent_tokenize = None
+        word_tokenize = None
+        logging.getLogger(__name__).warning(
+            "nltk tokenizers or corpora are unavailable; detector module will use fallbacks: %s",
+            exc,
+        )
+else:
+    stopwords = None
+    sent_tokenize = None
+    word_tokenize = None
 
 from humanizer.config import HumanizerConfig
 from humanizer.schemas import DetectedPattern
-from humanizer.utils import SECTION_LABELS, split_paragraphs, split_sentences, tokenize
 
-logger = logging.getLogger("papereasy.backend.humanizer.detectors")
+logger = logging.getLogger(__name__)
 
 TRANSITION_MARKERS = (
     "furthermore",
     "moreover",
-    "additionally",
-    "therefore",
-    "overall",
-    "notably",
+    "in addition",
+    "it is worth noting",
+    "it is important to",
     "in conclusion",
-    "consequently",
-    "thus",
+    "notably",
+    "importantly",
+    "additionally",
 )
 HEDGE_MARKERS = (
     "it is worth noting",
@@ -36,7 +83,7 @@ HEDGE_MARKERS = (
     "could",
     "potentially",
 )
-MINOR_STOPWORDS = {
+_FALLBACK_STOPWORDS = {
     "the",
     "a",
     "an",
@@ -51,6 +98,9 @@ MINOR_STOPWORDS = {
     "are",
     "was",
     "were",
+    "be",
+    "been",
+    "being",
     "by",
     "on",
     "as",
@@ -60,10 +110,17 @@ MINOR_STOPWORDS = {
     "these",
     "those",
 }
+_TOKEN_PATTERN = re.compile(r"[A-Za-z][A-Za-z'-]*")
+_PASSIVE_REGEX = re.compile(
+    r"\b(?:was|were|been|is|are|be|being)\b\s+\b\w+(?:ed|en|wn|ne|lt|rt)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
 class ParagraphAnalysis:
+    """Compatibility paragraph-level detector summary."""
+
     paragraph_index: int
     text: str
     sentence_lengths: list[int]
@@ -74,6 +131,8 @@ class ParagraphAnalysis:
 
 @dataclass(frozen=True)
 class SectionAnalysis:
+    """Compatibility section-level detector summary."""
+
     section_name: str
     text: str
     paragraphs: list[ParagraphAnalysis]
@@ -87,314 +146,404 @@ class SectionAnalysis:
     ai_pattern_score: float
 
 
+def _safe_sent_tokenize(text: str) -> list[str]:
+    normalized = (text or "").strip()
+    if not normalized:
+        return []
+    if sent_tokenize is None:
+        return [
+            chunk.strip()
+            for chunk in re.split(r"(?<=[.!?])\s+", normalized)
+            if chunk.strip()
+        ]
+    try:
+        return [sentence.strip() for sentence in sent_tokenize(normalized) if sentence.strip()]
+    except Exception as exc:
+        logger.warning("nltk sentence tokenization failed; using regex fallback: %s", exc)
+        return [
+            chunk.strip()
+            for chunk in re.split(r"(?<=[.!?])\s+", normalized)
+            if chunk.strip()
+        ]
+
+
+def _safe_word_tokenize(text: str) -> list[str]:
+    normalized = (text or "").strip()
+    if not normalized:
+        return []
+    if word_tokenize is None:
+        return _TOKEN_PATTERN.findall(normalized)
+    try:
+        return [token for token in word_tokenize(normalized) if token.strip()]
+    except Exception as exc:
+        logger.warning("nltk word tokenization failed; using regex fallback: %s", exc)
+        return _TOKEN_PATTERN.findall(normalized)
+
+
+def _content_tokens(text: str) -> list[str]:
+    stopword_set = _get_stopword_set()
+    content: list[str] = []
+    for token in _safe_word_tokenize(text):
+        normalized = token.lower()
+        if not _TOKEN_PATTERN.fullmatch(normalized):
+            continue
+        if normalized in stopword_set:
+            continue
+        content.append(normalized)
+    return content
+
+
+@lru_cache(maxsize=1)
+def _get_stopword_set() -> set[str]:
+    try:
+        if stopwords is None:
+            raise LookupError("nltk stopwords corpus is unavailable")
+        return set(stopwords.words("english"))
+    except Exception as exc:
+        logger.warning("nltk stopwords unavailable; using fallback list: %s", exc)
+        return set(_FALLBACK_STOPWORDS)
+
+
+def burstiness_score(text: str) -> float:
+    """Return sentence-length burstiness as std_dev / mean."""
+
+    sentences = _safe_sent_tokenize(text)
+    if len(sentences) < 3:
+        return 0.0
+    lengths = [len(_content_tokens(sentence) or _safe_word_tokenize(sentence)) for sentence in sentences]
+    mean_length = mean(lengths)
+    if mean_length <= 0:
+        return 0.0
+    return round(pstdev(lengths) / mean_length, 4)
+
+
+def lexical_repetition_score(text: str) -> float:
+    """Return repeated content-token ratio across a 5-sentence sliding window."""
+
+    sentences = _safe_sent_tokenize(text)
+    if not sentences:
+        return 0.0
+
+    repeated_tokens = 0
+    total_tokens = 0
+    for start in range(0, len(sentences)):
+        window = sentences[start : start + 5]
+        if not window:
+            continue
+        tokens: list[str] = []
+        for sentence in window:
+            tokens.extend(_content_tokens(sentence))
+        if not tokens:
+            continue
+        counts = Counter(tokens)
+        repeated_tokens += sum(count - 1 for count in counts.values() if count > 1)
+        total_tokens += len(tokens)
+
+    if total_tokens == 0:
+        return 0.0
+    return round(min(1.0, repeated_tokens / total_tokens), 4)
+
+
+def transition_uniformity_score(text: str) -> float:
+    """Return the frequency of repeated stock transitions per sentence."""
+
+    sentences = _safe_sent_tokenize(text)
+    if not sentences:
+        return 0.0
+
+    flagged_count = 0
+    for sentence in sentences:
+        lowered = sentence.strip().lower()
+        if any(lowered.startswith(marker) for marker in TRANSITION_MARKERS):
+            flagged_count += 1
+    return round(flagged_count / len(sentences), 4)
+
+
+def sentence_cadence_score(text: str) -> float:
+    """Return a normalized cadence-uniformity score where higher is more AI-like."""
+
+    sentences = _safe_sent_tokenize(text)
+    if len(sentences) < 2:
+        return 0.0
+    lengths = [len(_safe_word_tokenize(sentence)) for sentence in sentences]
+    variance = pstdev(lengths) ** 2 if len(lengths) > 1 else 0.0
+    if variance <= 8:
+        return 1.0
+    if variance >= 20:
+        return 0.0
+    normalized = 1.0 - ((variance - 8.0) / 12.0)
+    return round(max(0.0, min(1.0, normalized)), 4)
+
+
 class PassiveVoiceAnalyzer:
-    def __init__(self, model_name: str):
+    """Analyze passive-voice usage with spaCy or a regex fallback."""
+
+    def __init__(self, model_name: str = "en_core_web_sm"):
         self.model_name = model_name
 
     def score_text(self, text: str) -> tuple[float, list[str]]:
-        nlp = _load_spacy_model(self.model_name)
-        if nlp is None:
+        """Return passive voice ratio and example evidence sentences."""
+
+        sentences = _safe_sent_tokenize(text)
+        if not sentences:
             return 0.0, []
 
-        doc = nlp(text)
-        passive_sentences: list[str] = []
-        sentence_count = 0
-        for sent in doc.sents:
-            sentence = sent.text.strip()
-            if not sentence:
-                continue
-            sentence_count += 1
-            deps = {token.dep_.lower() for token in sent}
-            if "nsubjpass" in deps or "auxpass" in deps:
-                passive_sentences.append(sentence)
-        if sentence_count == 0:
-            return 0.0, []
-        return round(len(passive_sentences) / sentence_count, 4), passive_sentences
+        nlp = _load_spacy_model(self.model_name)
+        if nlp is not None:
+            try:
+                doc = nlp(text)
+                passive_sentences: list[str] = []
+                sentence_count = 0
+                for sent in doc.sents:
+                    sentence = sent.text.strip()
+                    if not sentence:
+                        continue
+                    sentence_count += 1
+                    deps = {token.dep_.lower() for token in sent}
+                    if "nsubjpass" in deps or "auxpass" in deps:
+                        passive_sentences.append(sentence)
+                if sentence_count == 0:
+                    return 0.0, []
+                return round(len(passive_sentences) / sentence_count, 4), passive_sentences
+            except Exception as exc:
+                logger.warning(
+                    "spaCy passive voice analysis failed; using regex fallback: %s",
+                    exc,
+                )
+
+        passive_sentences = [
+            sentence
+            for sentence in sentences
+            if _PASSIVE_REGEX.search(sentence)
+        ]
+        return round(len(passive_sentences) / len(sentences), 4), passive_sentences
+
+
+def passive_voice_ratio(text: str) -> float:
+    """Return passive constructions per sentence."""
+
+    ratio, _ = PassiveVoiceAnalyzer().score_text(text)
+    return ratio
+
+
+def _normalize_burstiness_for_ai_score(value: float) -> float:
+    if value <= 0.2:
+        return 1.0
+    if value >= 0.8:
+        return 0.0
+    normalized = 1.0 - ((value - 0.2) / 0.6)
+    return round(max(0.0, min(1.0, normalized)), 4)
+
+
+def composite_ai_score(text: str) -> dict[str, float]:
+    """Aggregate the detector signals into one normalized AI-pattern score."""
+
+    if not (text or "").strip():
+        return {
+            "burstiness": 0.0,
+            "lexical_repetition": 0.0,
+            "transition_uniformity": 0.0,
+            "cadence_uniformity": 0.0,
+            "passive_voice_ratio": 0.0,
+            "composite_score": 0.0,
+        }
+
+    burstiness = burstiness_score(text)
+    lexical_repetition = lexical_repetition_score(text)
+    transition_uniformity = transition_uniformity_score(text)
+    cadence_uniformity = sentence_cadence_score(text)
+    passive_ratio = passive_voice_ratio(text)
+    composite = (
+        (_normalize_burstiness_for_ai_score(burstiness) * 0.30)
+        + (transition_uniformity * 0.20)
+        + (cadence_uniformity * 0.25)
+        + (lexical_repetition * 0.15)
+        + (passive_ratio * 0.10)
+    )
+    return {
+        "burstiness": round(burstiness, 4),
+        "lexical_repetition": round(lexical_repetition, 4),
+        "transition_uniformity": round(transition_uniformity, 4),
+        "cadence_uniformity": round(cadence_uniformity, 4),
+        "passive_voice_ratio": round(passive_ratio, 4),
+        "composite_score": round(max(0.0, min(1.0, composite)), 4),
+    }
 
 
 def analyze_section(
     *,
     section_name: str,
     text: str,
-    config: HumanizerConfig,
+    config: HumanizerConfig | None = None,
     logger_: logging.Logger | None = None,
 ) -> SectionAnalysis:
+    """Compatibility helper returning a structured section analysis."""
+
     active_logger = logger_ or logger
-    paragraphs = split_paragraphs(text)
-    paragraph_analyses = [
-        _analyze_paragraph(paragraph_index=index, text=paragraph)
-        for index, paragraph in enumerate(paragraphs)
+    section_scores = composite_ai_score(text)
+    sentences = _safe_sent_tokenize(text)
+    paragraphs = [
+        block.strip()
+        for block in re.split(r"\n\s*\n", (text or "").strip())
+        if block.strip()
     ]
-
-    cadence_score = round(mean([analysis.cadence_score for analysis in paragraph_analyses]), 4) if paragraph_analyses else 0.0
-    hedge_score, hedge_patterns = _detect_overused_hedges(section_name=section_name, paragraphs=paragraphs)
-    transition_score, transition_patterns = _detect_repetitive_transitions(paragraphs=paragraphs)
-    lexical_repetition_score, lexical_patterns = _detect_lexical_repetition(paragraphs=paragraphs)
-    paragraph_monotony_score, paragraph_patterns = _detect_paragraph_monotony(paragraphs=paragraphs)
-
-    passive_ratio, passive_sentences = PassiveVoiceAnalyzer(config.spacy_model_name).score_text(text)
-    passive_patterns: list[DetectedPattern] = []
-    if passive_ratio >= 0.45:
-        passive_patterns.append(
-            DetectedPattern(
-                pattern_type="passive_voice_overuse",
-                severity=min(1.0, passive_ratio),
-                location=f"section:{section_name}",
-                evidence=passive_sentences[:3],
+    paragraph_analyses: list[ParagraphAnalysis] = []
+    for index, paragraph in enumerate(paragraphs or [text.strip()]):
+        paragraph_scores = composite_ai_score(paragraph)
+        paragraph_sentences = _safe_sent_tokenize(paragraph)
+        paragraph_lengths = [len(_safe_word_tokenize(sentence)) for sentence in paragraph_sentences]
+        detected: list[DetectedPattern] = []
+        if paragraph_scores["cadence_uniformity"] >= 0.7:
+            detected.append(
+                DetectedPattern(
+                    pattern_type="uniform_sentence_cadence",
+                    severity=paragraph_scores["cadence_uniformity"],
+                    location=f"paragraph:{index}",
+                    evidence=paragraph_sentences[:3],
+                )
+            )
+        if paragraph_scores["transition_uniformity"] > 0:
+            detected.append(
+                DetectedPattern(
+                    pattern_type="repetitive_transitions",
+                    severity=paragraph_scores["transition_uniformity"],
+                    location=f"paragraph:{index}",
+                    evidence=[
+                        sentence
+                        for sentence in paragraph_sentences
+                        if any(sentence.lower().startswith(marker) for marker in TRANSITION_MARKERS)
+                    ][:3],
+                )
+            )
+        paragraph_analyses.append(
+            ParagraphAnalysis(
+                paragraph_index=index,
+                text=paragraph,
+                sentence_lengths=paragraph_lengths,
+                cadence_score=paragraph_scores["cadence_uniformity"],
+                ai_pattern_score=paragraph_scores["composite_score"],
+                detected_patterns=detected,
             )
         )
 
+    passive_ratio_value, passive_examples = PassiveVoiceAnalyzer().score_text(text)
     detected_patterns: list[DetectedPattern] = []
-    detected_patterns.extend(hedge_patterns)
-    detected_patterns.extend(transition_patterns)
-    detected_patterns.extend(lexical_patterns)
-    detected_patterns.extend(paragraph_patterns)
-    detected_patterns.extend(passive_patterns)
-    for paragraph in paragraph_analyses:
-        detected_patterns.extend(paragraph.detected_patterns)
+    if section_scores["transition_uniformity"] > 0:
+        detected_patterns.append(
+            DetectedPattern(
+                pattern_type="repetitive_transitions",
+                severity=section_scores["transition_uniformity"],
+                location=f"section:{section_name}",
+                evidence=[
+                    sentence
+                    for sentence in sentences
+                    if any(sentence.lower().startswith(marker) for marker in TRANSITION_MARKERS)
+                ][:3],
+            )
+        )
+    if section_scores["lexical_repetition"] > 0.25:
+        detected_patterns.append(
+            DetectedPattern(
+                pattern_type="lexical_repetition",
+                severity=section_scores["lexical_repetition"],
+                location=f"section:{section_name}",
+                evidence=sentences[:3],
+            )
+        )
+    if passive_ratio_value > 0.2:
+        detected_patterns.append(
+            DetectedPattern(
+                pattern_type="passive_voice_overuse",
+                severity=min(1.0, passive_ratio_value),
+                location=f"section:{section_name}",
+                evidence=passive_examples[:3],
+            )
+        )
+    if section_scores["burstiness"] < (config.min_burstiness_to_pass if config else 0.45):
+        detected_patterns.append(
+            DetectedPattern(
+                pattern_type="low_burstiness",
+                severity=round(
+                    max(0.0, 1.0 - section_scores["burstiness"]),
+                    4,
+                ),
+                location=f"section:{section_name}",
+                evidence=sentences[:3],
+            )
+        )
 
-    ai_pattern_score = _aggregate_ai_pattern_score(
-        cadence_score=cadence_score,
-        hedge_score=hedge_score,
-        passive_ratio=passive_ratio,
-        transition_score=transition_score,
-        lexical_repetition_score=lexical_repetition_score,
-        paragraph_monotony_score=paragraph_monotony_score,
-    )
+    paragraph_monotony_score = 0.0
+    if len(paragraphs) >= 2:
+        paragraph_lengths = [len(_safe_word_tokenize(paragraph)) for paragraph in paragraphs]
+        if mean(paragraph_lengths) > 0:
+            paragraph_monotony_score = round(
+                max(0.0, 1.0 - min(1.0, pstdev(paragraph_lengths) / mean(paragraph_lengths))),
+                4,
+            )
+
     active_logger.info(
-        "Humanizer section %s scores cadence=%.3f hedge=%.3f passive=%.3f transition=%.3f lexical=%.3f monotony=%.3f ai=%.3f",
+        "Humanizer detectors for %s: composite=%.3f burstiness=%.3f repetition=%.3f transition=%.3f cadence=%.3f passive=%.3f",
         section_name,
-        cadence_score,
-        hedge_score,
-        passive_ratio,
-        transition_score,
-        lexical_repetition_score,
-        paragraph_monotony_score,
-        ai_pattern_score,
+        section_scores["composite_score"],
+        section_scores["burstiness"],
+        section_scores["lexical_repetition"],
+        section_scores["transition_uniformity"],
+        section_scores["cadence_uniformity"],
+        passive_ratio_value,
     )
+
     return SectionAnalysis(
         section_name=section_name,
         text=text,
         paragraphs=paragraph_analyses,
         detected_patterns=detected_patterns,
-        cadence_score=cadence_score,
-        passive_ratio=passive_ratio,
-        hedge_score=hedge_score,
-        transition_score=transition_score,
-        lexical_repetition_score=lexical_repetition_score,
+        cadence_score=section_scores["cadence_uniformity"],
+        passive_ratio=passive_ratio_value,
+        hedge_score=_hedge_ratio(text),
+        transition_score=section_scores["transition_uniformity"],
+        lexical_repetition_score=section_scores["lexical_repetition"],
         paragraph_monotony_score=paragraph_monotony_score,
-        ai_pattern_score=ai_pattern_score,
+        ai_pattern_score=section_scores["composite_score"],
     )
 
 
-def _analyze_paragraph(*, paragraph_index: int, text: str) -> ParagraphAnalysis:
-    sentences = split_sentences(text)
-    sentence_lengths = [len(tokenize(sentence)) for sentence in sentences if tokenize(sentence)]
-    cadence_score = _sentence_uniformity_score(sentence_lengths)
-    patterns: list[DetectedPattern] = []
-    if cadence_score >= 0.62:
-        patterns.append(
-            DetectedPattern(
-                pattern_type="uniform_sentence_cadence",
-                severity=cadence_score,
-                location=f"paragraph:{paragraph_index}",
-                evidence=sentences[:3],
-            )
-        )
-    repeated_openings = _detect_repeated_openings(sentences)
-    if repeated_openings:
-        patterns.append(
-            DetectedPattern(
-                pattern_type="repeated_sentence_openings",
-                severity=min(1.0, 0.35 + (0.2 * len(repeated_openings))),
-                location=f"paragraph:{paragraph_index}",
-                evidence=repeated_openings,
-            )
-        )
-    ai_pattern_score = min(
-        1.0,
-        round(
-            (cadence_score * 0.7)
-            + (0.15 * len(repeated_openings))
-            + (0.15 if len(sentences) >= 3 and len(set(sentence_lengths)) <= 2 else 0.0),
-            4,
-        ),
-    )
-    return ParagraphAnalysis(
-        paragraph_index=paragraph_index,
-        text=text,
-        sentence_lengths=sentence_lengths,
-        cadence_score=round(cadence_score, 4),
-        ai_pattern_score=ai_pattern_score,
-        detected_patterns=patterns,
-    )
-
-
-def _sentence_uniformity_score(sentence_lengths: list[int]) -> float:
-    if len(sentence_lengths) <= 1:
-        return 0.0
-    mean_length = mean(sentence_lengths)
-    if mean_length <= 0:
-        return 0.0
-    deviation = pstdev(sentence_lengths)
-    coefficient_of_variation = deviation / mean_length if mean_length else 0.0
-    repeated_lengths = sum(count for _, count in Counter(sentence_lengths).items() if count > 1)
-    cluster_penalty = repeated_lengths / max(len(sentence_lengths), 1)
-    uniformity = max(0.0, 1.0 - min(1.0, coefficient_of_variation))
-    return round(min(1.0, (uniformity * 0.75) + (cluster_penalty * 0.25)), 4)
-
-
-def _detect_overused_hedges(
-    *,
-    section_name: str,
-    paragraphs: list[str],
-) -> tuple[float, list[DetectedPattern]]:
-    section_text = " ".join(paragraphs).lower()
-    total_sentences = max(1, sum(len(split_sentences(paragraph)) for paragraph in paragraphs))
-    counts = Counter(marker for marker in HEDGE_MARKERS if marker in section_text)
-    repeated = {marker: count for marker, count in counts.items() if count >= 2}
-    hedge_ratio = min(1.0, sum(counts.values()) / max(total_sentences * 2, 1))
-
-    if section_name in {"results", "discussion", "limitations"}:
-        hedge_ratio = max(0.0, hedge_ratio - 0.1)
-
-    patterns: list[DetectedPattern] = []
-    if repeated or hedge_ratio >= 0.55:
-        evidence = [f"{marker} x{count}" for marker, count in repeated.items()] or list(counts.keys())[:3]
-        patterns.append(
-            DetectedPattern(
-                pattern_type="overused_hedging",
-                severity=round(min(1.0, hedge_ratio + (0.08 * len(repeated))), 4),
-                location=f"section:{section_name}",
-                evidence=evidence,
-            )
-        )
-    return round(hedge_ratio, 4), patterns
-
-
-def _detect_repetitive_transitions(*, paragraphs: list[str]) -> tuple[float, list[DetectedPattern]]:
-    sentence_starts: list[str] = []
-    for paragraph in paragraphs:
-        for sentence in split_sentences(paragraph):
-            lowered = sentence.lower()
-            for marker in TRANSITION_MARKERS:
-                if lowered.startswith(marker):
-                    sentence_starts.append(marker)
-                    break
-    if not sentence_starts:
-        return 0.0, []
-
-    counts = Counter(sentence_starts)
-    repeated = {marker: count for marker, count in counts.items() if count >= 2}
-    score = min(1.0, sum(repeated.values()) / max(len(sentence_starts), 1))
-    patterns: list[DetectedPattern] = []
-    if repeated:
-        patterns.append(
-            DetectedPattern(
-                pattern_type="repetitive_transitions",
-                severity=round(score, 4),
-                location="section",
-                evidence=[f"{marker} x{count}" for marker, count in repeated.items()],
-            )
-        )
-    return round(score, 4), patterns
-
-
-def _detect_lexical_repetition(*, paragraphs: list[str]) -> tuple[float, list[DetectedPattern]]:
-    tokens = [
-        token
-        for paragraph in paragraphs
-        for token in tokenize(paragraph)
-        if token not in MINOR_STOPWORDS and len(token) > 4
-    ]
-    if not tokens:
-        return 0.0, []
-    counts = Counter(tokens)
-    repeated = {token: count for token, count in counts.items() if count >= 4}
-    repetition_score = min(1.0, len(repeated) / max(6, len(counts)))
-    patterns: list[DetectedPattern] = []
-    if repeated:
-        patterns.append(
-            DetectedPattern(
-                pattern_type="lexical_repetition",
-                severity=round(repetition_score, 4),
-                location="section",
-                evidence=[f"{token} x{count}" for token, count in repeated.items()],
-            )
-        )
-    return round(repetition_score, 4), patterns
-
-
-def _detect_paragraph_monotony(*, paragraphs: list[str]) -> tuple[float, list[DetectedPattern]]:
-    if len(paragraphs) < 2:
-        return 0.0, []
-    openings = [_paragraph_opening(paragraph) for paragraph in paragraphs]
-    lengths = [len(tokenize(paragraph)) for paragraph in paragraphs]
-    repeated_openings = [opening for opening, count in Counter(openings).items() if opening and count >= 2]
-    mean_length = mean(lengths)
-    deviation = pstdev(lengths) if len(lengths) > 1 else 0.0
-    length_similarity = 1.0 - min(1.0, deviation / max(mean_length, 1))
-    score = min(1.0, (0.5 * length_similarity) + (0.25 * (len(repeated_openings) / max(len(paragraphs), 1))) + (0.25 if len(set(lengths)) <= 2 else 0.0))
-    patterns: list[DetectedPattern] = []
-    if score >= 0.45:
-        evidence = [f"opening:{opening}" for opening in repeated_openings[:3]]
-        patterns.append(
-            DetectedPattern(
-                pattern_type="paragraph_monotony",
-                severity=round(score, 4),
-                location="section",
-                evidence=evidence,
-            )
-        )
-    return round(score, 4), patterns
-
-
-def _detect_repeated_openings(sentences: Iterable[str]) -> list[str]:
-    openings = [sentence.split()[:2] for sentence in sentences if sentence.strip()]
-    normalized = [" ".join(words).lower() for words in openings if words]
-    return [opening for opening, count in Counter(normalized).items() if count >= 2]
-
-
-def _paragraph_opening(paragraph: str) -> str:
-    sentences = split_sentences(paragraph)
+def _hedge_ratio(text: str) -> float:
+    sentences = _safe_sent_tokenize(text)
     if not sentences:
-        return ""
-    return " ".join(sentences[0].split()[:3]).lower()
+        return 0.0
+    lowered = (text or "").lower()
+    hedge_hits = sum(lowered.count(marker) for marker in HEDGE_MARKERS)
+    return round(min(1.0, hedge_hits / len(sentences)), 4)
 
 
-def _aggregate_ai_pattern_score(
-    *,
-    cadence_score: float,
-    hedge_score: float,
-    passive_ratio: float,
-    transition_score: float,
-    lexical_repetition_score: float,
-    paragraph_monotony_score: float,
-) -> float:
-    return round(
-        min(
-            1.0,
-            (cadence_score * 0.24)
-            + (hedge_score * 0.16)
-            + (passive_ratio * 0.18)
-            + (transition_score * 0.14)
-            + (lexical_repetition_score * 0.14)
-            + (paragraph_monotony_score * 0.14),
-        ),
-        4,
-    )
-
-
-@lru_cache(maxsize=2)
-def _load_spacy_model(model_name: str):
+@lru_cache(maxsize=1)
+def _load_spacy_model(model_name: str = "en_core_web_sm"):
     try:
         import spacy
-    except ImportError:
-        logger.warning("spaCy is unavailable; passive voice detection will be skipped.")
+    except ImportError as exc:  # pragma: no cover - dependency dependent
+        logger.warning("spaCy is not installed; passive voice detection will use regex only: %s", exc)
         return None
 
     try:
         return spacy.load(model_name)
-    except Exception as exc:
-        logger.warning("Unable to load spaCy model '%s': %s", model_name, exc)
+    except Exception as exc:  # pragma: no cover - model dependent
+        logger.warning(
+            "spaCy model '%s' is unavailable; passive voice detection will use regex only: %s",
+            model_name,
+            exc,
+        )
         return None
+
+
+__all__ = [
+    "ParagraphAnalysis",
+    "SectionAnalysis",
+    "PassiveVoiceAnalyzer",
+    "burstiness_score",
+    "lexical_repetition_score",
+    "transition_uniformity_score",
+    "sentence_cadence_score",
+    "passive_voice_ratio",
+    "composite_ai_score",
+    "analyze_section",
+]
