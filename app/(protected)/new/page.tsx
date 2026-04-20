@@ -2,14 +2,27 @@
 
 import { startTransition, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Controller, useForm } from "react-hook-form";
+import { Controller, useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
-import { ArrowRight, FileText, Loader2 } from "lucide-react";
+import {
+  ArrowRight,
+  FileText,
+  Info,
+  Loader2,
+  ShieldCheck,
+  Sparkles,
+} from "lucide-react";
 
 import { FileUpload } from "@/components/shared/FileUpload";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -18,9 +31,11 @@ import { uploadSourceDocument } from "@/lib/backend";
 const projectSchema = z.object({
   title: z.string().min(3, "Project title must be at least 3 characters."),
   description: z.string().optional(),
-  file: z.instanceof(File, {
-    message: "Please upload a reference document (PDF/DOCX).",
-  }).optional(),
+  file: z
+    .instanceof(File, {
+      message: "Please upload a reference document (PDF/DOCX).",
+    })
+    .optional(),
 });
 
 type ProjectFormValues = z.infer<typeof projectSchema>;
@@ -44,6 +59,9 @@ export default function NewProjectPage() {
     },
     mode: "onChange",
   });
+
+  const selectedFile = useWatch({ control, name: "file" });
+  const canSubmit = isValid && Boolean(selectedFile) && !isSubmitting;
 
   const onSubmit = async (data: ProjectFormValues) => {
     if (!data.file) {
@@ -74,69 +92,193 @@ export default function NewProjectPage() {
   };
 
   return (
-    <div className="mx-auto max-w-3xl animate-in fade-in slide-in-from-bottom-4 space-y-8 pb-10 duration-500">
-      <div>
-        <h1 className="mb-2 text-3xl font-bold tracking-tight">
-          Create New Project
-        </h1>
-        <p className="text-zinc-500">
-          Upload your source document to run the real FastAPI plus Vertex AI
-          generation pipeline.
-        </p>
+    <div className="mx-auto max-w-4xl animate-in fade-in slide-in-from-bottom-4 space-y-8 pb-12 duration-500">
+      <section className="relative overflow-hidden rounded-[32px] border border-white/10 bg-[linear-gradient(180deg,rgba(14,17,28,0.96)_0%,rgba(8,10,17,0.98)_100%)] px-6 py-7 shadow-[0_28px_110px_-68px_rgba(59,130,246,0.55)] sm:px-8">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-16 top-0 h-28 rounded-b-[999px] bg-indigo-500/16 blur-3xl"
+        />
+
+        <div className="relative flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+          <div className="max-w-2xl space-y-4">
+            <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.3em] text-indigo-100/80">
+              <Sparkles className="h-3.5 w-3.5 text-sky-300" />
+              New Project
+            </span>
+
+            <div className="space-y-3">
+              <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+                Create a new manuscript workspace
+              </h1>
+              <p className="max-w-xl text-sm leading-7 text-slate-300/72 sm:text-base">
+                Add a title, include a short research summary if you want, and
+                upload your source document to begin processing.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-3 lg:w-[30rem]">
+            <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
+                Formats
+              </p>
+              <p className="mt-2 text-sm font-medium text-white">PDF or DOCX</p>
+            </div>
+            <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
+                Size limit
+              </p>
+              <p className="mt-2 text-sm font-medium text-white">Up to 10MB</p>
+            </div>
+            <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
+                Flow
+              </p>
+              <p className="mt-2 text-sm font-medium text-white">
+                Opens the processing view
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div className="grid gap-5 sm:grid-cols-3">
+        <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06] text-indigo-200">
+              <FileText className="h-4 w-4" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-white">One clear upload</p>
+              <p className="mt-1 text-xs leading-5 text-slate-400">
+                Attach a single source document and continue with the same flow.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06] text-sky-200">
+              <ShieldCheck className="h-4 w-4" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-white">Clean validation</p>
+              <p className="mt-1 text-xs leading-5 text-slate-400">
+                Title and source file stay clear with inline feedback when
+                something is missing.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06] text-emerald-200">
+              <Info className="h-4 w-4" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-white">Live workflow</p>
+              <p className="mt-1 text-xs leading-5 text-slate-400">
+                Your project moves directly into processing after upload
+                completes.
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
 
       <form onSubmit={handleSubmit(onSubmit)}>
-        <Card className="border-zinc-200 shadow-sm">
-          <CardHeader>
-            <CardTitle className="text-xl">Project Details</CardTitle>
-            <CardDescription>
-              Enter the manuscript context and upload the file you want the
-              backend to process.
-            </CardDescription>
+        <Card className="relative overflow-hidden rounded-[32px] border border-white/10 bg-[linear-gradient(180deg,rgba(16,18,29,0.98)_0%,rgba(7,9,15,0.98)_100%)] py-0 shadow-[0_32px_120px_-70px_rgba(15,23,42,0.95)]">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute -left-16 top-0 h-48 w-48 rounded-full bg-sky-400/10 blur-3xl"
+          />
+          <div
+            aria-hidden
+            className="pointer-events-none absolute -right-16 bottom-0 h-56 w-56 rounded-full bg-indigo-500/10 blur-3xl"
+          />
+
+          <CardHeader className="relative gap-3 border-b border-white/8 px-6 pt-6 pb-5 sm:px-8 sm:pt-8">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="space-y-2">
+                <CardTitle className="text-2xl font-semibold text-white">
+                  Project details
+                </CardTitle>
+                <CardDescription className="max-w-2xl text-sm leading-6 text-slate-300/66">
+                  Add the manuscript context and source file you want PaperEasy
+                  to process next.
+                </CardDescription>
+              </div>
+
+              <div className="inline-flex items-center gap-2 self-start rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-xs font-medium text-slate-300">
+                <Sparkles className="h-3.5 w-3.5 text-indigo-300" />
+                Standard setup
+              </div>
+            </div>
           </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="space-y-2">
-              <Label htmlFor="title" className="font-semibold text-zinc-700">
-                Manuscript Title <span className="text-red-500">*</span>
-              </Label>
-              <Input
-                id="title"
-                placeholder="e.g. Impact of AI on Modern Pedagogy"
-                {...register("title")}
-                className={`border-zinc-200 bg-zinc-50 focus-visible:ring-indigo-500 ${
-                  errors.title ? "border-red-500 focus-visible:ring-red-500" : ""
-                }`}
-              />
-              {errors.title ? (
-                <p className="mt-1 text-sm text-red-500">
-                  {errors.title.message}
+
+          <CardContent className="relative space-y-8 px-6 py-6 sm:px-8 sm:py-8">
+            <section className="space-y-6 rounded-[28px] border border-white/8 bg-white/[0.03] p-5 sm:p-6">
+              <div className="space-y-1">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-400">
+                  Manuscript context
                 </p>
-              ) : null}
-            </div>
+                <p className="text-sm text-slate-300/64">
+                  Capture the paper title and optional summary before you upload
+                  the document.
+                </p>
+              </div>
 
-            <div className="space-y-2">
-              <Label
-                htmlFor="description"
-                className="font-semibold text-zinc-700"
-              >
-                Abstract / Description (Optional)
-              </Label>
-              <Textarea
-                id="description"
-                placeholder="Briefly describe the core thesis or findings of your research..."
-                {...register("description")}
-                className="min-h-[100px] resize-none border-zinc-200 bg-zinc-50 focus-visible:ring-indigo-500"
-              />
-            </div>
+              <div className="space-y-2.5">
+                <Label
+                  htmlFor="title"
+                  className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-300/78"
+                >
+                  Manuscript title <span className="text-rose-300">*</span>
+                </Label>
+                <Input
+                  id="title"
+                  placeholder="e.g. Impact of AI on Modern Pedagogy"
+                  {...register("title")}
+                  className={`h-12 rounded-2xl border-white/10 bg-black/20 px-4 text-white placeholder:text-slate-500 shadow-inner shadow-black/20 focus-visible:border-indigo-300/35 focus-visible:ring-4 focus-visible:ring-indigo-400/12 ${
+                    errors.title
+                      ? "border-rose-400/45 focus-visible:border-rose-400/45 focus-visible:ring-rose-400/12"
+                      : ""
+                  }`}
+                />
+                {errors.title ? (
+                  <p className="mt-1 text-sm text-rose-200">
+                    {errors.title.message}
+                  </p>
+                ) : null}
+              </div>
 
-            <div className="space-y-2 border-t border-zinc-100 pt-4">
-              <Label className="font-semibold text-zinc-700">
-                Source Document <span className="text-red-500">*</span>
-              </Label>
-              <p className="mb-4 text-xs text-zinc-500">
-                PDF and DOCX files up to 10MB are uploaded to the FastAPI
-                backend before Gemini on Vertex AI generates the paper.
-              </p>
+              <div className="space-y-2.5">
+                <Label
+                  htmlFor="description"
+                  className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-300/78"
+                >
+                  Abstract or description
+                </Label>
+                <Textarea
+                  id="description"
+                  placeholder="Briefly describe the core thesis, scope, or findings of your research..."
+                  {...register("description")}
+                  className="min-h-[132px] resize-none rounded-2xl border-white/10 bg-black/20 px-4 py-3 text-white placeholder:text-slate-500 shadow-inner shadow-black/20 focus-visible:border-indigo-300/35 focus-visible:ring-4 focus-visible:ring-indigo-400/12"
+                />
+              </div>
+            </section>
+
+            <section className="space-y-4 rounded-[28px] border border-white/8 bg-white/[0.03] p-5 sm:p-6">
+              <div className="space-y-1">
+                <Label className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-300/78">
+                  Source document <span className="text-rose-300">*</span>
+                </Label>
+                <p className="text-sm text-slate-300/64">
+                  Upload the primary document you want to use for this project.
+                </p>
+              </div>
 
               <Controller
                 name="file"
@@ -147,39 +289,40 @@ export default function NewProjectPage() {
                   />
                 )}
               />
+
               {errors.file ? (
-                <p className="mt-1 text-sm text-red-500">
+                <p className="mt-1 text-sm text-rose-200">
                   {errors.file.message as string}
                 </p>
               ) : null}
-            </div>
+            </section>
 
             {submissionError ? (
-              <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+              <div className="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
                 {submissionError}
               </div>
             ) : null}
           </CardContent>
         </Card>
 
-        <div className="mt-8 flex items-center justify-end gap-4">
+        <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-end">
           <Button
             type="button"
             variant="ghost"
             onClick={() => router.back()}
-            className="text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
+            className="h-11 rounded-2xl border border-white/8 bg-white/[0.04] px-5 text-slate-300 hover:bg-white/[0.08] hover:text-white"
           >
             Cancel
           </Button>
           <Button
             type="submit"
-            disabled={!isValid || isSubmitting}
-            className="bg-[#4F46E5] px-8 text-white shadow-sm hover:bg-[#4338CA]"
+            disabled={!canSubmit}
+            className="h-11 rounded-2xl border border-indigo-300/15 bg-gradient-to-r from-sky-500 via-indigo-500 to-blue-500 px-6 text-white shadow-[0_0_28px_rgba(59,130,246,0.22)] hover:from-sky-400 hover:via-indigo-400 hover:to-blue-400"
           >
             {isSubmitting ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Uploading Source...
+                Uploading source...
               </>
             ) : (
               <>
@@ -190,16 +333,16 @@ export default function NewProjectPage() {
         </div>
       </form>
 
-      <div className="rounded-2xl border border-indigo-100 bg-indigo-50/60 p-5">
+      <div className="rounded-[28px] border border-white/8 bg-white/[0.04] px-5 py-4">
         <div className="flex items-start gap-3">
-          <FileText className="mt-0.5 h-5 w-5 text-indigo-500" />
-          <div className="space-y-1 text-sm text-indigo-950/80">
-            <p className="font-semibold text-indigo-950">
-              Live backend processing
-            </p>
-            <p>
-              This flow uses the real `/upload` and `/generate` API endpoints,
-              not demo manuscript data.
+          <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06] text-indigo-200">
+            <Info className="h-4 w-4" />
+          </div>
+          <div className="space-y-1 text-sm">
+            <p className="font-medium text-white">Live backend processing</p>
+            <p className="leading-6 text-slate-300/66">
+              This project uses the real PaperEasy processing flow, not sample
+              manuscript data.
             </p>
           </div>
         </div>
