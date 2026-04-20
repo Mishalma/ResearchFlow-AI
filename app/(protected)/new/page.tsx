@@ -5,14 +5,7 @@ import { useRouter } from "next/navigation";
 import { Controller, useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
-import {
-  ArrowRight,
-  FileText,
-  Info,
-  Loader2,
-  ShieldCheck,
-  Sparkles,
-} from "lucide-react";
+import { ArrowRight, Loader2, Sparkles } from "lucide-react";
 
 import { FileUpload } from "@/components/shared/FileUpload";
 import { Button } from "@/components/ui/button";
@@ -93,99 +86,14 @@ export default function NewProjectPage() {
 
   return (
     <div className="mx-auto max-w-4xl animate-in fade-in slide-in-from-bottom-4 space-y-8 pb-12 duration-500">
-      <section className="relative overflow-hidden rounded-[32px] border border-white/10 bg-[linear-gradient(180deg,rgba(14,17,28,0.96)_0%,rgba(8,10,17,0.98)_100%)] px-6 py-7 shadow-[0_28px_110px_-68px_rgba(59,130,246,0.55)] sm:px-8">
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-x-16 top-0 h-28 rounded-b-[999px] bg-indigo-500/16 blur-3xl"
-        />
-
-        <div className="relative flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
-          <div className="max-w-2xl space-y-4">
-            <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.3em] text-indigo-100/80">
-              <Sparkles className="h-3.5 w-3.5 text-sky-300" />
-              New Project
-            </span>
-
-            <div className="space-y-3">
-              <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-                Create a new manuscript workspace
-              </h1>
-              <p className="max-w-xl text-sm leading-7 text-slate-300/72 sm:text-base">
-                Add a title, include a short research summary if you want, and
-                upload your source document to begin processing.
-              </p>
-            </div>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-3 lg:w-[30rem]">
-            <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
-                Formats
-              </p>
-              <p className="mt-2 text-sm font-medium text-white">PDF or DOCX</p>
-            </div>
-            <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
-                Size limit
-              </p>
-              <p className="mt-2 text-sm font-medium text-white">Up to 10MB</p>
-            </div>
-            <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
-                Flow
-              </p>
-              <p className="mt-2 text-sm font-medium text-white">
-                Opens the processing view
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <div className="grid gap-5 sm:grid-cols-3">
-        <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
-          <div className="flex items-start gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06] text-indigo-200">
-              <FileText className="h-4 w-4" />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-white">One clear upload</p>
-              <p className="mt-1 text-xs leading-5 text-slate-400">
-                Attach a single source document and continue with the same flow.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
-          <div className="flex items-start gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06] text-sky-200">
-              <ShieldCheck className="h-4 w-4" />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-white">Clean validation</p>
-              <p className="mt-1 text-xs leading-5 text-slate-400">
-                Title and source file stay clear with inline feedback when
-                something is missing.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
-          <div className="flex items-start gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06] text-emerald-200">
-              <Info className="h-4 w-4" />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-white">Live workflow</p>
-              <p className="mt-1 text-xs leading-5 text-slate-400">
-                Your project moves directly into processing after upload
-                completes.
-              </p>
-            </div>
-          </div>
-        </div>
+      <div className="space-y-2">
+        <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+          Create a new manuscript workspace
+        </h1>
+        <p className="max-w-2xl text-sm leading-7 text-slate-300/72 sm:text-base">
+          Add a title, include a short research summary if you want, and upload
+          your source document to begin processing.
+        </p>
       </div>
 
       <form onSubmit={handleSubmit(onSubmit)}>
@@ -332,21 +240,6 @@ export default function NewProjectPage() {
           </Button>
         </div>
       </form>
-
-      <div className="rounded-[28px] border border-white/8 bg-white/[0.04] px-5 py-4">
-        <div className="flex items-start gap-3">
-          <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06] text-indigo-200">
-            <Info className="h-4 w-4" />
-          </div>
-          <div className="space-y-1 text-sm">
-            <p className="font-medium text-white">Live backend processing</p>
-            <p className="leading-6 text-slate-300/66">
-              This project uses the real PaperEasy processing flow, not sample
-              manuscript data.
-            </p>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
