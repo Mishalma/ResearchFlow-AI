@@ -19,10 +19,6 @@ export type AuthenticatedUser = {
   emailVerified: boolean;
 };
 
-function getSignInProvider(token: DecodedIdToken) {
-  return token.firebase?.sign_in_provider ?? "unknown";
-}
-
 function mapDecodedTokenToUser(token: DecodedIdToken): AuthenticatedUser {
   return {
     uid: token.uid,
@@ -44,19 +40,11 @@ function assertRecentSignIn(token: DecodedIdToken) {
   }
 }
 
-function assertVerifiedEmailWhenRequired(token: DecodedIdToken) {
-  const provider = getSignInProvider(token);
-  if (provider === "password" && !token.email_verified) {
-    throw new Error("Verify your email address before accessing PaperEasy.");
-  }
-}
-
 export async function createSessionFromIdToken(idToken: string) {
   const auth = await getFirebaseAdminAuth();
   const decodedToken = await auth.verifyIdToken(idToken, true);
 
   assertRecentSignIn(decodedToken);
-  assertVerifiedEmailWhenRequired(decodedToken);
 
   const sessionCookie = await auth.createSessionCookie(idToken, {
     expiresIn: SESSION_MAX_AGE_MS,

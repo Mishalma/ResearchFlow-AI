@@ -11,7 +11,7 @@ type RouterLike = {
 };
 
 async function exchangeSession(idToken: string) {
-  const csrfToken = getBrowserCsrfToken();
+  const csrfToken = await ensureBrowserCsrfToken();
   const response = await fetch("/api/auth/session", {
     method: "POST",
     headers: {
@@ -37,6 +37,44 @@ async function exchangeSession(idToken: string) {
   }
 }
 
+async function ensureBrowserCsrfToken() {
+  const existingToken = getBrowserCsrfToken();
+  if (existingToken) {
+    return existingToken;
+  }
+
+  const response = await fetch("/api/auth/me", {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+    },
+    cache: "no-store",
+    credentials: "same-origin",
+  });
+
+  if (!response.ok) {
+    throw new Error("Unable to initialize a secure sign-in session.");
+  }
+
+  let responseToken = "";
+
+  try {
+    const payload = (await response.json()) as { csrfToken?: string };
+    responseToken = payload.csrfToken?.trim() ?? "";
+  } catch {
+    responseToken = "";
+  }
+
+  const cookieToken = getBrowserCsrfToken();
+  const csrfToken = cookieToken || responseToken;
+
+  if (!csrfToken) {
+    throw new Error("Unable to initialize a secure sign-in session.");
+  }
+
+  return csrfToken;
+}
+
 export async function finalizeBrowserSignIn({
   nextPath,
   router,
@@ -51,9 +89,13 @@ export async function finalizeBrowserSignIn({
     throw new Error("We couldn't finish the sign-in flow. Please try again.");
   }
 
-  const idToken = await user.getIdToken(true);
-  await exchangeSession(idToken);
-  await signOut(auth);
+  try {
+    const idToken = await user.getIdToken(true);
+    await exchangeSession(idToken);
+  } finally {
+    await signOut(auth).catch(() => undefined);
+  }
+
   router.push(nextPath);
   router.refresh();
 }
@@ -97,16 +139,27 @@ export function getFirebaseAuthErrorMessage(
       return "Enter your email address to continue.";
     case "auth/network-request-failed":
       return "Network error. Check your connection and try again.";
+    case "auth/operation-not-allowed":
+      return "This sign-in method is not enabled in Firebase Authentication yet.";
     case "auth/popup-blocked":
       return "Allow popups in your browser, then try Google sign-in again.";
     case "auth/popup-closed-by-user":
       return "Google sign-in was canceled before it finished.";
+    case "auth/unauthorized-domain":
+      return "This domain is not authorized for Google sign-in in Firebase yet.";
     case "auth/too-many-requests":
       return "Too many attempts. Please wait a moment and try again.";
     case "auth/user-disabled":
       return "This account has been disabled. Contact support if you need help.";
     default:
       break;
+  }
+
+  if (
+    error instanceof Error &&
+    /csrf|secure sign-in session/i.test(error.message)
+  ) {
+    return "Your secure sign-in session expired. Please try again.";
   }
 
   if (error instanceof Error && error.message.trim()) {
