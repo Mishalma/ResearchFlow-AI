@@ -5,7 +5,7 @@ const footerColumns = [
   {
     title: "Company",
     links: [
-      { label: "About Us", href: "#how-it-works" },
+      { label: "About Us", href: "/#how-it-works" },
       { label: "Contact", href: "mailto:contact@papereasy.ai" },
     ],
   },
@@ -26,9 +26,9 @@ const footerColumns = [
 
 const socialLinks = [
   { label: "Email", href: "mailto:contact@papereasy.ai", icon: Mail },
-  { label: "LinkedIn", href: "#footer", icon: Globe },
-  { label: "GitHub", href: "#footer", icon: Share2 },
-  { label: "Twitter", href: "#footer", icon: Sparkles },
+  { label: "LinkedIn", href: "/#footer", icon: Globe },
+  { label: "GitHub", href: "/#footer", icon: Share2 },
+  { label: "Twitter", href: "/#footer", icon: Sparkles },
 ];
 
 export function PublicHomeFooter() {

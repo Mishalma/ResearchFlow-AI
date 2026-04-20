@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   ChevronDown,
   FilePlus2,
@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 
+import { buildAuthHref, sanitizeNextPath } from "@/lib/auth/routing";
 import { getBrowserCsrfToken } from "@/lib/auth/browser";
 import type { AuthenticatedUser } from "@/lib/server/auth/session";
 import { cn } from "@/lib/utils";
@@ -31,6 +32,7 @@ import {
 
 type PublicHomeNavProps = {
   user: AuthenticatedUser | null;
+  variant?: "default" | "auth";
 };
 
 type NavItem = {
@@ -38,8 +40,33 @@ type NavItem = {
   href: string;
 };
 
+type AuthVariantAction = {
+  label: string;
+  href: string;
+};
+
 function getProtectedHref(user: AuthenticatedUser | null, path: string) {
   return user ? path : `/login?next=${encodeURIComponent(path)}`;
+}
+
+function getAuthVariantAction(pathname: string | null, nextPath: string): AuthVariantAction {
+  switch (pathname) {
+    case "/signup":
+      return {
+        label: "Sign in",
+        href: buildAuthHref("/login", nextPath),
+      };
+    case "/reset-password":
+      return {
+        label: "Back to sign in",
+        href: buildAuthHref("/login", nextPath),
+      };
+    default:
+      return {
+        label: "Create account",
+        href: buildAuthHref("/signup", nextPath),
+      };
+  }
 }
 
 function NavDropdown({
@@ -76,8 +103,13 @@ function NavDropdown({
   );
 }
 
-export function PublicHomeNav({ user }: PublicHomeNavProps) {
+export function PublicHomeNav({
+  user,
+  variant = "default",
+}: PublicHomeNavProps) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [isOpen, setIsOpen] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
 
@@ -94,6 +126,16 @@ export function PublicHomeNav({ user }: PublicHomeNavProps) {
     window.addEventListener("resize", closeMenu);
     return () => window.removeEventListener("resize", closeMenu);
   }, []);
+
+  const nextPath = useMemo(
+    () => sanitizeNextPath(searchParams.get("next")),
+    [searchParams],
+  );
+
+  const authVariantAction = useMemo(
+    () => getAuthVariantAction(pathname, nextPath),
+    [nextPath, pathname],
+  );
 
   const featureItems = useMemo<NavItem[]>(
     () => [
@@ -118,10 +160,7 @@ export function PublicHomeNav({ user }: PublicHomeNavProps) {
   );
 
   const mobileItems = useMemo<NavItem[]>(
-    () => [
-      ...featureItems,
-      ...resourceItems,
-    ],
+    () => [...featureItems, ...resourceItems],
     [featureItems, resourceItems],
   );
 
@@ -144,6 +183,68 @@ export function PublicHomeNav({ user }: PublicHomeNavProps) {
     setIsOpen(false);
     router.push("/");
     router.refresh();
+  }
+
+  if (variant === "auth") {
+    return (
+      <header className="sticky top-0 z-50 px-4 pt-4 md:px-6 lg:px-8">
+        <div className="mx-auto max-w-7xl">
+          <div
+            className={cn(
+              "rounded-[26px] border border-white/10 px-4 py-3 transition-all duration-300 md:px-5",
+              isScrolled
+                ? "bg-[#0b1120]/92 shadow-[0_22px_70px_-40px_rgba(0,0,0,0.9)] backdrop-blur-2xl"
+                : "bg-[#0d1323]/78 shadow-[0_16px_50px_-38px_rgba(79,70,229,0.55)] backdrop-blur-xl",
+            )}
+          >
+            <div className="flex items-center justify-between gap-4">
+              <Link
+                href="/"
+                className="flex min-w-0 items-center gap-3 text-white"
+              >
+                <span className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-xl border border-indigo-400/20 bg-gradient-to-br from-indigo-400/70 via-sky-400/45 to-violet-500/70 shadow-[0_0_20px_rgba(96,165,250,0.32)]">
+                  <span className="h-2.5 w-2.5 rounded-full bg-white/85" />
+                </span>
+                <span className="truncate text-lg font-semibold tracking-tight">
+                  PaperEasy
+                </span>
+              </Link>
+
+              <div className="flex items-center gap-2 md:gap-3">
+                <Link
+                  href="/"
+                  className="hidden rounded-full px-3 py-2 text-sm font-medium text-indigo-100/74 transition-colors hover:bg-white/6 hover:text-white md:inline-flex"
+                >
+                  Home
+                </Link>
+
+                {user ? (
+                  <Link
+                    href="/editor"
+                    className={cn(
+                      buttonVariants({ size: "lg" }),
+                      "h-11 rounded-2xl border border-sky-300/20 bg-gradient-to-r from-sky-500 via-indigo-500 to-blue-500 px-5 text-white shadow-[0_0_24px_rgba(59,130,246,0.38)] hover:from-sky-400 hover:via-indigo-400 hover:to-blue-400",
+                    )}
+                  >
+                    Workspace
+                  </Link>
+                ) : (
+                  <Link
+                    href={authVariantAction.href}
+                    className={cn(
+                      buttonVariants({ size: "lg" }),
+                      "h-11 rounded-2xl border border-sky-300/20 bg-gradient-to-r from-sky-500 via-indigo-500 to-blue-500 px-5 text-white shadow-[0_0_24px_rgba(59,130,246,0.38)] hover:from-sky-400 hover:via-indigo-400 hover:to-blue-400",
+                    )}
+                  >
+                    {authVariantAction.label}
+                  </Link>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+    );
   }
 
   return (
