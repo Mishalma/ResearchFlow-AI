@@ -10,10 +10,13 @@ if str(BACKEND_ROOT) not in sys.path:
 from humanizer.detectors import (
     burstiness_score,
     composite_ai_score,
+    em_dash_overuse_score,
+    stock_phrase_density_score,
     transition_uniformity_score,
 )
 from humanizer.rewriter import DeterministicRewriter
 from humanizer.semantic_drift import SemanticDriftChecker
+from humanizer.utils import semantic_similarity, verify_rewrite_safety
 from models.generation import HumanizerAgentOutput, IEEESectionMap, ResearchPaperSchema
 from orchestration.pipeline import _execute_humanizer_loop
 
@@ -57,12 +60,59 @@ def test_semantic_drift_unsafe():
         assert not checker.is_safe(original, drift_text)
 
 
+def test_semantic_similarity_handles_academic_paraphrase():
+    original = "The model achieves high accuracy on the benchmark dataset."
+    rewrite = "The proposed approach performs strongly across standard evaluations."
+    assert semantic_similarity(original, rewrite) >= 0.65
+
+
+def test_rewrite_safety_rejects_changed_numbers():
+    safety = verify_rewrite_safety(
+        original="The workflow improved accuracy by 12% on the benchmark dataset [1].",
+        rewritten="The workflow improved accuracy by 18% on the benchmark dataset [1].",
+        similarity_threshold=0.6,
+    )
+    assert not safety.passed
+    assert "number_tokens_changed" in safety.reasons
+
+
 def test_deterministic_rewriter_removes_transitions():
     rewriter = DeterministicRewriter()
     text = "Furthermore, the results are clear. Moreover, this confirms our hypothesis."
     out = rewriter.apply_all(text)
     assert "Furthermore" not in out
     assert "Moreover" not in out
+
+
+def test_deterministic_rewriter_applies_anti_ai_cleanup():
+    rewriter = DeterministicRewriter()
+    text = (
+        "Of course, the system has the ability to process each request — no guessing. "
+        "In order to achieve this goal, it serves as a reliable workflow."
+    )
+    out = rewriter.apply_all(text)
+    assert "Of course" not in out
+    assert "has the ability to" not in out
+    assert "In order to" not in out
+    assert "serves as" not in out
+    assert "—" not in out
+    assert "no guessing" not in out
+
+
+def test_stock_phrase_density_flags_formulaic_ai_copy():
+    text = (
+        "Of course, the system has the ability to process requests. "
+        "In order to achieve this goal, it uses a structured workflow."
+    )
+    assert stock_phrase_density_score(text) > 0.5
+
+
+def test_em_dash_overuse_score_flags_multiple_dashes():
+    text = (
+        "The system works — in practice — because the workflow is stable. "
+        "It adapts — even under stress."
+    )
+    assert em_dash_overuse_score(text) > 0.5
 
 
 def test_pipeline_loop_calls_retry():
@@ -134,6 +184,8 @@ def test_composite_score_structure():
         "transition_uniformity",
         "cadence_uniformity",
         "passive_voice_ratio",
+        "stock_phrase_density",
+        "em_dash_overuse",
         "composite_score",
     ]:
         assert key in result

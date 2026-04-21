@@ -158,6 +158,21 @@ def test_detector_flags_uniform_cadence_and_repetition(monkeypatch: pytest.Monke
     assert "passive_voice_overuse" in pattern_types
 
 
+def test_detector_flags_stock_ai_phrases_and_em_dash_patterns():
+    analysis = analyze_section(
+        section_name="discussion",
+        text=(
+            "Of course, the workflow has the ability to scale — no guessing — during review. "
+            "In order to achieve this goal, it serves as a reliable foundation."
+        ),
+        config=HumanizerConfig(enable_perplexity=False),
+    )
+
+    pattern_types = {pattern.pattern_type for pattern in analysis.detected_patterns}
+    assert "stock_ai_phrases" in pattern_types
+    assert "em_dash_overuse" in pattern_types
+
+
 def test_rewrite_loop_improves_style_score():
     config = HumanizerConfig(use_model_rewriter=False, enable_perplexity=False, max_iterations=2)
     rewriter = HybridSectionRewriter(

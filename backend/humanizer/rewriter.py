@@ -9,14 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from dataclasses import dataclass
 from typing import Any
 
-from humanizer.config import (
-    HUMANIZER_MODE,
-    MAX_AI_PATTERN_SCORE_TO_PASS,
-    MAX_TARGET_PARAGRAPHS_PER_SECTION,
-    MIN_BURSTINESS_TO_PASS,
-    SEMANTIC_DRIFT_THRESHOLD,
-    HumanizerConfig,
-)
+from humanizer.config import HumanizerConfig
 from humanizer.detectors import composite_ai_score
 from humanizer.semantic_drift import SemanticDriftChecker
 from humanizer.utils import (
@@ -55,6 +48,49 @@ FRONTING_ADVERBS = [
     "When examined carefully,",
     "Empirically,",
 ]
+STOCK_PHRASE_REPLACEMENTS = {
+    r"\bin order to\b": "to",
+    r"\bdue to the fact that\b": "because",
+    r"\bat this point in time\b": "now",
+    r"\bin the event that\b": "if",
+    r"\bhas the ability to\b": "can",
+    r"\bit is important to note that\b": "",
+    r"\bit is worth noting that\b": "",
+    r"\bgreat question[!.,]?\s*": "",
+    r"\bof course[!.,]?\s*": "",
+    r"\bcertainly[!.,]?\s*": "",
+    r"\byou'?re absolutely right(?: that)?[!.,]?\s*": "",
+    r"\bi hope this helps[!.,]?\s*": "",
+}
+COPULA_SIMPLIFICATIONS = {
+    r"\bserves as\b": "is",
+    r"\bstands as\b": "is",
+    r"\bboasts\b": "has",
+    r"\bfeatures\b": "has",
+}
+AI_VOCAB_REPLACEMENTS = {
+    r"\bcrucial\b": "important",
+    r"\bpivotal\b": "important",
+    r"\bvaluable\b": "useful",
+    r"\bvibrant\b": "active",
+    r"\bshowcas(?:e|es|ing)\b": "shows",
+    r"\bhighlight(?:s|ed|ing)?\b": "shows",
+    r"\bunderscor(?:e|es|ed|ing)\b": "shows",
+    r"\binterplay\b": "relationship",
+    r"\bintricate\b": "complex",
+    r"\btapestry\b": "mix",
+    r"\btestament\b": "sign",
+}
+TAILING_NEGATION_PATTERN = re.compile(r"[,—]\s*no ([a-z][a-z-]*)([.!?])", re.IGNORECASE)
+COLLABORATIVE_ARTIFACT_PATTERNS = (
+    re.compile(r"(?i)\bwould you like[^.?!]*[.?!]?"),
+    re.compile(r"(?i)\blet me know if you'?d like[^.?!]*[.?!]?"),
+)
+GENERIC_POSITIVE_CONCLUSION_PATTERNS = (
+    re.compile(r"(?i)\bthe future looks bright[^.?!]*[.?!]?"),
+    re.compile(r"(?i)\bexciting times lie ahead[^.?!]*[.?!]?"),
+    re.compile(r"(?i)\b(?:this|that|it) represents? a major step in the right direction[^.?!]*[.?!]?"),
+)
 SECTION_STYLE_PERSONAS = {
     "abstract": "Compact, fluent, and publication-ready without sounding templated.",
     "introduction": "Academic but conversational, with a confident opening rhythm.",
@@ -276,6 +312,31 @@ class DeterministicRewriter:
             )
         return rewritten
 
+    def anti_ai_cleanup(self, text: str) -> str:
+        """Run a final deterministic cleanup pass for obvious AI-writing artifacts."""
+
+        rewritten = text
+        for pattern, replacement in STOCK_PHRASE_REPLACEMENTS.items():
+            rewritten = re.sub(pattern, replacement, rewritten, flags=re.IGNORECASE)
+        for pattern, replacement in COPULA_SIMPLIFICATIONS.items():
+            rewritten = re.sub(pattern, replacement, rewritten, flags=re.IGNORECASE)
+        for pattern, replacement in AI_VOCAB_REPLACEMENTS.items():
+            rewritten = re.sub(pattern, replacement, rewritten, flags=re.IGNORECASE)
+
+        for pattern in COLLABORATIVE_ARTIFACT_PATTERNS:
+            rewritten = pattern.sub("", rewritten)
+        for pattern in GENERIC_POSITIVE_CONCLUSION_PATTERNS:
+            rewritten = pattern.sub("", rewritten)
+
+        rewritten = TAILING_NEGATION_PATTERN.sub(r" without \1\2", rewritten)
+        rewritten = rewritten.replace("—", ", ")
+        rewritten = rewritten.replace("“", '"').replace("”", '"').replace("’", "'")
+        rewritten = re.sub(r"\s{2,}", " ", rewritten)
+        rewritten = re.sub(r"\s+([,.;:!?])", r"\1", rewritten)
+        rewritten = re.sub(r"([,.;:!?])([A-Za-z])", r"\1 \2", rewritten)
+        rewritten = re.sub(r"\s+,", ",", rewritten)
+        return rewritten.strip()
+
     def apply_all(self, text: str) -> str:
         """Apply all deterministic rewriting passes in sequence."""
 
@@ -284,6 +345,7 @@ class DeterministicRewriter:
         rewritten = self.sentence_fuse(rewritten)
         rewritten = self.fronting(rewritten)
         rewritten = self.qualifier_variation(rewritten)
+        rewritten = self.anti_ai_cleanup(rewritten)
         rewritten = re.sub(r"\s{2,}", " ", rewritten)
         rewritten = re.sub(r"\s+([,.;:])", r"\1", rewritten)
         return rewritten.strip()
@@ -379,6 +441,39 @@ class HumanizerRewriter:
                     spans,
                 )
 
+            cleaned = self.deterministic.anti_ai_cleanup(rewritten)
+            if cleaned != rewritten:
+                cleaned_scores = composite_ai_score(cleaned)
+                if _audit_cleanup_is_acceptable(
+                    baseline_scores=composite_ai_score(rewritten),
+                    cleaned_scores=cleaned_scores,
+                ):
+                    rewritten = cleaned
+
+            rewritten_scores = composite_ai_score(rewritten)
+            if not _rewrite_improves_quality(
+                original_scores=paragraph_scores,
+                rewritten_scores=rewritten_scores,
+            ):
+                if rewriter_used == "vertex":
+                    protected_text, spans = extract_protected_spans(original_paragraph)
+                    fallback = restore_protected_spans(
+                        self.deterministic.apply_all(protected_text),
+                        spans,
+                    )
+                    fallback_scores = composite_ai_score(fallback)
+                    if _rewrite_improves_quality(
+                        original_scores=paragraph_scores,
+                        rewritten_scores=fallback_scores,
+                    ):
+                        rewritten = fallback
+                        rewritten_scores = fallback_scores
+                        rewriter_used = "deterministic"
+                    else:
+                        continue
+                else:
+                    continue
+
             drift_value = self.semantic_drift.drift(original_paragraph, rewritten)
             if drift_value is not None and drift_value > self.config.semantic_drift_threshold:
                 rejected_drift += 1
@@ -397,6 +492,7 @@ class HumanizerRewriter:
                     fallback_drift = self.semantic_drift.drift(original_paragraph, fallback)
                     if fallback_drift is None or fallback_drift <= self.config.semantic_drift_threshold:
                         rewritten = fallback
+                        rewritten_scores = composite_ai_score(fallback)
                         rewriter_used = "deterministic"
                     else:
                         continue
@@ -406,9 +502,8 @@ class HumanizerRewriter:
             safety = verify_rewrite_safety(
                 original=original_paragraph,
                 rewritten=rewritten,
-                similarity_threshold=max(
-                    0.0,
-                    1.0 - max(0.0, min(1.0, SEMANTIC_DRIFT_THRESHOLD)),
+                similarity_threshold=_rewrite_similarity_threshold(
+                    self.config.semantic_drift_threshold,
                 ),
             )
             if not safety.passed:
@@ -494,6 +589,61 @@ class HybridSectionRewriter:
 
 def _split_paragraphs(text: str) -> list[str]:
     return [paragraph.strip() for paragraph in re.split(r"\n\s*\n", (text or "").strip()) if paragraph.strip()]
+
+
+def _rewrite_similarity_threshold(semantic_drift_threshold: float) -> float:
+    # This safety gate should catch genuine meaning changes, not block normal paraphrases.
+    return round(max(0.5, 0.68 - (max(0.0, min(1.0, semantic_drift_threshold)) * 0.2)), 4)
+
+
+def _rewrite_improves_quality(
+    *,
+    original_scores: dict[str, float],
+    rewritten_scores: dict[str, float],
+) -> bool:
+    original_composite = float(original_scores.get("composite_score", 0.0))
+    rewritten_composite = float(rewritten_scores.get("composite_score", 0.0))
+    composite_gain = original_composite - rewritten_composite
+    burstiness_gain = float(rewritten_scores.get("burstiness", 0.0)) - float(
+        original_scores.get("burstiness", 0.0),
+    )
+    transition_gain = float(original_scores.get("transition_uniformity", 0.0)) - float(
+        rewritten_scores.get("transition_uniformity", 0.0),
+    )
+    cadence_gain = float(original_scores.get("cadence_uniformity", 0.0)) - float(
+        rewritten_scores.get("cadence_uniformity", 0.0),
+    )
+
+    return (
+        composite_gain >= 0.03
+        or (
+            composite_gain >= 0.0
+            and (
+                burstiness_gain >= 0.08
+                or transition_gain >= 0.08
+                or cadence_gain >= 0.08
+            )
+        )
+    )
+
+
+def _audit_cleanup_is_acceptable(
+    *,
+    baseline_scores: dict[str, float],
+    cleaned_scores: dict[str, float],
+) -> bool:
+    baseline_composite = float(baseline_scores.get("composite_score", 0.0))
+    cleaned_composite = float(cleaned_scores.get("composite_score", 0.0))
+    baseline_stock = float(baseline_scores.get("stock_phrase_density", 0.0))
+    cleaned_stock = float(cleaned_scores.get("stock_phrase_density", 0.0))
+    baseline_dash = float(baseline_scores.get("em_dash_overuse", 0.0))
+    cleaned_dash = float(cleaned_scores.get("em_dash_overuse", 0.0))
+
+    return (
+        cleaned_composite <= (baseline_composite + 0.02)
+        and cleaned_stock <= baseline_stock
+        and cleaned_dash <= baseline_dash
+    )
 
 
 __all__ = [

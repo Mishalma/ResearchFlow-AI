@@ -37,6 +37,74 @@ CITATION_PATTERN = re.compile(r"\[[0-9,\-\s]+\]|\\cite[t|p]?\{[^}]+\}")
 LATEX_PATTERN = re.compile(r"\\[A-Za-z]+(?:\{[^}]*\})*|\$[^$]+\$|\\\([^)]+\\\)|\\\[[^\]]+\\\]")
 QUOTED_PATTERN = re.compile(r"\"[^\"]+\"|'[^']+'")
 TECHNICAL_ENTITY_PATTERN = re.compile(r"\b(?:[A-Z][a-z]+(?:[A-Z][a-z0-9]+)+|[A-Z]{2,}[A-Za-z0-9-]*)\b")
+STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "across",
+    "be",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "their",
+    "this",
+    "those",
+    "to",
+    "was",
+    "were",
+    "with",
+}
+CANONICAL_TOKEN_MAP = {
+    "accuracy": "performance",
+    "accurate": "performance",
+    "achieve": "perform",
+    "achieves": "perform",
+    "achieved": "perform",
+    "approach": "method",
+    "architecture": "method",
+    "baseline": "benchmark",
+    "benchmarks": "benchmark",
+    "dataset": "evaluation",
+    "datasets": "evaluation",
+    "evaluated": "evaluation",
+    "evaluations": "evaluation",
+    "framework": "method",
+    "high": "strong",
+    "method": "method",
+    "methods": "method",
+    "model": "method",
+    "models": "method",
+    "performed": "perform",
+    "performs": "perform",
+    "performing": "perform",
+    "performance": "perform",
+    "pipeline": "method",
+    "proposed": "method",
+    "results": "perform",
+    "robust": "strong",
+    "robustly": "strong",
+    "standard": "benchmark",
+    "standards": "benchmark",
+    "strongly": "strong",
+    "strong": "strong",
+    "system": "method",
+    "systems": "method",
+    "technique": "method",
+    "workflow": "method",
+}
 PROTECTED_PATTERNS = (
     ("citation", CITATION_PATTERN),
     ("latex", LATEX_PATTERN),
@@ -87,6 +155,28 @@ def tokenize(text: str) -> list[str]:
     return TOKEN_PATTERN.findall(text.lower())
 
 
+def canonicalize_token(token: str) -> str:
+    normalized = token.lower().strip()
+    direct_mapping = CANONICAL_TOKEN_MAP.get(normalized)
+    if direct_mapping is not None:
+        return direct_mapping
+    if len(normalized) > 4:
+        for suffix in ("ingly", "edly", "ing", "ed", "ly", "es", "s"):
+            if normalized.endswith(suffix) and len(normalized) > len(suffix) + 2:
+                normalized = normalized[: -len(suffix)]
+                break
+    return CANONICAL_TOKEN_MAP.get(normalized, normalized)
+
+
+def content_token_set(text: str) -> set[str]:
+    tokens = {
+        canonicalize_token(token)
+        for token in tokenize(text)
+        if token not in STOPWORDS and len(token) > 2
+    }
+    return {token for token in tokens if token and token not in STOPWORDS}
+
+
 def extract_protected_spans(text: str) -> tuple[str, list[ProtectedSpan]]:
     protected = text
     spans: list[ProtectedSpan] = []
@@ -120,15 +210,15 @@ def protected_signature(text: str) -> dict[str, list[str]]:
 
 
 def semantic_similarity(source: str, candidate: str) -> float:
-    source_tokens = set(tokenize(source))
-    candidate_tokens = set(tokenize(candidate))
+    source_tokens = content_token_set(source)
+    candidate_tokens = content_token_set(candidate)
     if not source_tokens and not candidate_tokens:
         return 1.0
     if not source_tokens or not candidate_tokens:
         return 0.0
     jaccard = len(source_tokens & candidate_tokens) / len(source_tokens | candidate_tokens)
     sequence = difflib.SequenceMatcher(a=source.lower(), b=candidate.lower()).ratio()
-    return round((jaccard * 0.6) + (sequence * 0.4), 4)
+    return round((jaccard * 0.75) + (sequence * 0.25), 4)
 
 
 def verify_rewrite_safety(

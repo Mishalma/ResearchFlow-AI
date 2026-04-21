@@ -83,6 +83,67 @@ HEDGE_MARKERS = (
     "could",
     "potentially",
 )
+AI_VOCAB_MARKERS = (
+    "actually",
+    "align with",
+    "crucial",
+    "delve",
+    "emphasizing",
+    "enduring",
+    "enhance",
+    "fostering",
+    "garner",
+    "highlight",
+    "interplay",
+    "intricate",
+    "landscape",
+    "pivotal",
+    "showcase",
+    "tapestry",
+    "testament",
+    "underscore",
+    "valuable",
+    "vibrant",
+)
+FILLER_MARKERS = (
+    "in order to",
+    "due to the fact that",
+    "at this point in time",
+    "in the event that",
+    "has the ability to",
+    "it is important to note that",
+)
+COLLABORATIVE_ARTIFACTS = (
+    "i hope this helps",
+    "let me know if you'd like",
+    "would you like",
+    "of course",
+    "certainly",
+    "you're absolutely right",
+    "great question",
+)
+VAGUE_ATTRIBUTION_MARKERS = (
+    "industry reports",
+    "observers have cited",
+    "experts argue",
+    "some critics argue",
+    "several sources",
+    "several publications",
+    "based on available information",
+    "while specific details are limited",
+)
+GENERIC_CONCLUSION_MARKERS = (
+    "the future looks bright",
+    "exciting times lie ahead",
+    "step in the right direction",
+)
+STOCK_PHRASE_MARKERS = (
+    *AI_VOCAB_MARKERS,
+    *FILLER_MARKERS,
+    *COLLABORATIVE_ARTIFACTS,
+    *VAGUE_ATTRIBUTION_MARKERS,
+    *GENERIC_CONCLUSION_MARKERS,
+)
 _FALLBACK_STOPWORDS = {
     "the",
     "a",
@@ -275,6 +336,33 @@ def sentence_cadence_score(text: str) -> float:
     return round(max(0.0, min(1.0, normalized)), 4)
 
 
+def stock_phrase_density_score(text: str) -> float:
+    """Return the fraction of sentences containing stock AI-style wording."""
+
+    sentences = _safe_sent_tokenize(text)
+    if not sentences:
+        return 0.0
+
+    flagged = 0
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if any(marker in lowered for marker in STOCK_PHRASE_MARKERS):
+            flagged += 1
+    return round(min(1.0, flagged / len(sentences)), 4)
+
+
+def em_dash_overuse_score(text: str) -> float:
+    """Return a small penalty when em dashes are overused relative to sentence count."""
+
+    sentences = _safe_sent_tokenize(text)
+    if not sentences:
+        return 0.0
+    dash_count = text.count("—")
+    if dash_count <= 1:
+        return 0.0
+    return round(min(1.0, max(0, dash_count - 1) / len(sentences)), 4)
+
+
 class PassiveVoiceAnalyzer:
     """Analyze passive-voice usage with spaCy or a regex fallback."""
 
@@ -353,12 +441,16 @@ def composite_ai_score(text: str) -> dict[str, float]:
     transition_uniformity = transition_uniformity_score(text)
     cadence_uniformity = sentence_cadence_score(text)
     passive_ratio = passive_voice_ratio(text)
+    stock_phrase_density = stock_phrase_density_score(text)
+    em_dash_overuse = em_dash_overuse_score(text)
     composite = (
-        (_normalize_burstiness_for_ai_score(burstiness) * 0.30)
-        + (transition_uniformity * 0.20)
-        + (cadence_uniformity * 0.25)
-        + (lexical_repetition * 0.15)
-        + (passive_ratio * 0.10)
+        (_normalize_burstiness_for_ai_score(burstiness) * 0.24)
+        + (transition_uniformity * 0.18)
+        + (cadence_uniformity * 0.22)
+        + (lexical_repetition * 0.12)
+        + (passive_ratio * 0.09)
+        + (stock_phrase_density * 0.10)
+        + (em_dash_overuse * 0.05)
     )
     return {
         "burstiness": round(burstiness, 4),
@@ -366,6 +458,8 @@ def composite_ai_score(text: str) -> dict[str, float]:
         "transition_uniformity": round(transition_uniformity, 4),
         "cadence_uniformity": round(cadence_uniformity, 4),
         "passive_voice_ratio": round(passive_ratio, 4),
+        "stock_phrase_density": round(stock_phrase_density, 4),
+        "em_dash_overuse": round(em_dash_overuse, 4),
         "composite_score": round(max(0.0, min(1.0, composite)), 4),
     }
 
@@ -448,6 +542,28 @@ def analyze_section(
                 severity=section_scores["lexical_repetition"],
                 location=f"section:{section_name}",
                 evidence=sentences[:3],
+            )
+        )
+    if section_scores["stock_phrase_density"] > 0:
+        detected_patterns.append(
+            DetectedPattern(
+                pattern_type="stock_ai_phrases",
+                severity=section_scores["stock_phrase_density"],
+                location=f"section:{section_name}",
+                evidence=[
+                    sentence
+                    for sentence in sentences
+                    if any(marker in sentence.lower() for marker in STOCK_PHRASE_MARKERS)
+                ][:3],
+            )
+        )
+    if section_scores["em_dash_overuse"] > 0:
+        detected_patterns.append(
+            DetectedPattern(
+                pattern_type="em_dash_overuse",
+                severity=section_scores["em_dash_overuse"],
+                location=f"section:{section_name}",
+                evidence=[sentence for sentence in sentences if "—" in sentence][:3],
             )
         )
     if passive_ratio_value > 0.2:
@@ -543,6 +659,8 @@ __all__ = [
     "lexical_repetition_score",
     "transition_uniformity_score",
     "sentence_cadence_score",
+    "stock_phrase_density_score",
+    "em_dash_overuse_score",
     "passive_voice_ratio",
     "composite_ai_score",
     "analyze_section",
