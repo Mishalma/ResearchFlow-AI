@@ -1,0 +1,342 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papereasy.dev/schemas/final-report.schema.json",
+  "title": "PaperEasy Final Workflow Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "job_id",
+    "project_id",
+    "final_disposition",
+    "overall",
+    "sections",
+    "flags",
+    "artifacts",
+    "workflow",
+    "generated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "final_disposition": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "accepted_after_fix",
+        "manual_review_required",
+        "failed"
+      ]
+    },
+    "overall": {
+      "$ref": "#/$defs/overall"
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/section"
+      }
+    },
+    "flags": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/flag"
+      }
+    },
+    "before_after": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/beforeAfter"
+      },
+      "default": []
+    },
+    "artifacts": {
+      "$ref": "#/$defs/artifacts"
+    },
+    "workflow": {
+      "$ref": "#/$defs/workflow"
+    },
+    "explanations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "top_signals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "overall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ai_score",
+        "plagiarism_score",
+        "confidence_band",
+        "routing_decision",
+        "deep_validation_used",
+        "iterations_used"
+      ],
+      "properties": {
+        "ai_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "plagiarism_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "confidence_band": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "routing_decision": {
+          "type": "string",
+          "enum": [
+            "clean",
+            "borderline",
+            "flagged",
+            "manual_review_required"
+          ]
+        },
+        "deep_validation_used": {
+          "type": "boolean"
+        },
+        "iterations_used": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        }
+      }
+    },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "section_id",
+        "title",
+        "ai_score",
+        "plagiarism_score",
+        "risk_level",
+        "changed_by_fix"
+      ],
+      "properties": {
+        "section_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ai_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "plagiarism_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "risk_level": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "changed_by_fix": {
+          "type": "boolean"
+        },
+        "flag_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "flag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "flag_id",
+        "kind",
+        "detector",
+        "section_id",
+        "draft_version",
+        "start_char",
+        "end_char",
+        "score",
+        "severity",
+        "resolution"
+      ],
+      "properties": {
+        "flag_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "ai",
+            "plagiarism",
+            "citation",
+            "style"
+          ]
+        },
+        "detector": {
+          "type": "string",
+          "minLength": 1
+        },
+        "section_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "draft_version": {
+          "type": "string",
+          "enum": [
+            "draft_v1",
+            "draft_v2",
+            "draft_v3"
+          ]
+        },
+        "start_char": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_char": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "rewritten",
+            "ignored",
+            "manual_review_required"
+          ]
+        }
+      }
+    },
+    "beforeAfter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "section_id",
+        "from_draft",
+        "to_draft",
+        "change_summary"
+      ],
+      "properties": {
+        "section_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "from_draft": {
+          "type": "string"
+        },
+        "to_draft": {
+          "type": "string"
+        },
+        "change_summary": {
+          "type": "string"
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "final_report_uri",
+        "final_accepted_draft_uri",
+        "latest_draft_uri"
+      ],
+      "properties": {
+        "final_report_uri": {
+          "type": "string",
+          "pattern": "^gs://.+$"
+        },
+        "final_accepted_draft_uri": {
+          "type": "string",
+          "pattern": "^gs://.+$"
+        },
+        "latest_draft_uri": {
+          "type": "string",
+          "pattern": "^gs://.+$"
+        }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "states_visited",
+        "deep_validation_used",
+        "iterations_used"
+      ],
+      "properties": {
+        "states_visited": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deep_validation_used": {
+          "type": "boolean"
+        },
+        "iterations_used": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        }
+      }
+    }
+  }
+}

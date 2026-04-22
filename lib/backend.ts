@@ -108,6 +108,110 @@ export type GenerateProjectResponse = {
   agent_timings: AgentTiming[];
 };
 
+export type WorkflowJobStatus =
+  | "CREATED"
+  | "GENERATION_REQUESTED"
+  | "GENERATING"
+  | "GENERATED"
+  | "VALIDATION_REQUESTED"
+  | "VALIDATING"
+  | "DEEP_VALIDATION_REQUESTED"
+  | "FIX_REQUESTED"
+  | "FIXING"
+  | "FINALIZING"
+  | "DONE"
+  | "FAILED";
+
+export type WorkflowJobStage =
+  | "job"
+  | "generation"
+  | "validation"
+  | "fix"
+  | "finalize"
+  | "done"
+  | "failed";
+
+export type WorkflowScores = {
+  ai_score: number | null;
+  plagiarism_score: number | null;
+  confidence_band: "unknown" | "low" | "medium" | "high";
+  routing_decision:
+    | "pending"
+    | "clean"
+    | "borderline"
+    | "flagged"
+    | "manual_review_required";
+  deep_validation_used: boolean;
+};
+
+export type WorkflowErrorPayload = {
+  stage: string;
+  code: string;
+  message: string;
+  retryable: boolean;
+  attempt: number | null;
+};
+
+export type WorkflowJobProgress = {
+  current_step: "queued" | "generation" | "complete" | "failed";
+  percent: number;
+};
+
+export type CreateJobResponse = {
+  job_id: string;
+  status: WorkflowJobStatus;
+  stage: WorkflowJobStage;
+  poll_url: string;
+  result_url: string;
+};
+
+export type JobStatusResponse = {
+  job_id: string;
+  project_id: string;
+  status: WorkflowJobStatus;
+  stage: WorkflowJobStage;
+  validation_mode: "none" | "fast" | "deep";
+  iteration: number;
+  progress: WorkflowJobProgress;
+  current_draft_uri: string | null;
+  scores: WorkflowScores;
+  error: WorkflowErrorPayload | null;
+};
+
+export type JobResultArtifacts = {
+  raw_upload_uri: string | null;
+  extracted_text_uri: string | null;
+  draft_v1_uri: string | null;
+  draft_v2_uri: string | null;
+  draft_v3_uri: string | null;
+  final_report_uri: string | null;
+  final_accepted_draft_uri: string | null;
+};
+
+export type JobResultResponse = {
+  job_id: string;
+  project_id: string;
+  status: "DONE" | "FAILED";
+  final_disposition:
+    | "accepted"
+    | "accepted_after_fix"
+    | "manual_review_required"
+    | "failed";
+  validation_mode: "none" | "fast" | "deep";
+  boundary: "legacy_full_pipeline" | "formatting_complete" | null;
+  editor_url: string | null;
+  generated_paper: GeneratedPaper | null;
+  metadata: {
+    provider: string;
+    model: string;
+    generation_time_ms: number;
+    trace_id: string;
+    agent_timings: AgentTiming[];
+  } | null;
+  artifacts: JobResultArtifacts;
+  error: WorkflowErrorPayload | null;
+};
+
 export type ProjectSummary = {
   id: string;
   title: string;
@@ -302,6 +406,75 @@ export async function generateProjectPaper(
   }
 
   return (await response.json()) as GenerateProjectResponse;
+}
+
+export async function createGenerationJob(
+  projectId: string,
+  idempotencyKey: string,
+  signal?: AbortSignal,
+): Promise<CreateJobResponse> {
+  const headers = buildMutationHeaders();
+  headers.set("Idempotency-Key", idempotencyKey);
+
+  const response = await fetch(`${apiBaseUrl}/jobs`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      project_id: projectId,
+      config: {
+        validation_depth: "standard",
+        enable_fix_loop: true,
+        max_iterations: 3,
+      },
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await readBackendError(response));
+  }
+
+  return (await response.json()) as CreateJobResponse;
+}
+
+export async function fetchGenerationJob(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<JobStatusResponse> {
+  const response = await fetch(`${apiBaseUrl}/jobs/${jobId}`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+    },
+    cache: "no-store",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await readBackendError(response));
+  }
+
+  return (await response.json()) as JobStatusResponse;
+}
+
+export async function fetchGenerationJobResult(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<JobResultResponse> {
+  const response = await fetch(`${apiBaseUrl}/jobs/${jobId}/result`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+    },
+    cache: "no-store",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await readBackendError(response));
+  }
+
+  return (await response.json()) as JobResultResponse;
 }
 
 export async function fetchProjects(

@@ -1,0 +1,407 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papereasy.dev/schemas/job.schema.json",
+  "title": "PaperEasy Workflow Job",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "job_id",
+    "project_id",
+    "user_id",
+    "status",
+    "stage",
+    "validation_mode",
+    "iteration",
+    "max_iterations",
+    "idempotency_key",
+    "current_draft_uri",
+    "artifacts",
+    "scores",
+    "timestamps"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "user_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "request_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "CREATED",
+        "GENERATION_REQUESTED",
+        "GENERATING",
+        "GENERATED",
+        "VALIDATION_REQUESTED",
+        "VALIDATING",
+        "DEEP_VALIDATION_REQUESTED",
+        "FIX_REQUESTED",
+        "FIXING",
+        "FINALIZING",
+        "DONE",
+        "FAILED"
+      ]
+    },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "job",
+        "generation",
+        "validation",
+        "fix",
+        "finalize",
+        "done",
+        "failed"
+      ]
+    },
+    "validation_mode": {
+      "type": "string",
+      "enum": [
+        "none",
+        "fast",
+        "deep"
+      ]
+    },
+    "iteration": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "max_iterations": {
+      "type": "integer",
+      "const": 3
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 8
+    },
+    "current_draft_uri": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^(gs://.*)?$"
+    },
+    "artifacts": {
+      "$ref": "#/$defs/artifacts"
+    },
+    "scores": {
+      "$ref": "#/$defs/scores"
+    },
+    "active_task": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/activeTask"
+        }
+      ]
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/error"
+        }
+      ]
+    },
+    "timestamps": {
+      "$ref": "#/$defs/timestamps"
+    }
+  },
+  "$defs": {
+    "artifactPointer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uri",
+        "owner_service",
+        "version",
+        "content_type",
+        "created_at"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "pattern": "^gs://.+$"
+        },
+        "owner_service": {
+          "type": "string",
+          "enum": [
+            "upload",
+            "generation-service",
+            "validation-service",
+            "fix-service",
+            "finalize-service"
+          ]
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "checksum_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "raw_upload",
+        "extracted_text",
+        "draft_v1",
+        "draft_v2",
+        "draft_v3",
+        "final_report",
+        "final_accepted_draft"
+      ],
+      "properties": {
+        "raw_upload": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifactPointer"
+            }
+          ]
+        },
+        "extracted_text": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifactPointer"
+            }
+          ]
+        },
+        "draft_v1": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifactPointer"
+            }
+          ]
+        },
+        "draft_v2": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifactPointer"
+            }
+          ]
+        },
+        "draft_v3": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifactPointer"
+            }
+          ]
+        },
+        "final_report": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifactPointer"
+            }
+          ]
+        },
+        "final_accepted_draft": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifactPointer"
+            }
+          ]
+        }
+      }
+    },
+    "scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ai_score",
+        "plagiarism_score",
+        "confidence_band",
+        "routing_decision",
+        "deep_validation_used"
+      ],
+      "properties": {
+        "ai_score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "plagiarism_score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "confidence_band": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "routing_decision": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "clean",
+            "borderline",
+            "flagged",
+            "manual_review_required"
+          ]
+        },
+        "deep_validation_used": {
+          "type": "boolean"
+        }
+      }
+    },
+    "activeTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "queue_name",
+        "worker_target",
+        "attempt"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "queue_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worker_target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "stage": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "attempt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      }
+    },
+    "timestamps": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

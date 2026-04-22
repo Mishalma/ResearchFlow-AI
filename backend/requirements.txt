@@ -9,9 +9,11 @@ google-genai
 google-adk
 google-cloud-storage
 google-cloud-firestore
+google-cloud-tasks
 pydantic
 jinja2
 pytest
+httpx
 transformers
 torch
 spacy

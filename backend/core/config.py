@@ -12,6 +12,8 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
 
 PersistenceBackend = Literal["local", "gcp"]
+WorkflowDispatchBackend = Literal["local", "cloud_tasks"]
+WorkflowGenerationBackend = Literal["local", "service"]
 
 
 def _get_bool(name: str, default: bool = False) -> bool:
@@ -89,10 +91,12 @@ class Settings:
     outputs_dir: Path
     templates_dir: Path
     local_projects_dir: Path
+    local_jobs_dir: Path
     temp_dir: Path
     persistence_backend: PersistenceBackend
     gcs_bucket_name: str
     firestore_projects_collection: str
+    firestore_jobs_collection: str
     agent_specs_path: Path
     max_upload_size_mb: int
     max_upload_size_bytes: int
@@ -100,6 +104,16 @@ class Settings:
     max_figure_size_bytes: int
     google_cloud_project: str
     google_cloud_location: str
+    workflow_dispatch_backend: WorkflowDispatchBackend
+    workflow_generation_backend: WorkflowGenerationBackend
+    workflow_cloud_tasks_project: str
+    workflow_cloud_tasks_location: str
+    workflow_cloud_tasks_queue: str
+    workflow_cloud_tasks_target_url: str
+    workflow_cloud_tasks_service_account_email: str
+    generation_service_base_url: str
+    generation_service_audience: str
+    generation_service_timeout_seconds: int
     vertex_model: str
     vertex_service_account_file: Path | None
     ai_request_timeout_seconds: int
@@ -120,6 +134,18 @@ def get_settings() -> Settings:
     persistence_backend = os.getenv("PERSISTENCE_BACKEND", "local").strip().lower() or "local"
     if persistence_backend not in {"local", "gcp"}:
         persistence_backend = "local"
+    workflow_dispatch_backend = (
+        os.getenv("WORKFLOW_DISPATCH_BACKEND", "local").strip().lower() or "local"
+    )
+    if workflow_dispatch_backend not in {"local", "cloud_tasks"}:
+        workflow_dispatch_backend = "local"
+    workflow_generation_backend = (
+        os.getenv("WORKFLOW_GENERATION_BACKEND", "local").strip().lower() or "local"
+    )
+    if workflow_generation_backend not in {"local", "service"}:
+        workflow_generation_backend = "local"
+    google_cloud_project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+    google_cloud_location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1").strip() or "us-central1"
 
     return Settings(
         base_dir=BASE_DIR,
@@ -132,19 +158,43 @@ def get_settings() -> Settings:
         outputs_dir=BASE_DIR / "outputs",
         templates_dir=BASE_DIR / "templates",
         local_projects_dir=_resolve_path("LOCAL_PROJECTS_DIR", BASE_DIR / "data" / "projects"),
+        local_jobs_dir=_resolve_path("LOCAL_JOBS_DIR", BASE_DIR / "data" / "jobs"),
         temp_dir=_resolve_path("TEMP_DIR", BASE_DIR / ".tmp"),
         persistence_backend=persistence_backend,
         gcs_bucket_name=os.getenv("GCS_BUCKET_NAME", "").strip(),
         firestore_projects_collection=os.getenv("FIRESTORE_PROJECTS_COLLECTION", "papereasy-projects").strip()
         or "papereasy-projects",
+        firestore_jobs_collection=os.getenv("FIRESTORE_JOBS_COLLECTION", "papereasy-jobs").strip()
+        or "papereasy-jobs",
         agent_specs_path=_resolve_path("AGENT_SPECS_PATH", BASE_DIR / "agents" / "agent_specs.json"),
         max_upload_size_mb=max_upload_size_mb,
         max_upload_size_bytes=max_upload_size_mb * 1024 * 1024,
         max_figure_size_mb=max_figure_size_mb,
         max_figure_size_bytes=max_figure_size_mb * 1024 * 1024,
-        google_cloud_project=os.getenv("GOOGLE_CLOUD_PROJECT", "").strip(),
-        google_cloud_location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1").strip()
-        or "us-central1",
+        google_cloud_project=google_cloud_project,
+        google_cloud_location=google_cloud_location,
+        workflow_dispatch_backend=workflow_dispatch_backend,
+        workflow_generation_backend=workflow_generation_backend,
+        workflow_cloud_tasks_project=(
+            os.getenv("WORKFLOW_CLOUD_TASKS_PROJECT", "").strip() or google_cloud_project
+        ),
+        workflow_cloud_tasks_location=(
+            os.getenv("WORKFLOW_CLOUD_TASKS_LOCATION", "").strip() or google_cloud_location
+        ),
+        workflow_cloud_tasks_queue=(
+            os.getenv("WORKFLOW_CLOUD_TASKS_QUEUE", "papereasy-generation").strip()
+            or "papereasy-generation"
+        ),
+        workflow_cloud_tasks_target_url=os.getenv("WORKFLOW_CLOUD_TASKS_TARGET_URL", "").strip(),
+        workflow_cloud_tasks_service_account_email=os.getenv(
+            "WORKFLOW_CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL", ""
+        ).strip(),
+        generation_service_base_url=os.getenv("GENERATION_SERVICE_BASE_URL", "").strip(),
+        generation_service_audience=os.getenv("GENERATION_SERVICE_AUDIENCE", "").strip(),
+        generation_service_timeout_seconds=max(
+            30,
+            _get_int("GENERATION_SERVICE_TIMEOUT_SECONDS", 1500),
+        ),
         vertex_model=os.getenv("VERTEX_MODEL", "gemini-2.5-flash").strip()
         or "gemini-2.5-flash",
         vertex_service_account_file=_resolve_optional_path("VERTEX_SERVICE_ACCOUNT_FILE"),

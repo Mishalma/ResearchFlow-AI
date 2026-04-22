@@ -1,0 +1,49 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'build-image'
+  args:
+    - 'build'
+    - '-t'
+    - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/${_SERVICE_NAME}:${BUILD_ID}'
+    - '.'
+
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'push-image'
+  waitFor: ['build-image']
+  args:
+    - 'push'
+    - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/${_SERVICE_NAME}:${BUILD_ID}'
+
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'deploy-generation-cloud-run'
+  waitFor: ['push-image']
+  entrypoint: gcloud
+  args:
+    - 'run'
+    - 'deploy'
+    - '${_SERVICE_NAME}'
+    - '--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/${_SERVICE_NAME}:${BUILD_ID}'
+    - '--region=${_REGION}'
+    - '--platform=managed'
+    - '--no-allow-unauthenticated'
+    - '--ingress=internal'
+    - '--port=8080'
+    - '--timeout=1800'
+    - '--cpu=1'
+    - '--memory=2Gi'
+    - '--service-account=${_SERVICE_ACCOUNT}'
+    - '--command=uvicorn'
+    - '--args=app.generation_main:app,--host,0.0.0.0,--port,8080'
+    - '--set-env-vars=APP_NAME=PaperEasy Generation Service,DEBUG=false,PERSISTENCE_BACKEND=gcp,TEMP_DIR=/tmp,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION},VERTEX_MODEL=${_VERTEX_MODEL},GCS_BUCKET_NAME=${_GCS_BUCKET},FIRESTORE_PROJECTS_COLLECTION=${_FIRESTORE_COLLECTION}'
+
+substitutions:
+  _REGION: 'us-central1'
+  _REPO_NAME: 'papereasy'
+  _SERVICE_NAME: 'papereasy-generation'
+  _SERVICE_ACCOUNT: ''
+  _GCS_BUCKET: ''
+  _FIRESTORE_COLLECTION: 'papereasy-projects'
+  _VERTEX_MODEL: 'gemini-2.5-flash'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

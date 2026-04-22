@@ -6,21 +6,10 @@ from time import perf_counter
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 
-from app.api.routes.export import router as export_router
-from app.api.routes.figure import router as figure_router
-from app.api.routes.figures import router as generated_figures_router
-from app.api.routes.generate import router as generate_router
 from app.api.routes.health import router as health_router
-from app.api.routes.internal_jobs import router as internal_jobs_router
-from app.api.routes.jobs import router as jobs_router
-from app.api.routes.originality import router as originality_router
-from app.api.routes.project import router as project_router
-from app.api.routes.save import router as save_router
-from app.api.routes.upload import router as upload_router
+from app.api.routes.internal_generation import router as internal_generation_router
 from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.services.file_service import ensure_upload_dir
@@ -37,7 +26,6 @@ settings.templates_dir.mkdir(parents=True, exist_ok=True)
 settings.temp_dir.mkdir(parents=True, exist_ok=True)
 
 
-
 def configure_logging() -> None:
     logging.basicConfig(
         level=logging.DEBUG if settings.debug else logging.INFO,
@@ -47,7 +35,7 @@ def configure_logging() -> None:
 
 
 configure_logging()
-logger = logging.getLogger("papereasy.backend")
+logger = logging.getLogger("papereasy.generation_service")
 
 
 @asynccontextmanager
@@ -60,26 +48,11 @@ async def lifespan(_app: FastAPI):
     settings.temp_dir.mkdir(parents=True, exist_ok=True)
     get_project_repository()
     get_object_storage()
-    logger.info("Upload directory ready at %s", settings.uploads_dir)
-    logger.info("Figure directory ready at %s", settings.figures_dir)
-    logger.info("Output directory ready at %s", settings.outputs_dir)
-    logger.info("Project repository ready at %s", settings.local_projects_dir)
-    logger.info("Persistence backend: %s", settings.persistence_backend)
+    logger.info("Generation service ready with persistence backend: %s", settings.persistence_backend)
     yield
 
 
-app = FastAPI(title=settings.app_name, debug=settings.debug, lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=list(settings.allowed_origins),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.mount("/static", StaticFiles(directory=settings.static_dir, check_dir=False), name="static")
-app.mount("/outputs", StaticFiles(directory=settings.outputs_dir, check_dir=False), name="outputs")
+app = FastAPI(title=f"{settings.app_name} Generation Service", debug=settings.debug, lifespan=lifespan)
 
 
 @app.exception_handler(AppError)
@@ -110,7 +83,7 @@ async def log_requests_and_handle_errors(request: Request, call_next):
         response = await call_next(request)
     except Exception:
         logger.exception(
-            "Unhandled application error while serving %s %s",
+            "Unhandled generation service error while serving %s %s",
             request.method,
             request.url.path,
         )
@@ -131,13 +104,4 @@ async def log_requests_and_handle_errors(request: Request, call_next):
 
 
 app.include_router(health_router)
-app.include_router(originality_router)
-app.include_router(upload_router)
-app.include_router(project_router)
-app.include_router(save_router)
-app.include_router(figure_router)
-app.include_router(generated_figures_router)
-app.include_router(export_router)
-app.include_router(generate_router)
-app.include_router(jobs_router)
-app.include_router(internal_jobs_router)
+app.include_router(internal_generation_router)

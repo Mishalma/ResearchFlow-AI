@@ -2,6 +2,7 @@ import ProcessingClientPage from "./processing-client";
 
 type ProcessingPageSearchParams = Promise<{
   projectId?: string | string[];
+  jobId?: string | string[];
   title?: string | string[];
 }>;
 
@@ -22,7 +23,8 @@ export default async function ProcessingPage({
 }) {
   const resolvedSearchParams = await searchParams;
   const projectId = getSingleSearchParam(resolvedSearchParams.projectId);
+  const jobId = getSingleSearchParam(resolvedSearchParams.jobId);
   const title = getSingleSearchParam(resolvedSearchParams.title);
 
-  return <ProcessingClientPage projectId={projectId} title={title} />;
+  return <ProcessingClientPage projectId={projectId} jobId={jobId} title={title} />;
 }

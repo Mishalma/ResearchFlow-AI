@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 from time import perf_counter
 from uuid import uuid4
@@ -11,7 +12,7 @@ from agents.figure_table_agent import FigureTableAgent
 from agents.humanizer_agent import HumanizerAgent
 from agents.ieee_formatting_agent import IEEEFormattingAgent
 from agents.originality_agent import OriginalityAgent
-from agents.registry import get_agent_registry
+from agents.registry import AgentRegistry, get_agent_registry
 from agents.structuring_agent import StructuringAgent
 from agents.writing_agent import WritingAgent
 from app.services.paper_service import validate_research_paper
@@ -44,6 +45,33 @@ from orchestration.a2a_manager import A2AManager, InProcessTransport
 
 logger = logging.getLogger("papereasy.backend.pipeline")
 MAX_HUMANIZER_RETRIES = MAX_ITERATIONS
+
+
+@dataclass
+class _FormattingPhaseResult:
+    resolved_settings: Settings
+    registry: AgentRegistry
+    vertex_client: VertexGeminiClient
+    a2a_manager: A2AManager
+    trace_id: str
+    start_time: float
+    source_text_length: int
+    validation_events: list[str]
+    pipeline_context: dict[str, object]
+    structuring_agent: StructuringAgent
+    writing_agent: WritingAgent
+    figure_table_agent: FigureTableAgent
+    citation_agent: CitationAgent
+    formatting_agent: IEEEFormattingAgent
+    structuring_result: StructuringAgentOutput
+    writing_result: WritingAgentOutput
+    citation_result: CitationAgentOutput
+    formatting_result: FormattingAgentOutput
+    structuring_duration_ms: float
+    writing_duration_ms: float
+    figure_table_duration_ms: float
+    citation_duration_ms: float
+    formatting_duration_ms: float
 
 
 def _paper_summary(paper: ResearchPaperSchema) -> str:
@@ -403,12 +431,54 @@ def _execute_humanizer_loop(
     return HumanizerAgentOutput.model_validate(output)
 
 
-async def run_pipeline(
+def _build_generated_paper_from_formatting(
+    formatting_result: FormattingAgentOutput,
+) -> GeneratedPaper:
+    return GeneratedPaper(
+        paper=formatting_result.paper,
+        formatted_text=formatting_result.formatted_text,
+        latex_ready=formatting_result.latex_ready,
+    )
+
+
+def _build_common_metadata_fields(
+    phase_result: _FormattingPhaseResult,
+    *,
+    total_duration_ms: float,
+    validation_events: list[str],
+    agent_timings: list[AgentTiming],
+) -> dict[str, object]:
+    return {
+        "model": phase_result.resolved_settings.vertex_model,
+        "generation_time_ms": total_duration_ms,
+        "source_text_length": phase_result.source_text_length,
+        "trace_id": phase_result.trace_id,
+        "agent_timings": agent_timings,
+        "mcp_tools_used": phase_result.registry.get("citation_agent").enabled_tools,
+        "validation_events": validation_events,
+        "structuring_global_confidence": phase_result.structuring_result.global_confidence,
+        "structuring_section_confidences": phase_result.structuring_result.section_confidences,
+        "structuring_evidence_summary": phase_result.structuring_result.evidence_summary,
+        "writing_global_confidence": phase_result.writing_result.global_confidence,
+        "writing_section_confidences": phase_result.writing_result.section_confidences,
+        "writing_annotation_summary": phase_result.writing_result.annotation_summary,
+        "citation_match_count": phase_result.citation_result.matched_claim_count,
+        "citation_bibliography_count": phase_result.citation_result.bibliography_count,
+        "citation_provider_summary": phase_result.citation_result.provider_summary,
+        "figure_table_figure_count": int(phase_result.pipeline_context.get("generated_figure_count") or 0),
+        "figure_table_table_count": int(phase_result.pipeline_context.get("generated_table_count") or 0),
+        "formatting_compile_success": phase_result.formatting_result.compile_success,
+        "formatting_retry_recommended": phase_result.formatting_result.retry_recommended,
+        "formatting_diagnostic_summary": phase_result.formatting_result.diagnostic_summary,
+    }
+
+
+async def _run_pipeline_until_formatting(
     text: str,
     settings: Settings | None = None,
     *,
     project_id: str = "",
-) -> PipelineResult:
+) -> _FormattingPhaseResult:
     resolved_settings = settings or get_settings()
     trace_id = str(uuid4())
     start_time = perf_counter()
@@ -437,8 +507,6 @@ async def run_pipeline(
         resolved_settings,
     )
     formatting_agent = IEEEFormattingAgent(registry.get("ieee_formatting_agent"))
-    humanizer_agent = HumanizerAgent(vertex_client, registry.get("humanizer_agent"))
-    originality_agent = OriginalityAgent(registry.get("originality_agent"))
 
     for agent in [
         structuring_agent,
@@ -446,8 +514,6 @@ async def run_pipeline(
         figure_table_agent,
         citation_agent,
         formatting_agent,
-        humanizer_agent,
-        originality_agent,
     ]:
         a2a_manager.register(agent)
 
@@ -526,12 +592,117 @@ async def run_pipeline(
             default_message="Formatting failed.",
         )
 
+    return _FormattingPhaseResult(
+        resolved_settings=resolved_settings,
+        registry=registry,
+        vertex_client=vertex_client,
+        a2a_manager=a2a_manager,
+        trace_id=trace_id,
+        start_time=start_time,
+        source_text_length=len(text),
+        validation_events=validation_events,
+        pipeline_context=pipeline_context,
+        structuring_agent=structuring_agent,
+        writing_agent=writing_agent,
+        figure_table_agent=figure_table_agent,
+        citation_agent=citation_agent,
+        formatting_agent=formatting_agent,
+        structuring_result=structuring_result,
+        writing_result=writing_result,
+        citation_result=citation_result,
+        formatting_result=formatting_result,
+        structuring_duration_ms=structuring_dispatch.duration_ms,
+        writing_duration_ms=writing_dispatch.duration_ms,
+        figure_table_duration_ms=figure_table_duration_ms,
+        citation_duration_ms=citation_dispatch.duration_ms,
+        formatting_duration_ms=formatting_dispatch.duration_ms,
+    )
+
+
+async def run_generation_pipeline(
+    text: str,
+    settings: Settings | None = None,
+    *,
+    project_id: str = "",
+) -> PipelineResult:
+    phase_result = await _run_pipeline_until_formatting(
+        text,
+        settings=settings,
+        project_id=project_id,
+    )
+    total_duration_ms = (perf_counter() - phase_result.start_time) * 1000
+    validation_events = list(phase_result.validation_events)
+    validation_events.append("pipeline: formatting boundary reached; humanizer/originality deferred")
+    metadata = GenerationMetadata(
+        **_build_common_metadata_fields(
+            phase_result,
+            total_duration_ms=total_duration_ms,
+            validation_events=validation_events,
+            agent_timings=[
+                AgentTiming(
+                    agent=phase_result.structuring_agent.agent_name,
+                    duration_ms=phase_result.structuring_duration_ms,
+                ),
+                AgentTiming(
+                    agent=phase_result.writing_agent.agent_name,
+                    duration_ms=phase_result.writing_duration_ms,
+                ),
+                AgentTiming(
+                    agent=phase_result.figure_table_agent.agent_name,
+                    duration_ms=phase_result.figure_table_duration_ms,
+                ),
+                AgentTiming(
+                    agent=phase_result.citation_agent.agent_name,
+                    duration_ms=phase_result.citation_duration_ms,
+                ),
+                AgentTiming(
+                    agent=phase_result.formatting_agent.agent_name,
+                    duration_ms=phase_result.formatting_duration_ms,
+                ),
+            ],
+        )
+    )
+    generated_paper = _build_generated_paper_from_formatting(phase_result.formatting_result)
+
+    logger.info(
+        "Generation pipeline trace %s reached formatting boundary in %.2f ms",
+        phase_result.trace_id,
+        total_duration_ms,
+    )
+    return PipelineResult(
+        generated_paper=generated_paper,
+        metadata=metadata,
+        generated_figures=phase_result.pipeline_context.get("generated_figures"),
+        generated_tables=phase_result.pipeline_context.get("generated_tables"),
+        figure_table_status=phase_result.pipeline_context.get("figure_table_status"),
+        figure_table_error=phase_result.pipeline_context.get("figure_table_error"),
+    )
+
+
+async def run_pipeline(
+    text: str,
+    settings: Settings | None = None,
+    *,
+    project_id: str = "",
+) -> PipelineResult:
+    phase_result = await _run_pipeline_until_formatting(
+        text,
+        settings=settings,
+        project_id=project_id,
+    )
+    humanizer_agent = HumanizerAgent(
+        phase_result.vertex_client,
+        phase_result.registry.get("humanizer_agent"),
+    )
+    originality_agent = OriginalityAgent(phase_result.registry.get("originality_agent"))
+    phase_result.a2a_manager.register(originality_agent)
+
     humanizer_started = perf_counter()
     humanizer_result = _execute_humanizer_loop(
         humanizer_agent=humanizer_agent,
-        paper=formatting_result.paper,
-        trace_id=trace_id,
-        pipeline_context=pipeline_context,
+        paper=phase_result.formatting_result.paper,
+        trace_id=phase_result.trace_id,
+        pipeline_context=phase_result.pipeline_context,
     )
     humanizer_duration_ms = (perf_counter() - humanizer_started) * 1000
     humanizer_issues = validate_research_paper(
@@ -544,23 +715,23 @@ async def run_pipeline(
         humanizer_issues.append("latex_ready is empty")
     if humanizer_issues:
         raise PaperValidationError(humanizer_agent.agent_name, humanizer_issues)
-    validation_events.append(
+    phase_result.validation_events.append(
         f"{humanizer_agent.agent_name}: completed with action {humanizer_result.graph_action or 'accept'}"
     )
 
     originality_result, originality_dispatch = await _dispatch_validated_stage(
-        a2a_manager=a2a_manager,
+        a2a_manager=phase_result.a2a_manager,
         sender=humanizer_agent.agent_name,
         recipient=originality_agent.agent_name,
         task="review_originality_and_compliance",
-        trace_id=trace_id,
+        trace_id=phase_result.trace_id,
         payload={
             "paper": humanizer_result.model_dump(),
-            "citation_draft": citation_result.citation_draft,
+            "citation_draft": phase_result.citation_result.citation_draft,
         },
         response_model=OriginalityAgentOutput,
         require_references=True,
-        validation_events=validation_events,
+        validation_events=phase_result.validation_events,
     )
 
     if originality_result.error is not None:
@@ -570,40 +741,40 @@ async def run_pipeline(
             default_message="Originality review failed.",
         )
 
-    total_duration_ms = (perf_counter() - start_time) * 1000
+    total_duration_ms = (perf_counter() - phase_result.start_time) * 1000
     originality_report = originality_result.originality_report or {}
     section_reports = originality_report.get("sections") or {}
     flagged_span_count = sum(len((section or {}).get("spans") or []) for section in section_reports.values())
     metadata = GenerationMetadata(
-        model=resolved_settings.vertex_model,
-        generation_time_ms=total_duration_ms,
-        source_text_length=len(text),
-        trace_id=trace_id,
-        agent_timings=[
-            AgentTiming(agent=structuring_agent.agent_name, duration_ms=structuring_dispatch.duration_ms),
-            AgentTiming(agent=writing_agent.agent_name, duration_ms=writing_dispatch.duration_ms),
-            AgentTiming(agent=figure_table_agent.agent_name, duration_ms=figure_table_duration_ms),
-            AgentTiming(agent=citation_agent.agent_name, duration_ms=citation_dispatch.duration_ms),
-            AgentTiming(agent=formatting_agent.agent_name, duration_ms=formatting_dispatch.duration_ms),
-            AgentTiming(agent=humanizer_agent.agent_name, duration_ms=humanizer_duration_ms),
-            AgentTiming(agent=originality_agent.agent_name, duration_ms=originality_dispatch.duration_ms),
-        ],
-        mcp_tools_used=registry.get("citation_agent").enabled_tools,
-        validation_events=validation_events,
-        structuring_global_confidence=structuring_result.global_confidence,
-        structuring_section_confidences=structuring_result.section_confidences,
-        structuring_evidence_summary=structuring_result.evidence_summary,
-        writing_global_confidence=writing_result.global_confidence,
-        writing_section_confidences=writing_result.section_confidences,
-        writing_annotation_summary=writing_result.annotation_summary,
-        citation_match_count=citation_result.matched_claim_count,
-        citation_bibliography_count=citation_result.bibliography_count,
-        citation_provider_summary=citation_result.provider_summary,
-        figure_table_figure_count=int(pipeline_context.get("generated_figure_count") or 0),
-        figure_table_table_count=int(pipeline_context.get("generated_table_count") or 0),
-        formatting_compile_success=formatting_result.compile_success,
-        formatting_retry_recommended=formatting_result.retry_recommended,
-        formatting_diagnostic_summary=formatting_result.diagnostic_summary,
+        **_build_common_metadata_fields(
+            phase_result,
+            total_duration_ms=total_duration_ms,
+            validation_events=phase_result.validation_events,
+            agent_timings=[
+                AgentTiming(
+                    agent=phase_result.structuring_agent.agent_name,
+                    duration_ms=phase_result.structuring_duration_ms,
+                ),
+                AgentTiming(
+                    agent=phase_result.writing_agent.agent_name,
+                    duration_ms=phase_result.writing_duration_ms,
+                ),
+                AgentTiming(
+                    agent=phase_result.figure_table_agent.agent_name,
+                    duration_ms=phase_result.figure_table_duration_ms,
+                ),
+                AgentTiming(
+                    agent=phase_result.citation_agent.agent_name,
+                    duration_ms=phase_result.citation_duration_ms,
+                ),
+                AgentTiming(
+                    agent=phase_result.formatting_agent.agent_name,
+                    duration_ms=phase_result.formatting_duration_ms,
+                ),
+                AgentTiming(agent=humanizer_agent.agent_name, duration_ms=humanizer_duration_ms),
+                AgentTiming(agent=originality_agent.agent_name, duration_ms=originality_dispatch.duration_ms),
+            ],
+        ),
         humanizer_ai_pattern_score_before=humanizer_result.ai_pattern_score_before,
         humanizer_ai_pattern_score_after=humanizer_result.ai_pattern_score_after,
         humanizer_perplexity_before=humanizer_result.perplexity_before,
@@ -622,7 +793,7 @@ async def run_pipeline(
         raise OriginalityReviewBlockedError(
             message="The manuscript requires originality or compliance review before approval.",
             details={
-                "trace_id": trace_id,
+                "trace_id": phase_result.trace_id,
                 "graph_action": originality_result.decision_graph_action or "needs_manual_review",
                 "originality_report": originality_report,
             },
@@ -630,12 +801,12 @@ async def run_pipeline(
 
     generated_paper = originality_result.approved_snapshot
 
-    logger.info("Pipeline trace %s completed in %.2f ms", trace_id, total_duration_ms)
+    logger.info("Pipeline trace %s completed in %.2f ms", phase_result.trace_id, total_duration_ms)
     return PipelineResult(
         generated_paper=generated_paper,
         metadata=metadata,
-        generated_figures=pipeline_context.get("generated_figures"),
-        generated_tables=pipeline_context.get("generated_tables"),
-        figure_table_status=pipeline_context.get("figure_table_status"),
-        figure_table_error=pipeline_context.get("figure_table_error"),
+        generated_figures=phase_result.pipeline_context.get("generated_figures"),
+        generated_tables=phase_result.pipeline_context.get("generated_tables"),
+        figure_table_status=phase_result.pipeline_context.get("figure_table_status"),
+        figure_table_error=phase_result.pipeline_context.get("figure_table_error"),
     )

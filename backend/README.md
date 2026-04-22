@@ -251,6 +251,7 @@ The backend includes:
 
 - [Dockerfile](./Dockerfile)
 - [cloudbuild.yaml](./cloudbuild.yaml)
+- [cloudbuild-generation.yaml](./cloudbuild-generation.yaml)
 - [agents/agent_specs.json](./agents/agent_specs.json)
 - [templates/ieee_template.tex](./templates/ieee_template.tex)
 - [templates/IEEEtran.cls](./templates/IEEEtran.cls)
@@ -273,6 +274,33 @@ Example command:
 gcloud builds submit --config cloudbuild.yaml \
   --substitutions=_SERVICE_ACCOUNT=YOUR_SERVICE_ACCOUNT,_GCS_BUCKET=YOUR_BUCKET
 ```
+
+### Phase 2 generation-service deploy
+
+Phase 2 adds a separate internal generation service that runs the pipeline only through IEEE formatting. Deploy it with:
+
+```bash
+gcloud builds submit --config cloudbuild-generation.yaml \
+  --substitutions=_SERVICE_ACCOUNT=YOUR_GENERATION_SERVICE_ACCOUNT,_GCS_BUCKET=YOUR_BUCKET
+```
+
+This deploys `papereasy-generation` with:
+
+- private Cloud Run ingress (`--ingress=internal`)
+- authenticated invocation only
+- a 30 minute request timeout
+- `uvicorn app.generation_main:app`
+
+After the generation service is deployed, update the main backend service to call it by setting:
+
+```env
+WORKFLOW_GENERATION_BACKEND=service
+GENERATION_SERVICE_BASE_URL=https://YOUR-GENERATION-SERVICE-URL
+GENERATION_SERVICE_AUDIENCE=https://YOUR-GENERATION-SERVICE-URL
+GENERATION_SERVICE_TIMEOUT_SECONDS=1500
+```
+
+The backend service account must also have `roles/run.invoker` on the generation service.
 
 ## Verification
 

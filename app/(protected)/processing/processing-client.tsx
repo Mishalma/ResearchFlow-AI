@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useEffect, useMemo, useState } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { generateProjectPaper } from "@/lib/backend";
+import { createGenerationJob, fetchGenerationJob } from "@/lib/backend";
 
 const steps = [
   {
@@ -44,8 +44,22 @@ type ProcessingState =
 
 type ProcessingClientPageProps = {
   projectId: string | null;
+  jobId: string | null;
   title: string | null;
 };
+
+function buildJobIdempotencyKey(projectId: string) {
+  return `workflow-project:${projectId}:generate`;
+}
+
+function buildProcessingUrl(projectId: string, title: string | null, jobId: string) {
+  const params = new URLSearchParams({ projectId, jobId });
+  if (title) {
+    params.set("title", title);
+  }
+
+  return `/processing?${params.toString()}`;
+}
 
 function ProgressRing({
   value,
@@ -93,11 +107,14 @@ function ProgressRing({
 
 export default function ProcessingClientPage({
   projectId,
+  jobId: initialJobId,
   title,
 }: ProcessingClientPageProps) {
   const router = useRouter();
-  const [currentStep, setCurrentStep] = useState(projectId ? 2 : 1);
-  const [progress, setProgress] = useState(projectId ? 66 : 0);
+  const redirectScheduledRef = useRef(false);
+  const [jobId, setJobId] = useState<string | null>(initialJobId);
+  const [currentStep, setCurrentStep] = useState(projectId ? 1 : 1);
+  const [progress, setProgress] = useState(projectId ? 25 : 0);
   const [processingState, setProcessingState] = useState<ProcessingState>(() =>
     projectId
       ? { kind: "loading" }
@@ -108,45 +125,34 @@ export default function ProcessingClientPage({
   );
 
   useEffect(() => {
+    setJobId(initialJobId);
+  }, [initialJobId]);
+
+  useEffect(() => {
     const controller = new AbortController();
 
-    if (!projectId) {
+    if (!projectId || jobId) {
       return () => controller.abort();
     }
 
-    async function processProject() {
-      if (!projectId) {
-        return;
-      }
-
-      const resolvedProjectId = projectId;
-
+    async function ensureJob() {
       try {
-        setCurrentStep(2);
-        setProgress(66);
-
-        await generateProjectPaper(resolvedProjectId, controller.signal);
+        setCurrentStep(1);
+        setProgress(25);
+        const createdJob = await createGenerationJob(
+          projectId,
+          buildJobIdempotencyKey(projectId),
+          controller.signal,
+        );
 
         if (controller.signal.aborted) {
           return;
         }
 
-        setCurrentStep(3);
-        setProgress(100);
-        setProcessingState({ kind: "success" });
-
-        window.setTimeout(() => {
-          const nextParams = new URLSearchParams({
-            projectId: resolvedProjectId,
-          });
-          if (title) {
-            nextParams.set("title", title);
-          }
-
-          startTransition(() => {
-            router.push(`/editor?${nextParams.toString()}`);
-          });
-        }, 500);
+        setJobId(createdJob.job_id);
+        startTransition(() => {
+          router.replace(buildProcessingUrl(projectId, title, createdJob.job_id));
+        });
       } catch (error) {
         if (controller.signal.aborted) {
           return;
@@ -162,10 +168,109 @@ export default function ProcessingClientPage({
       }
     }
 
-    void processProject();
+    void ensureJob();
 
     return () => controller.abort();
-  }, [projectId, router, title]);
+  }, [jobId, projectId, router, title]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    if (!projectId || !jobId) {
+      return () => controller.abort();
+    }
+
+    let pollTimer: number | null = null;
+    let active = true;
+
+    async function pollJob() {
+      try {
+        const job = await fetchGenerationJob(jobId, controller.signal);
+
+        if (!active || controller.signal.aborted) {
+          return;
+        }
+
+        setProgress(job.progress.percent);
+        if (job.status === "GENERATING") {
+          setCurrentStep(2);
+        } else if (job.status === "GENERATED") {
+          setCurrentStep(3);
+        } else if (job.status === "DONE") {
+          setCurrentStep(3);
+        } else if (job.status === "FAILED") {
+          setCurrentStep((previous) => Math.max(previous, 2));
+        } else {
+          setCurrentStep(1);
+        }
+
+        if (job.status === "DONE") {
+          if (pollTimer !== null) {
+            window.clearInterval(pollTimer);
+            pollTimer = null;
+          }
+          setProcessingState({ kind: "success" });
+          if (!redirectScheduledRef.current) {
+            redirectScheduledRef.current = true;
+            window.setTimeout(() => {
+              const nextParams = new URLSearchParams({
+                projectId,
+              });
+              if (title) {
+                nextParams.set("title", title);
+              }
+
+              startTransition(() => {
+                router.push(`/editor?${nextParams.toString()}`);
+              });
+            }, 500);
+          }
+          return;
+        }
+
+        if (job.status === "FAILED") {
+          if (pollTimer !== null) {
+            window.clearInterval(pollTimer);
+            pollTimer = null;
+          }
+          setProcessingState({
+            kind: "error",
+            message:
+              job.error?.message ||
+              "Paper generation failed before the editor could be opened.",
+          });
+          return;
+        }
+
+        setProcessingState({ kind: "loading" });
+      } catch (error) {
+        if (!active || controller.signal.aborted) {
+          return;
+        }
+
+        setProcessingState({
+          kind: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Unable to load the workflow status right now.",
+        });
+      }
+    }
+
+    void pollJob();
+    pollTimer = window.setInterval(() => {
+      void pollJob();
+    }, 2000);
+
+    return () => {
+      active = false;
+      controller.abort();
+      if (pollTimer !== null) {
+        window.clearInterval(pollTimer);
+      }
+    };
+  }, [jobId, projectId, router, title]);
 
   const totalSteps = steps.length;
   const visibleStep = Math.min(Math.max(currentStep, 1), totalSteps);

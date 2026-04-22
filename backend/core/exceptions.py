@@ -201,3 +201,37 @@ class OriginalityReviewBlockedError(AppError):
         details: dict[str, object] | None = None,
     ):
         super().__init__(message, status.HTTP_409_CONFLICT, details=details)
+
+
+class WorkflowJobNotFoundError(AppError):
+    def __init__(self, job_id: str):
+        super().__init__(
+            f"Workflow job '{job_id}' was not found.",
+            status.HTTP_404_NOT_FOUND,
+        )
+
+
+class WorkflowJobResultNotReadyError(AppError):
+    def __init__(self, job_id: str):
+        super().__init__(
+            f"Workflow job '{job_id}' is still running.",
+            status.HTTP_409_CONFLICT,
+        )
+
+
+class WorkflowJobConflictError(AppError):
+    def __init__(self, message: str):
+        super().__init__(message, status.HTTP_409_CONFLICT)
+
+
+class WorkflowJobActiveError(AppError):
+    def __init__(self):
+        super().__init__(
+            "A workflow job is already running for this account.",
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
+
+class WorkflowConfigurationError(AppError):
+    def __init__(self, message: str):
+        super().__init__(message, status.HTTP_503_SERVICE_UNAVAILABLE)

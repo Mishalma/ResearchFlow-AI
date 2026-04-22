@@ -406,6 +406,28 @@ class PipelineResult(BaseModel):
     figure_table_error: str | None = None
 
 
+class GenerationServiceRequest(BaseModel):
+    job_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    source_text: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=8)
+    provider_override: str | None = None
+    model_override: str | None = None
+
+
+class GenerationServiceResponse(BaseModel):
+    job_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    generated_paper: GeneratedPaper
+    metadata: GenerationMetadata
+    generated_figures: list[RenderedFigure] | None = None
+    generated_tables: list[RenderedFigure] | None = None
+    figure_table_status: FigureTableStageStatus | None = None
+    figure_table_error: str | None = None
+    boundary: Literal["formatting_complete"] = "formatting_complete"
+
+
 class GenerateRequest(BaseModel):
     project_id: str = Field(min_length=1)
 
