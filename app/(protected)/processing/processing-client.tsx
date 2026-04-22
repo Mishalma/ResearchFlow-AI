@@ -135,13 +135,15 @@ export default function ProcessingClientPage({
       return () => controller.abort();
     }
 
+    const currentProjectId = projectId;
+
     async function ensureJob() {
       try {
         setCurrentStep(1);
         setProgress(25);
         const createdJob = await createGenerationJob(
-          projectId,
-          buildJobIdempotencyKey(projectId),
+          currentProjectId,
+          buildJobIdempotencyKey(currentProjectId),
           controller.signal,
         );
 
@@ -151,7 +153,9 @@ export default function ProcessingClientPage({
 
         setJobId(createdJob.job_id);
         startTransition(() => {
-          router.replace(buildProcessingUrl(projectId, title, createdJob.job_id));
+          router.replace(
+            buildProcessingUrl(currentProjectId, title, createdJob.job_id),
+          );
         });
       } catch (error) {
         if (controller.signal.aborted) {
@@ -180,12 +184,14 @@ export default function ProcessingClientPage({
       return () => controller.abort();
     }
 
+    const currentProjectId = projectId;
+    const currentJobId = jobId;
     let pollTimer: number | null = null;
     let active = true;
 
     async function pollJob() {
       try {
-        const job = await fetchGenerationJob(jobId, controller.signal);
+        const job = await fetchGenerationJob(currentJobId, controller.signal);
 
         if (!active || controller.signal.aborted) {
           return;
@@ -214,7 +220,7 @@ export default function ProcessingClientPage({
             redirectScheduledRef.current = true;
             window.setTimeout(() => {
               const nextParams = new URLSearchParams({
-                projectId,
+                projectId: currentProjectId,
               });
               if (title) {
                 nextParams.set("title", title);
