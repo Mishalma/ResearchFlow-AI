@@ -28,6 +28,8 @@ async def create_job(
         project_id=request.project_id,
         current_user=current_user,
         idempotency_key=(idempotency_key or "").strip() or f"phase1-job-{request.project_id}",
+        enable_fix_loop=request.config.enable_fix_loop,
+        max_iterations=request.config.max_iterations,
     )
     if created:
         background_tasks.add_task(dispatch_job_after_response, job.job_id)

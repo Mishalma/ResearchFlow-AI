@@ -157,6 +157,7 @@ export type WorkflowJobProgress = {
     | "queued"
     | "generation"
     | "validation"
+    | "fixing"
     | "finalizing"
     | "complete"
     | "failed";
@@ -201,6 +202,14 @@ export type ValidationReport = {
   deep_validation_used: boolean;
   sections: ValidationSectionReport[];
   decision_summary: string;
+};
+
+export type FixSummary = {
+  attempted: boolean;
+  status: "not_needed" | "applied" | "failed";
+  iterations: number;
+  changed_sections: string[];
+  rewriter_mode: string | null;
 };
 
 export type CreateJobResponse = {
@@ -255,6 +264,7 @@ export type JobResultResponse = {
     agent_timings: AgentTiming[];
   } | null;
   report: ValidationReport | null;
+  fix_summary: FixSummary | null;
   artifacts: JobResultArtifacts;
   error: WorkflowErrorPayload | null;
 };

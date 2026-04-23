@@ -16,6 +16,7 @@ from core.exceptions import (
 )
 from jobs.artifacts import (
     build_final_report_key,
+    load_generated_draft_artifact,
     load_job_result_report,
     store_extracted_text_artifact,
     store_final_accepted_draft_artifact,
@@ -25,8 +26,10 @@ from jobs.artifacts import (
 from jobs.dispatcher import get_job_dispatcher
 from jobs.repository import ACTIVE_JOB_STATUSES, get_job_repository
 from models.generation import GenerationServiceRequest
+from models.fix import FixSectionTarget, FixServiceRequest
 from models.job import (
     CreateJobResponse,
+    FixSummary,
     GenerationTaskRequest,
     JobProgress,
     JobRecord,
@@ -39,6 +42,8 @@ from models.job import (
     WorkflowFinalDisposition,
     WorkflowScores,
 )
+from models.validation import ValidationServiceOutput
+from app.services.fix_service import get_fix_service_client
 from app.services.generation_service import get_generation_service_client
 from app.services.validation_service import get_validation_service_client
 from app.services.project_service import get_project, save_generated_paper
@@ -82,6 +87,8 @@ def _progress_for_status(status: str) -> JobProgress:
         return JobProgress(current_step="generation", percent=55)
     if status in {"GENERATED", "VALIDATION_REQUESTED", "VALIDATING"}:
         return JobProgress(current_step="validation", percent=80 if status != "VALIDATING" else 88)
+    if status in {"FIX_REQUESTED", "FIXING"}:
+        return JobProgress(current_step="fixing", percent=92)
     if status == "FINALIZING":
         return JobProgress(current_step="finalizing", percent=96)
     if status == "DONE":
@@ -130,6 +137,7 @@ def _build_job_result(
     *,
     final_disposition: WorkflowFinalDisposition,
     boundary: WorkflowBoundary | None,
+    fix_summary: FixSummary | None = None,
 ) -> JobResultResponse:
     project = get_project(job.project_id, job.user_id)
     return JobResultResponse(
@@ -147,6 +155,7 @@ def _build_job_result(
         generated_paper=project.generated_paper,
         metadata=project.generation_metadata,
         report=None,
+        fix_summary=fix_summary,
         artifacts=_result_artifacts_from_job(job),
         error=job.error,
     )
@@ -160,11 +169,34 @@ def _final_disposition_from_routing(routing_decision: str) -> WorkflowFinalDispo
     return "failed"
 
 
+def _build_fix_targets(validation_output: ValidationServiceOutput) -> list[FixSectionTarget]:
+    targets: list[FixSectionTarget] = []
+    for flag in validation_output.section_flags:
+        if flag.flag_type != "ai" or flag.risk != "medium":
+            continue
+        targets.append(
+            FixSectionTarget(
+                section_id=flag.section_id,
+                flag_type="ai",
+                risk=flag.risk,
+                score=min(1.0, float(flag.score)),
+                summary=flag.summary,
+            )
+        )
+    return targets
+
+
+def _fix_iteration_available(job: JobRecord) -> bool:
+    return job.enable_fix_loop and job.iteration < max(0, job.max_iterations - 1)
+
+
 def create_generation_job(
     *,
     project_id: str,
     current_user: AuthenticatedRequestUser,
     idempotency_key: str,
+    enable_fix_loop: bool = True,
+    max_iterations: int = 3,
 ) -> tuple[JobRecord, bool]:
     normalized_key = idempotency_key.strip()
     if len(normalized_key) < 8:
@@ -194,6 +226,8 @@ def create_generation_job(
         project_id=project_id,
         user_id=current_user.user_id,
         idempotency_key=normalized_key,
+        enable_fix_loop=enable_fix_loop,
+        max_iterations=max(1, min(3, int(max_iterations))),
         artifacts=WorkflowArtifacts(
             raw_upload=None,
             extracted_text=extracted_text_artifact,
@@ -339,41 +373,174 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
         )
 
         validation_client = get_validation_service_client()
-        job = _save_job(
-            job,
-            status="VALIDATION_REQUESTED",
-            stage="validation",
-            validation_mode="fast",
-            error=None,
+        fix_client = get_fix_service_client()
+        current_draft_uri = draft_v1.uri
+        previous_validation_report_uri: str | None = None
+        changed_section_ids: list[str] = []
+        latest_validation_output: ValidationServiceOutput | None = None
+        fix_summary = FixSummary(
+            attempted=False,
+            status="not_needed",
+            iterations=0,
+            changed_sections=[],
+            rewriter_mode=None,
         )
-        job = _save_job(
-            job,
-            status="VALIDATING",
-            stage="validation",
-        )
+        final_disposition: WorkflowFinalDisposition = "manual_review_required"
 
-        validation_result = await validation_client.run_validation(
-            ValidationServiceRequest(
-                task_id=f"validation-{job.job_id}",
-                job_id=job.job_id,
-                project_id=job.project_id,
-                user_id=job.user_id,
-                idempotency_key=job.idempotency_key,
-                expected_status="VALIDATING",
-                current_draft_uri=draft_v1.uri,
-                artifacts={"extracted_text_uri": job.artifacts.extracted_text.uri if job.artifacts.extracted_text else None},
-                config={"mode": "fast", "changed_sections_only": False},
+        while True:
+            job = _save_job(
+                job,
+                status="VALIDATION_REQUESTED",
+                stage="validation",
+                validation_mode="fast",
+                error=None,
             )
-        )
-        validation_output = validation_result.output
-        final_disposition = _final_disposition_from_routing(validation_output.routing_decision)
+            job = _save_job(
+                job,
+                status="VALIDATING",
+                stage="validation",
+            )
+
+            validation_result = await validation_client.run_validation(
+                ValidationServiceRequest(
+                    task_id=f"validation-{job.job_id}-v{job.iteration + 1}",
+                    job_id=job.job_id,
+                    project_id=job.project_id,
+                    user_id=job.user_id,
+                    idempotency_key=job.idempotency_key,
+                    expected_status="VALIDATING",
+                    current_draft_uri=current_draft_uri,
+                    artifacts={
+                        "extracted_text_uri": job.artifacts.extracted_text.uri if job.artifacts.extracted_text else None,
+                        "previous_validation_report_uri": previous_validation_report_uri,
+                    },
+                    config={
+                        "mode": "fast",
+                        "changed_sections_only": bool(previous_validation_report_uri and changed_section_ids),
+                        "changed_section_ids": changed_section_ids,
+                    },
+                )
+            )
+            latest_validation_output = validation_result.output
+            previous_validation_report_uri = latest_validation_output.validation_report_uri
+            changed_section_ids = []
+
+            routing_decision = latest_validation_output.routing_decision
+            if routing_decision == "clean":
+                final_disposition = "accepted_after_fix" if fix_summary.attempted else "accepted"
+                if fix_summary.attempted:
+                    current_generated_paper = load_generated_draft_artifact(current_draft_uri)
+                    updated_project = save_generated_paper(
+                        project_id=project.id,
+                        owner_uid=job.user_id,
+                        generated_paper=current_generated_paper,
+                        generation_metadata=generation_result.metadata,
+                        generated_figures=(
+                            [item.model_dump(mode="python") for item in generation_result.generated_figures]
+                            if generation_result.generated_figures is not None
+                            else None
+                        ),
+                        generated_tables=(
+                            [item.model_dump(mode="python") for item in generation_result.generated_tables]
+                            if generation_result.generated_tables is not None
+                            else None
+                        ),
+                        figure_table_status=generation_result.figure_table_status,
+                        figure_table_error=generation_result.figure_table_error,
+                    )
+                break
+
+            if routing_decision == "flagged" or not _fix_iteration_available(job):
+                final_disposition = "manual_review_required"
+                break
+
+            fix_targets = _build_fix_targets(latest_validation_output)
+            next_iteration = job.iteration + 1
+            if not fix_targets:
+                fix_summary = FixSummary(
+                    attempted=True,
+                    status="failed",
+                    iterations=next_iteration,
+                    changed_sections=[],
+                    rewriter_mode=None,
+                )
+                final_disposition = "manual_review_required"
+                break
+
+            job = _save_job(
+                job,
+                status="FIX_REQUESTED",
+                stage="fix",
+                iteration=next_iteration,
+                error=None,
+            )
+            job = _save_job(
+                job,
+                status="FIXING",
+                stage="fix",
+            )
+
+            try:
+                fix_result = await fix_client.run_fix(
+                    FixServiceRequest(
+                        task_id=f"fix-{job.job_id}-v{next_iteration}",
+                        job_id=job.job_id,
+                        project_id=job.project_id,
+                        user_id=job.user_id,
+                        attempt=next_iteration,
+                        idempotency_key=job.idempotency_key,
+                        current_draft_uri=current_draft_uri,
+                        validation_report_uri=previous_validation_report_uri,
+                        iteration=next_iteration,
+                        mode="ai_style",
+                        targets=fix_targets,
+                    )
+                )
+            except Exception:
+                logger.exception("Fix service failed for job %s", job.job_id)
+                fix_summary = FixSummary(
+                    attempted=True,
+                    status="failed",
+                    iterations=next_iteration,
+                    changed_sections=[],
+                    rewriter_mode=None,
+                )
+                final_disposition = "manual_review_required"
+                break
+
+            fix_summary = fix_result.output.fix_summary
+            draft_artifact = fix_result.output.draft_artifact
+            if (
+                fix_result.output.fix_status != "applied"
+                or draft_artifact is None
+                or not fix_result.output.changed_sections
+            ):
+                final_disposition = "manual_review_required"
+                break
+
+            current_draft_uri = fix_result.output.updated_draft_uri
+            changed_section_ids = list(fix_result.output.changed_sections)
+            artifact_updates: dict[str, object] = {}
+            if draft_artifact.version in {"draft_v2", "draft_v3"}:
+                artifact_updates[draft_artifact.version] = draft_artifact
+            job = _save_job(
+                job,
+                current_draft_uri=current_draft_uri,
+                artifacts=job.artifacts.model_copy(update=artifact_updates),
+                error=None,
+            )
 
         final_accepted_draft = None
-        if final_disposition == "accepted":
+        if final_disposition in {"accepted", "accepted_after_fix"}:
+            accepted_paper = (
+                updated_project.generated_paper
+                if final_disposition == "accepted_after_fix"
+                else generation_result.generated_paper
+            )
             final_accepted_draft = store_final_accepted_draft_artifact(
                 job.project_id,
                 job.job_id,
-                generation_result.generated_paper,
+                accepted_paper,
             )
 
         job = _save_job(
@@ -381,10 +548,10 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
             status="FINALIZING",
             stage="finalize",
             scores=WorkflowScores(
-                ai_score=validation_output.ai_score,
-                plagiarism_score=validation_output.plagiarism_score,
-                confidence_band=validation_output.confidence_band,
-                routing_decision=validation_output.routing_decision,
+                ai_score=latest_validation_output.ai_score if latest_validation_output else None,
+                plagiarism_score=latest_validation_output.plagiarism_score if latest_validation_output else None,
+                confidence_band=latest_validation_output.confidence_band if latest_validation_output else "unknown",
+                routing_decision=latest_validation_output.routing_decision if latest_validation_output else "pending",
                 deep_validation_used=False,
             ),
             artifacts=job.artifacts.model_copy(
@@ -405,10 +572,15 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
             final_disposition=final_disposition,
             validation_mode=job.validation_mode,
             boundary="formatting_complete",
-            editor_url=f"/editor?projectId={job.project_id}" if final_disposition == "accepted" else None,
+            editor_url=(
+                f"/editor?projectId={job.project_id}"
+                if final_disposition in {"accepted", "accepted_after_fix"}
+                else None
+            ),
             generated_paper=updated_project.generated_paper,
             metadata=updated_project.generation_metadata,
-            report=validation_output.report,
+            report=latest_validation_output.report if latest_validation_output else None,
+            fix_summary=fix_summary if fix_summary.attempted else None,
             artifacts=_result_artifacts_from_job(job).model_copy(
                 update={"final_report_uri": predicted_final_report_uri}
             ),
@@ -425,7 +597,7 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
         )
         _save_job(
             completed_job,
-            current_draft_uri=draft_v1.uri,
+            current_draft_uri=current_draft_uri,
         )
     except Exception as exc:
         logger.exception("Workflow generation failed for job %s", job.job_id)

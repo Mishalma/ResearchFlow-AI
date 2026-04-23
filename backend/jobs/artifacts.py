@@ -11,6 +11,7 @@ from typing import Any
 from core.config import get_settings
 from models.generation import GeneratedPaper
 from models.job import JobResultResponse, WorkflowArtifactPointer
+from models.validation import ValidationReport
 from persistence import get_object_storage
 
 
@@ -214,3 +215,16 @@ def load_job_result_report(project_id: str, job_id: str) -> JobResultResponse:
     downloaded = object_storage.download_bytes(build_final_report_key(project_id, job_id))
     payload = json.loads(downloaded.content.decode("utf-8"))
     return JobResultResponse.model_validate(payload)
+
+
+def load_validation_report_artifact(uri: str) -> dict[str, Any]:
+    payload = load_json_artifact_from_uri(uri)
+    if not isinstance(payload, dict):
+        raise ValueError("Validation report artifact payload must be a JSON object.")
+    return payload
+
+
+def load_validation_report_from_artifact(uri: str) -> ValidationReport:
+    payload = load_validation_report_artifact(uri)
+    report_payload = payload.get("report", payload)
+    return ValidationReport.model_validate(report_payload)

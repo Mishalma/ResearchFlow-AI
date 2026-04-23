@@ -254,6 +254,8 @@ The backend includes:
 - [Dockerfile](./Dockerfile)
 - [cloudbuild.yaml](./cloudbuild.yaml)
 - [cloudbuild-generation.yaml](./cloudbuild-generation.yaml)
+- [cloudbuild-validation.yaml](./cloudbuild-validation.yaml)
+- [cloudbuild-fix.yaml](./cloudbuild-fix.yaml)
 - [agents/agent_specs.json](./agents/agent_specs.json)
 - [templates/ieee_template.tex](./templates/ieee_template.tex)
 - [templates/IEEEtran.cls](./templates/IEEEtran.cls)
@@ -329,6 +331,33 @@ VALIDATION_SERVICE_TIMEOUT_SECONDS=120
 ```
 
 The backend service account must also have `roles/run.invoker` on the validation service.
+
+### Phase 4 fix-service deploy
+
+Phase 4 adds a separate internal fix service for targeted AI-style rewrites and bounded revalidation loops. Deploy it with:
+
+```bash
+gcloud builds submit --config cloudbuild-fix.yaml \
+  --substitutions=_SERVICE_ACCOUNT=YOUR_FIX_SERVICE_ACCOUNT,_GCS_BUCKET=YOUR_BUCKET
+```
+
+This deploys `papereasy-fix` with:
+
+- public ingress with authenticated invocation only
+- a 4 minute request timeout
+- `uvicorn app.fix_main:app`
+- deterministic humanizer mode by default (`HUMANIZER_USE_MODEL_REWRITER=false`, `HUMANIZER_ENABLE_PERPLEXITY=false`)
+
+After the fix service is deployed, update the main backend service to call it by setting:
+
+```env
+WORKFLOW_FIX_BACKEND=service
+FIX_SERVICE_BASE_URL=https://YOUR-FIX-SERVICE-URL
+FIX_SERVICE_AUDIENCE=https://YOUR-FIX-SERVICE-URL
+FIX_SERVICE_TIMEOUT_SECONDS=180
+```
+
+The backend service account must also have `roles/run.invoker` on the fix service.
 
 ## Verification
 

@@ -11,6 +11,7 @@ import {
   Layers,
   Loader2,
   Sparkles,
+  Wand2,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -41,6 +42,12 @@ const steps = [
   },
   {
     id: 4,
+    title: "Applying AI fixes",
+    description: "Rewriting only the flagged sections and preserving the rest of the manuscript.",
+    icon: Wand2,
+  },
+  {
+    id: 5,
     title: "Finalizing result",
     description: "Preparing the accepted draft or review report.",
     icon: FileText,
@@ -212,10 +219,12 @@ export default function ProcessingClientPage({
           setCurrentStep(2);
         } else if (job.progress.current_step === "validation") {
           setCurrentStep(3);
+        } else if (job.progress.current_step === "fixing") {
+          setCurrentStep(4);
         } else if (job.progress.current_step === "finalizing") {
-          setCurrentStep(4);
+          setCurrentStep(5);
         } else if (job.status === "DONE") {
-          setCurrentStep(4);
+          setCurrentStep(5);
         } else if (job.status === "FAILED") {
           setCurrentStep((previous) => Math.max(previous, 2));
         } else {
@@ -238,7 +247,11 @@ export default function ProcessingClientPage({
             redirectScheduledRef.current = true;
             window.setTimeout(() => {
               startTransition(() => {
-                if (result.final_disposition === "accepted" && result.editor_url) {
+                if (
+                  (result.final_disposition === "accepted" ||
+                    result.final_disposition === "accepted_after_fix") &&
+                  result.editor_url
+                ) {
                   router.push(result.editor_url);
                   return;
                 }
@@ -313,7 +326,7 @@ export default function ProcessingClientPage({
       ? processingState.message
       : processingState.kind === "success"
         ? "Your validation report is ready. The next workspace will open automatically."
-        : "Structuring the paper, drafting sections, adding citations, and running fast validation.\nThe next workspace will open automatically when ready.";
+        : "Structuring the paper, drafting sections, validating AI signals, and applying targeted fixes when needed.\nThe next workspace will open automatically when ready.";
 
   const statusLabel =
     processingState.kind === "error"

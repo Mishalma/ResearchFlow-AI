@@ -15,7 +15,7 @@ steps:
     - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO_NAME}/${_SERVICE_NAME}:${BUILD_ID}'
 
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'deploy-generation-cloud-run'
+  id: 'deploy-fix-cloud-run'
   waitFor: ['push-image']
   entrypoint: gcloud
   args:
@@ -28,18 +28,18 @@ steps:
     - '--no-allow-unauthenticated'
     - '--ingress=all'
     - '--port=8080'
-    - '--timeout=1800'
+    - '--timeout=240'
     - '--cpu=1'
     - '--memory=2Gi'
     - '--service-account=${_SERVICE_ACCOUNT}'
     - '--command=uvicorn'
-    - '--args=app.generation_main:app,--host,0.0.0.0,--port,8080'
-    - '--set-env-vars=APP_NAME=PaperEasy Generation Service,DEBUG=false,PERSISTENCE_BACKEND=gcp,TEMP_DIR=/tmp,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION},VERTEX_MODEL=${_VERTEX_MODEL},GCS_BUCKET_NAME=${_GCS_BUCKET},FIRESTORE_PROJECTS_COLLECTION=${_FIRESTORE_COLLECTION},WRITING_USE_MODEL_GENERATOR=false,WRITING_ENABLE_DIVERSITY_PASS=false,CITATION_MAX_CLAIMS_PER_SECTION=1,CITATION_MAX_QUERIES_PER_CLAIM=1,CITATION_MAX_PARALLEL_CLAIMS=2,CITATION_PROVIDER_RESULT_LIMIT=4,AGENT_RETRY_ATTEMPTS=1,STRUCTURING_USE_LLM_REDUCER=false'
+    - '--args=app.fix_main:app,--host,0.0.0.0,--port,8080'
+    - '--set-env-vars=APP_NAME=PaperEasy Fix Service,DEBUG=false,PERSISTENCE_BACKEND=gcp,TEMP_DIR=/tmp,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION},VERTEX_MODEL=${_VERTEX_MODEL},GCS_BUCKET_NAME=${_GCS_BUCKET},FIRESTORE_PROJECTS_COLLECTION=${_FIRESTORE_COLLECTION},HUMANIZER_USE_MODEL_REWRITER=false,HUMANIZER_ENABLE_PERPLEXITY=false'
 
 substitutions:
   _REGION: 'us-central1'
   _REPO_NAME: 'papereasy'
-  _SERVICE_NAME: 'papereasy-generation'
+  _SERVICE_NAME: 'papereasy-fix'
   _SERVICE_ACCOUNT: ''
   _GCS_BUCKET: ''
   _FIRESTORE_COLLECTION: 'papereasy-projects'

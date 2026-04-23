@@ -71,11 +71,35 @@ class ValidationReport(BaseModel):
 
 class ValidationServiceArtifacts(BaseModel):
     extracted_text_uri: str | None = None
+    previous_validation_report_uri: str | None = None
 
 
 class ValidationServiceConfig(BaseModel):
     mode: ValidationMode = "fast"
     changed_sections_only: bool = False
+    changed_section_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("changed_section_ids", mode="before")
+    @classmethod
+    def normalize_changed_section_ids(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            candidates = [value]
+        else:
+            candidates = list(value)
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            section_id = str(item).strip()
+            if not section_id:
+                continue
+            folded = section_id.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            normalized.append(section_id)
+        return normalized
 
 
 class ValidationServiceRequest(BaseModel):

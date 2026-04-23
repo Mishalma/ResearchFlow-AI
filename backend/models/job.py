@@ -75,6 +75,14 @@ class WorkflowScores(BaseModel):
     deep_validation_used: bool = False
 
 
+class FixSummary(BaseModel):
+    attempted: bool = False
+    status: Literal["not_needed", "applied", "failed"] = "not_needed"
+    iterations: int = Field(default=0, ge=0, le=3)
+    changed_sections: list[str] = Field(default_factory=list)
+    rewriter_mode: str | None = None
+
+
 class WorkflowActiveTask(BaseModel):
     task_id: str
     queue_name: str
@@ -106,6 +114,7 @@ class JobRecord(BaseModel):
     status: WorkflowJobStatus = "CREATED"
     stage: WorkflowJobStage = "job"
     validation_mode: WorkflowValidationMode = "none"
+    enable_fix_loop: bool = True
     iteration: int = Field(default=0, ge=0, le=3)
     max_iterations: int = Field(default=3, ge=1, le=3)
     idempotency_key: str = Field(min_length=8)
@@ -131,7 +140,7 @@ class CreateJobResponse(BaseModel):
 
 
 class JobProgress(BaseModel):
-    current_step: Literal["queued", "generation", "validation", "finalizing", "complete", "failed"]
+    current_step: Literal["queued", "generation", "validation", "fixing", "finalizing", "complete", "failed"]
     percent: int = Field(ge=0, le=100)
 
 
@@ -169,6 +178,7 @@ class JobResultResponse(BaseModel):
     generated_paper: GeneratedPaper | None = None
     metadata: GenerationMetadata | None = None
     report: ValidationReport | None = None
+    fix_summary: FixSummary | None = None
     artifacts: JobResultArtifacts = Field(default_factory=JobResultArtifacts)
     error: WorkflowErrorPayload | None = None
 

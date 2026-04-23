@@ -7,6 +7,7 @@ import pytest
 
 from app.core.auth import AuthenticatedRequestUser
 from jobs.service import create_generation_job, get_job_status, run_generation_task
+from models.fix import FixServiceResponse
 from models.generation import (
     AgentTiming,
     GeneratedPaper,
@@ -18,7 +19,12 @@ from models.generation import (
 from models.job import GenerationTaskRequest, JobRecord
 from models.job import WorkflowArtifactPointer
 from models.project import ProjectRecord
-from models.validation import ValidationReport, ValidationSectionReport, ValidationServiceResponse
+from models.validation import (
+    ValidationReport,
+    ValidationSectionFlag,
+    ValidationSectionReport,
+    ValidationServiceResponse,
+)
 
 
 @pytest.fixture
@@ -132,7 +138,14 @@ def _artifact_pointer(version: str, uri: str) -> WorkflowArtifactPointer:
     )
 
 
-def _make_validation_response(*, routing_decision: str = "clean", ai_score: float = 0.11, plagiarism_score: float = 2.4):
+def _make_validation_response(
+    *,
+    routing_decision: str = "clean",
+    ai_score: float = 0.11,
+    plagiarism_score: float = 2.4,
+    validation_report_uri: str = "gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v1.json",
+    section_flags: list[ValidationSectionFlag] | None = None,
+):
     return ValidationServiceResponse(
         job_id="job-123",
         status="VALIDATING",
@@ -143,8 +156,8 @@ def _make_validation_response(*, routing_decision: str = "clean", ai_score: floa
             "plagiarism_score": plagiarism_score,
             "confidence_band": "low" if routing_decision == "clean" else "medium",
             "routing_decision": routing_decision,
-            "section_flags": [],
-            "validation_report_uri": "gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v1.json",
+            "section_flags": section_flags or [],
+            "validation_report_uri": validation_report_uri,
             "report": ValidationReport(
                 ai_score=ai_score,
                 plagiarism_score=plagiarism_score,
@@ -411,9 +424,9 @@ async def test_run_generation_task_manual_review_does_not_write_final_accepted_d
     class FakeValidationClient:
         async def run_validation(self, request):
             return _make_validation_response(
-                routing_decision="borderline",
-                ai_score=0.31,
-                plagiarism_score=6.2,
+                routing_decision="flagged",
+                ai_score=0.51,
+                plagiarism_score=12.2,
             )
 
     monkeypatch.setattr("jobs.service.get_generation_service_client", lambda: FakeGenerationClient())
@@ -467,8 +480,280 @@ async def test_run_generation_task_manual_review_does_not_write_final_accepted_d
     saved = repository.get(job.job_id)
     assert saved is not None
     assert saved.status == "DONE"
-    assert saved.scores.routing_decision == "borderline"
+    assert saved.scores.routing_decision == "flagged"
     assert saved.artifacts.final_accepted_draft is None
+
+
+@pytest.mark.anyio
+async def test_run_generation_task_borderline_fix_can_finish_as_accepted_after_fix(monkeypatch):
+    repository = InMemoryJobRepository()
+    project = _make_project()
+    job = JobRecord(
+        job_id="job-123",
+        project_id=project.id,
+        user_id=project.owner_uid,
+        idempotency_key="phase4-project-123",
+        status="GENERATION_REQUESTED",
+    )
+    repository.save(job)
+
+    generated_paper = _make_generated_paper()
+    fixed_paper = generated_paper.model_copy(update={"formatted_text": "Fixed formatted text"})
+    metadata = _make_generation_metadata()
+
+    monkeypatch.setattr("jobs.service.get_job_repository", lambda: repository)
+    monkeypatch.setattr("jobs.service.get_project", lambda project_id, owner_uid: project)
+
+    class FakeGenerationClient:
+        async def run_generation(self, request):
+            return GenerationServiceResponse(
+                job_id=request.job_id,
+                project_id=request.project_id,
+                generated_paper=generated_paper,
+                metadata=metadata,
+                generated_figures=None,
+                generated_tables=None,
+                figure_table_status="skipped",
+                figure_table_error=None,
+                boundary="formatting_complete",
+            )
+
+    validation_calls = {"count": 0}
+
+    class FakeValidationClient:
+        async def run_validation(self, request):
+            validation_calls["count"] += 1
+            if validation_calls["count"] == 1:
+                return _make_validation_response(
+                    routing_decision="borderline",
+                    ai_score=0.31,
+                    plagiarism_score=6.2,
+                    validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v1.json",
+                    section_flags=[
+                        ValidationSectionFlag(
+                            section_id="introduction",
+                            flag_type="ai",
+                            score=0.31,
+                            risk="medium",
+                            summary="Introduction shows elevated AI-style signals.",
+                        )
+                    ],
+                )
+            assert request.config.changed_sections_only is True
+            assert request.config.changed_section_ids == ["introduction"]
+            return _make_validation_response(
+                routing_decision="clean",
+                ai_score=0.14,
+                plagiarism_score=2.1,
+                validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v2.json",
+            )
+
+    class FakeFixClient:
+        async def run_fix(self, request):
+            return FixServiceResponse(
+                job_id=request.job_id,
+                output={
+                    "mode": "ai_style",
+                    "updated_draft_uri": "gs://bucket/projects/project-123/jobs/job-123/drafts/draft_v2.json",
+                    "draft_artifact": _artifact_pointer(
+                        "draft_v2",
+                        "gs://bucket/projects/project-123/jobs/job-123/drafts/draft_v2.json",
+                    ),
+                    "changed_sections": ["introduction"],
+                    "rewriter_mode": "deterministic",
+                    "fix_status": "applied",
+                    "fix_summary": {
+                        "attempted": True,
+                        "status": "applied",
+                        "iterations": 1,
+                        "changed_sections": ["introduction"],
+                        "rewriter_mode": "deterministic",
+                    },
+                },
+            )
+
+    save_calls = {"count": 0}
+
+    def fake_save_generated_paper(**kwargs):
+        save_calls["count"] += 1
+        active_paper = kwargs["generated_paper"]
+        return project.model_copy(
+            update={
+                "generated_paper": active_paper,
+                "generation_metadata": kwargs["generation_metadata"],
+                "display_paper_text": active_paper.formatted_text,
+                "latex_ready": active_paper.latex_ready,
+            }
+        )
+
+    monkeypatch.setattr("jobs.service.get_generation_service_client", lambda: FakeGenerationClient())
+    monkeypatch.setattr("jobs.service.get_validation_service_client", lambda: FakeValidationClient())
+    monkeypatch.setattr("jobs.service.get_fix_service_client", lambda: FakeFixClient())
+    monkeypatch.setattr("jobs.service.save_generated_paper", fake_save_generated_paper)
+    monkeypatch.setattr(
+        "jobs.service.store_generated_draft_artifact",
+        lambda project_id, job_id, version, generated_paper, owner_service="generation-service": _artifact_pointer(
+            version,
+            f"gs://bucket/projects/{project_id}/jobs/{job_id}/drafts/{version}.json",
+        ),
+    )
+    monkeypatch.setattr(
+        "jobs.service.store_final_accepted_draft_artifact",
+        lambda project_id, job_id, generated_paper: _artifact_pointer(
+            "final_accepted_draft",
+            f"gs://bucket/projects/{project_id}/jobs/{job_id}/reports/final_accepted_draft.json",
+        ),
+    )
+    monkeypatch.setattr(
+        "jobs.service.store_job_result_report",
+        lambda project_id, job_id, result: _artifact_pointer(
+            "final_report",
+            f"gs://bucket/projects/{project_id}/jobs/{job_id}/reports/final_report.json",
+        ),
+    )
+    monkeypatch.setattr(
+        "jobs.service.load_generated_draft_artifact",
+        lambda uri: fixed_paper,
+    )
+
+    class _Storage:
+        def get_uri(self, key: str) -> str:
+            return f"gs://bucket/{key}"
+
+    monkeypatch.setattr("jobs.service.get_object_storage", lambda: _Storage())
+
+    await run_generation_task(
+        GenerationTaskRequest(
+            task_id="task-123",
+            job_id=job.job_id,
+            project_id=project.id,
+            user_id=project.owner_uid,
+            idempotency_key=job.idempotency_key,
+        )
+    )
+
+    saved = repository.get(job.job_id)
+    assert saved is not None
+    assert saved.status == "DONE"
+    assert saved.iteration == 1
+    assert saved.current_draft_uri == "gs://bucket/projects/project-123/jobs/job-123/drafts/draft_v2.json"
+    assert saved.artifacts.draft_v2 is not None
+    assert saved.artifacts.final_accepted_draft is not None
+    assert saved.scores.routing_decision == "clean"
+    assert ("FIX_REQUESTED", "fix") in repository.save_history
+    assert ("FIXING", "fix") in repository.save_history
+    assert save_calls["count"] == 2
+
+
+@pytest.mark.anyio
+async def test_run_generation_task_fix_failure_finishes_manual_review(monkeypatch):
+    repository = InMemoryJobRepository()
+    project = _make_project()
+    job = JobRecord(
+        job_id="job-123",
+        project_id=project.id,
+        user_id=project.owner_uid,
+        idempotency_key="phase4-project-123",
+        status="GENERATION_REQUESTED",
+    )
+    repository.save(job)
+
+    generated_paper = _make_generated_paper()
+    metadata = _make_generation_metadata()
+
+    monkeypatch.setattr("jobs.service.get_job_repository", lambda: repository)
+    monkeypatch.setattr("jobs.service.get_project", lambda project_id, owner_uid: project)
+
+    class FakeGenerationClient:
+        async def run_generation(self, request):
+            return GenerationServiceResponse(
+                job_id=request.job_id,
+                project_id=request.project_id,
+                generated_paper=generated_paper,
+                metadata=metadata,
+                generated_figures=None,
+                generated_tables=None,
+                figure_table_status="skipped",
+                figure_table_error=None,
+                boundary="formatting_complete",
+            )
+
+    class FakeValidationClient:
+        async def run_validation(self, request):
+            return _make_validation_response(
+                routing_decision="borderline",
+                ai_score=0.33,
+                plagiarism_score=5.8,
+                section_flags=[
+                    ValidationSectionFlag(
+                        section_id="discussion",
+                        flag_type="ai",
+                        score=0.33,
+                        risk="medium",
+                        summary="Discussion shows elevated AI-style signals.",
+                    )
+                ],
+            )
+
+    class FailingFixClient:
+        async def run_fix(self, request):
+            raise RuntimeError("fix service exploded")
+
+    monkeypatch.setattr("jobs.service.get_generation_service_client", lambda: FakeGenerationClient())
+    monkeypatch.setattr("jobs.service.get_validation_service_client", lambda: FakeValidationClient())
+    monkeypatch.setattr("jobs.service.get_fix_service_client", lambda: FailingFixClient())
+    monkeypatch.setattr(
+        "jobs.service.save_generated_paper",
+        lambda **kwargs: project.model_copy(
+            update={
+                "generated_paper": generated_paper,
+                "generation_metadata": metadata,
+                "display_paper_text": generated_paper.formatted_text,
+                "latex_ready": generated_paper.latex_ready,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "jobs.service.store_generated_draft_artifact",
+        lambda project_id, job_id, version, generated_paper, owner_service="generation-service": _artifact_pointer(
+            version,
+            f"gs://bucket/projects/{project_id}/jobs/{job_id}/drafts/{version}.json",
+        ),
+    )
+    monkeypatch.setattr(
+        "jobs.service.store_final_accepted_draft_artifact",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not store final accepted draft")),
+    )
+    monkeypatch.setattr(
+        "jobs.service.store_job_result_report",
+        lambda project_id, job_id, result: _artifact_pointer(
+            "final_report",
+            f"gs://bucket/projects/{project_id}/jobs/{job_id}/reports/final_report.json",
+        ),
+    )
+
+    class _Storage:
+        def get_uri(self, key: str) -> str:
+            return f"gs://bucket/{key}"
+
+    monkeypatch.setattr("jobs.service.get_object_storage", lambda: _Storage())
+
+    await run_generation_task(
+        GenerationTaskRequest(
+            task_id="task-123",
+            job_id=job.job_id,
+            project_id=project.id,
+            user_id=project.owner_uid,
+            idempotency_key=job.idempotency_key,
+        )
+    )
+
+    saved = repository.get(job.job_id)
+    assert saved is not None
+    assert saved.status == "DONE"
+    assert saved.artifacts.final_accepted_draft is None
+    assert saved.scores.routing_decision == "borderline"
+    assert ("FIX_REQUESTED", "fix") in repository.save_history
 
 
 @pytest.mark.anyio

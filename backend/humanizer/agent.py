@@ -73,7 +73,13 @@ class HumanizerRuntimeAgent:
         if LOG_MODE_ON_EVERY_RUN or self.config.log_mode_on_every_run:
             logger.info("Humanizer runtime initialized in %s mode.", self.config.runtime_mode)
 
-    def run(self, section_map: dict[str, str], iteration: int = 0) -> dict[str, Any]:
+    def run(
+        self,
+        section_map: dict[str, str],
+        iteration: int = 0,
+        *,
+        target_sections: set[str] | None = None,
+    ) -> dict[str, Any]:
         """Humanize a section map and return scores plus orchestration metadata."""
 
         if LOG_MODE_ON_EVERY_RUN or self.config.log_mode_on_every_run:
@@ -92,6 +98,11 @@ class HumanizerRuntimeAgent:
         sections_skipped = 0
         sections_rewritten = 0
         actual_modes: set[str] = set()
+        targeted_sections = (
+            {section_name.strip() for section_name in target_sections if str(section_name).strip()}
+            if target_sections is not None
+            else None
+        )
 
         for section_name in SECTION_ORDER:
             original_text = str(section_map.get(section_name, "") or "").strip()
@@ -106,6 +117,13 @@ class HumanizerRuntimeAgent:
                 before_perplexity = self.perplexity.score(original_text)
                 if before_perplexity is not None:
                     perplexity_before_values.append(before_perplexity)
+
+            if targeted_sections is not None and section_name not in targeted_sections:
+                updated_sections[section_name] = original_text
+                scores_after_sections[section_name] = before_scores
+                sections_skipped += 1
+                run_log.append(f"{section_name}: skipped (outside targeted fix scope)")
+                continue
 
             if (
                 before_scores.get("composite_score", 0.0) <= self.config.max_ai_pattern_score_to_pass

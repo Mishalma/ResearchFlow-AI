@@ -15,6 +15,7 @@ PersistenceBackend = Literal["local", "gcp"]
 WorkflowDispatchBackend = Literal["local", "cloud_tasks"]
 WorkflowGenerationBackend = Literal["local", "service"]
 WorkflowValidationBackend = Literal["local", "service"]
+WorkflowFixBackend = Literal["local", "service"]
 
 
 def _get_bool(name: str, default: bool = False) -> bool:
@@ -108,6 +109,7 @@ class Settings:
     workflow_dispatch_backend: WorkflowDispatchBackend
     workflow_generation_backend: WorkflowGenerationBackend
     workflow_validation_backend: WorkflowValidationBackend
+    workflow_fix_backend: WorkflowFixBackend
     workflow_cloud_tasks_project: str
     workflow_cloud_tasks_location: str
     workflow_cloud_tasks_queue: str
@@ -119,6 +121,9 @@ class Settings:
     validation_service_base_url: str
     validation_service_audience: str
     validation_service_timeout_seconds: int
+    fix_service_base_url: str
+    fix_service_audience: str
+    fix_service_timeout_seconds: int
     vertex_model: str
     vertex_service_account_file: Path | None
     ai_request_timeout_seconds: int
@@ -154,6 +159,11 @@ def get_settings() -> Settings:
     )
     if workflow_validation_backend not in {"local", "service"}:
         workflow_validation_backend = "local"
+    workflow_fix_backend = (
+        os.getenv("WORKFLOW_FIX_BACKEND", "local").strip().lower() or "local"
+    )
+    if workflow_fix_backend not in {"local", "service"}:
+        workflow_fix_backend = "local"
     google_cloud_project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
     google_cloud_location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1").strip() or "us-central1"
 
@@ -186,6 +196,7 @@ def get_settings() -> Settings:
         workflow_dispatch_backend=workflow_dispatch_backend,
         workflow_generation_backend=workflow_generation_backend,
         workflow_validation_backend=workflow_validation_backend,
+        workflow_fix_backend=workflow_fix_backend,
         workflow_cloud_tasks_project=(
             os.getenv("WORKFLOW_CLOUD_TASKS_PROJECT", "").strip() or google_cloud_project
         ),
@@ -211,6 +222,12 @@ def get_settings() -> Settings:
         validation_service_timeout_seconds=max(
             30,
             _get_int("VALIDATION_SERVICE_TIMEOUT_SECONDS", 120),
+        ),
+        fix_service_base_url=os.getenv("FIX_SERVICE_BASE_URL", "").strip(),
+        fix_service_audience=os.getenv("FIX_SERVICE_AUDIENCE", "").strip(),
+        fix_service_timeout_seconds=max(
+            30,
+            _get_int("FIX_SERVICE_TIMEOUT_SECONDS", 180),
         ),
         vertex_model=os.getenv("VERTEX_MODEL", "gemini-2.5-flash").strip()
         or "gemini-2.5-flash",

@@ -13,6 +13,7 @@ from humanizer.perplexity import PerplexityScorer
 from jobs.artifacts import (
     load_extracted_text_artifact,
     load_generated_draft_artifact,
+    load_validation_report_from_artifact,
     store_validation_report_artifact,
 )
 from models.generation import GeneratedPaper
@@ -90,6 +91,13 @@ def _decision_summary(routing_decision: str) -> str:
     return "Validation is pending."
 
 
+def _draft_revision_from_uri(uri: str) -> str:
+    match = re.search(r"draft_v(\d+)\.json$", str(uri or ""))
+    if not match:
+        return "v1"
+    return f"v{match.group(1)}"
+
+
 def _section_status(spans: list, *, ai_score: float | None, plagiarism_score: float, config: ValidationConfig) -> tuple[str, str, list[str]]:
     classifications = {span.classification for span in spans}
     severe = (
@@ -123,6 +131,31 @@ def _section_status(spans: list, *, ai_score: float | None, plagiarism_score: fl
             ["Only low-risk or citation-safe overlap was detected in this section."],
         )
     return ("clean", "low", ["No blocking AI or overlap signals were detected in this section."])
+
+
+def _routing_decision_for_report(
+    *,
+    ai_score: float | None,
+    plagiarism_score: float,
+    section_flags: list[ValidationSectionFlag],
+    config: ValidationConfig,
+) -> str:
+    severe_section_flag = any(flag.risk == "severe" for flag in section_flags)
+    medium_section_flag = any(flag.risk == "medium" for flag in section_flags)
+
+    if (
+        (ai_score is not None and ai_score >= config.ai_flag_threshold)
+        or plagiarism_score > config.plagiarism_flag_threshold
+        or severe_section_flag
+    ):
+        return "flagged"
+    if (
+        (ai_score is not None and ai_score >= config.ai_clean_threshold)
+        or plagiarism_score >= config.plagiarism_clean_threshold
+        or medium_section_flag
+    ):
+        return "borderline"
+    return "clean"
 
 
 def _build_source_index(source_text: str, *, ngram_size: int, min_tokens: int) -> tuple[list[_SourceSentence], dict[tuple[str, ...], set[int]]]:
@@ -248,6 +281,47 @@ def _detect_section_overlap(
     )
 
 
+def _suspicious_spans_for_section(section_report: ValidationSectionReport) -> list[tuple[int, int]]:
+    return [
+        (span.start_char, span.end_char)
+        for span in section_report.spans
+        if span.classification not in {"quoted_and_cited", "common_phrase", "boilerplate"}
+    ]
+
+
+def _build_section_flags_from_reports(
+    *,
+    section_reports: list[ValidationSectionReport],
+    config: ValidationConfig,
+) -> list[ValidationSectionFlag]:
+    section_flags: list[ValidationSectionFlag] = []
+    for section in section_reports:
+        if section.ai_score is not None and section.ai_score >= config.ai_clean_threshold:
+            section_flags.append(
+                ValidationSectionFlag(
+                    section_id=section.section_name,
+                    flag_type="ai",
+                    score=round(section.ai_score, 4),
+                    risk="severe" if section.ai_score >= config.ai_flag_threshold else "medium",
+                    summary=f"{section.section_name.replace('_', ' ').title()} shows elevated AI-style signals.",
+                )
+            )
+        suspicious_spans = _suspicious_spans_for_section(section)
+        if suspicious_spans and section.plagiarism_score >= config.plagiarism_clean_threshold:
+            section_flags.append(
+                ValidationSectionFlag(
+                    section_id=section.section_name,
+                    flag_type="plagiarism",
+                    score=section.plagiarism_score,
+                    risk="severe"
+                    if section.plagiarism_score > config.plagiarism_flag_threshold
+                    else "medium",
+                    summary=f"{section.section_name.replace('_', ' ').title()} contains lexical overlap with the uploaded source.",
+                )
+            )
+    return section_flags
+
+
 @lru_cache(maxsize=1)
 def _get_perplexity_scorer(model_name: str) -> PerplexityScorer:
     return PerplexityScorer(model_name)
@@ -290,6 +364,69 @@ def _ai_score_for_section(text: str, *, config: ValidationConfig) -> tuple[float
     }
 
 
+def _build_section_report(
+    *,
+    section_name: str,
+    section_text: str,
+    source_sentences: list[_SourceSentence],
+    source_index: dict[tuple[str, ...], set[int]],
+    request: ValidationServiceRequest,
+    validation_config: ValidationConfig,
+    originality_config: OriginalityConfig,
+    reference_lines: list[str],
+) -> ValidationSectionReport:
+    section_ai_score, ai_metadata = _ai_score_for_section(
+        section_text,
+        config=validation_config,
+    )
+    scan = _detect_section_overlap(
+        section_name=section_name,
+        section_text=section_text,
+        source_sentences=source_sentences,
+        source_index=source_index,
+        project_id=request.project_id,
+        config=validation_config,
+    )
+    classified_spans = classify_section_findings(
+        section_name=section_name,
+        section_text=section_text,
+        findings=scan.spans,
+        reference_lines=reference_lines,
+        author_metadata=None,
+        config=originality_config,
+    )
+
+    suspicious_spans = [
+        (span.start_char, span.end_char)
+        for span in classified_spans
+        if span.classification not in {"quoted_and_cited", "common_phrase", "boilerplate"}
+    ]
+    section_length = max(1, len(section_text))
+    plagiarism_score = round((_merge_span_lengths(suspicious_spans) / section_length) * 100, 2)
+    status, risk, summary = _section_status(
+        classified_spans,
+        ai_score=section_ai_score,
+        plagiarism_score=plagiarism_score,
+        config=validation_config,
+    )
+
+    metadata_summary: list[str] = []
+    if ai_metadata:
+        metadata_summary.append(
+            f"AI composite {ai_metadata.get('composite_score', 0.0):.2f}; stylometry {ai_metadata.get('stylometry_score', 0.0):.2f}"
+        )
+
+    return ValidationSectionReport(
+        section_name=section_name,
+        ai_score=section_ai_score,
+        plagiarism_score=plagiarism_score,
+        status=status,
+        risk=risk,
+        summary=summary + metadata_summary,
+        spans=classified_spans,
+    )
+
+
 async def execute_fast_validation(
     request: ValidationServiceRequest,
     *,
@@ -315,117 +452,83 @@ async def execute_fast_validation(
     )
 
     reference_lines = list(draft.paper.references)
-    section_reports: list[ValidationSectionReport] = []
-    section_flags: list[ValidationSectionFlag] = []
-    document_ai_scores: list[float] = []
+    requested_changed_sections = set(request.config.changed_section_ids)
+    if request.config.changed_sections_only and not requested_changed_sections:
+        raise ValueError("changed_section_ids is required when changed_sections_only=true.")
+
+    previous_report = None
+    previous_report_uri = request.artifacts.previous_validation_report_uri
+    if request.config.changed_sections_only:
+        if not previous_report_uri:
+            raise ValueError(
+                "previous_validation_report_uri is required when changed_sections_only=true."
+            )
+        previous_report = load_validation_report_from_artifact(previous_report_uri)
+
+    section_reports_by_name: dict[str, ValidationSectionReport] = {}
+    if previous_report is not None:
+        section_reports_by_name.update(
+            {section.section_name: section for section in previous_report.sections}
+        )
+
+    sections_to_rescore = set(SECTION_ORDER)
+    if request.config.changed_sections_only:
+        sections_to_rescore = set(requested_changed_sections)
+        missing_sections = {
+            section_name for section_name in SECTION_ORDER if section_name not in section_reports_by_name
+        }
+        sections_to_rescore.update(missing_sections)
+
+    for section_name in SECTION_ORDER:
+        if section_name not in sections_to_rescore:
+            continue
+        section_reports_by_name[section_name] = _build_section_report(
+            section_name=section_name,
+            section_text=section_texts.get(section_name, "").strip(),
+            source_sentences=source_sentences,
+            source_index=source_index,
+            request=request,
+            validation_config=resolved_validation_config,
+            originality_config=resolved_originality_config,
+            reference_lines=reference_lines,
+        )
+
+    section_reports = [
+        section_reports_by_name[section_name]
+        for section_name in SECTION_ORDER
+        if section_name in section_reports_by_name
+    ]
+    section_flags = _build_section_flags_from_reports(
+        section_reports=section_reports,
+        config=resolved_validation_config,
+    )
+
+    document_ai_scores = [
+        section.ai_score for section in section_reports if section.ai_score is not None
+    ]
     document_flagged_spans: list[tuple[int, int]] = []
     document_length = sum(len(text.strip()) for text in section_texts.values() if text.strip()) or 1
     offset_cursor = 0
-
     for section_name in SECTION_ORDER:
         section_text = section_texts.get(section_name, "").strip()
-        section_ai_score, ai_metadata = _ai_score_for_section(
-            section_text,
-            config=resolved_validation_config,
-        )
-        if section_ai_score is not None:
-            document_ai_scores.append(section_ai_score)
-
-        scan = _detect_section_overlap(
-            section_name=section_name,
-            section_text=section_text,
-            source_sentences=source_sentences,
-            source_index=source_index,
-            project_id=request.project_id,
-            config=resolved_validation_config,
-        )
-        classified_spans = classify_section_findings(
-            section_name=section_name,
-            section_text=section_text,
-            findings=scan.spans,
-            reference_lines=reference_lines,
-            author_metadata=None,
-            config=resolved_originality_config,
-        )
-
-        suspicious_spans = [
-            (span.start_char, span.end_char)
-            for span in classified_spans
-            if span.classification not in {"quoted_and_cited", "common_phrase", "boilerplate"}
-        ]
-        section_length = max(1, len(section_text))
-        plagiarism_score = round((_merge_span_lengths(suspicious_spans) / section_length) * 100, 2)
-        status, risk, summary = _section_status(
-            classified_spans,
-            ai_score=section_ai_score,
-            plagiarism_score=plagiarism_score,
-            config=resolved_validation_config,
-        )
-
-        if section_ai_score is not None and section_ai_score >= resolved_validation_config.ai_clean_threshold:
-            section_flags.append(
-                ValidationSectionFlag(
-                    section_id=section_name,
-                    flag_type="ai",
-                    score=round(section_ai_score, 4),
-                    risk="severe" if section_ai_score >= resolved_validation_config.ai_flag_threshold else "medium",
-                    summary=f"{section_name.replace('_', ' ').title()} shows elevated AI-style signals.",
-                )
+        section_report = section_reports_by_name.get(section_name)
+        if section_report is not None:
+            document_flagged_spans.extend(
+                [
+                    (start + offset_cursor, end + offset_cursor)
+                    for start, end in _suspicious_spans_for_section(section_report)
+                ]
             )
-        if suspicious_spans and plagiarism_score >= resolved_validation_config.plagiarism_clean_threshold:
-            section_flags.append(
-                ValidationSectionFlag(
-                    section_id=section_name,
-                    flag_type="plagiarism",
-                    score=plagiarism_score,
-                    risk="severe"
-                    if plagiarism_score > resolved_validation_config.plagiarism_flag_threshold
-                    else "medium",
-                    summary=f"{section_name.replace('_', ' ').title()} contains lexical overlap with the uploaded source.",
-                )
-            )
-
-        document_flagged_spans.extend(
-            [(start + offset_cursor, end + offset_cursor) for start, end in suspicious_spans]
-        )
-        offset_cursor += section_length + 1
-
-        metadata_summary = []
-        if ai_metadata:
-            metadata_summary.append(
-                f"AI composite {ai_metadata.get('composite_score', 0.0):.2f}; stylometry {ai_metadata.get('stylometry_score', 0.0):.2f}"
-            )
-        section_reports.append(
-            ValidationSectionReport(
-                section_name=section_name,
-                ai_score=section_ai_score,
-                plagiarism_score=plagiarism_score,
-                status=status,
-                risk=risk,
-                summary=summary + metadata_summary,
-                spans=classified_spans,
-            )
-        )
+        offset_cursor += max(1, len(section_text)) + 1
 
     ai_score = round(mean(document_ai_scores), 4) if document_ai_scores else None
     plagiarism_score = round((_merge_span_lengths(document_flagged_spans) / document_length) * 100, 2)
-    severe_section_flag = any(flag.risk == "severe" for flag in section_flags)
-    medium_section_flag = any(flag.risk == "medium" for flag in section_flags)
-
-    if (
-        (ai_score is not None and ai_score >= resolved_validation_config.ai_flag_threshold)
-        or plagiarism_score > resolved_validation_config.plagiarism_flag_threshold
-        or severe_section_flag
-    ):
-        routing_decision = "flagged"
-    elif (
-        (ai_score is not None and ai_score >= resolved_validation_config.ai_clean_threshold)
-        or plagiarism_score >= resolved_validation_config.plagiarism_clean_threshold
-        or medium_section_flag
-    ):
-        routing_decision = "borderline"
-    else:
-        routing_decision = "clean"
+    routing_decision = _routing_decision_for_report(
+        ai_score=ai_score,
+        plagiarism_score=plagiarism_score,
+        section_flags=section_flags,
+        config=resolved_validation_config,
+    )
 
     report = ValidationReport(
         ai_score=ai_score,
@@ -444,12 +547,15 @@ async def execute_fast_validation(
         "report": report,
         "section_flags": section_flags,
         "section_status_counts": summarize_status_counts(section.status for section in section_reports),
+        "changed_section_ids": request.config.changed_section_ids,
     }
+    report_revision = _draft_revision_from_uri(request.current_draft_uri)
     sidecar = store_validation_report_artifact(
         request.project_id,
         request.job_id,
         sidecar_payload,
         mode=request.config.mode,
+        revision=report_revision,
     )
     return ValidationServiceResponse(
         job_id=request.job_id,

@@ -9,6 +9,7 @@ import {
   Loader2,
   ScanSearch,
   ShieldAlert,
+  Wand2,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -130,7 +131,10 @@ export default function PlagiarismReportPage() {
   const overlapPercent = report ? Math.round(report.plagiarism_score * 10) / 10 : null;
   const aiTone = scoreTone(report?.ai_score ?? 0, 0.2, 0.45);
   const overlapTone = scoreTone(report?.plagiarism_score ?? 0, 5, 10);
-  const accepted = result.final_disposition === "accepted";
+  const accepted =
+    result.final_disposition === "accepted" ||
+    result.final_disposition === "accepted_after_fix";
+  const fixSummary = result.fix_summary;
 
   return (
     <div className="mx-auto max-w-5xl space-y-8 px-4 py-10 pb-12">
@@ -236,6 +240,71 @@ export default function PlagiarismReportPage() {
           </CardContent>
         </Card>
       </div>
+
+      {fixSummary?.attempted ? (
+        <Card className="border border-white/10 bg-[#181816]">
+          <CardContent className="p-6">
+            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="flex items-center gap-3">
+                  <div className="rounded-full bg-white/[0.04] p-3 text-slate-100">
+                    <Wand2 className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-semibold text-white">AI Fix Loop</h2>
+                    <p className="mt-1 text-sm text-slate-400">
+                      The workflow attempted an automatic rewrite on medium-risk AI sections before finalizing this job.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <Badge
+                variant="outline"
+                className={
+                  fixSummary.status === "applied"
+                    ? "border-emerald-300/20 bg-emerald-500/10 text-emerald-100"
+                    : "border-rose-300/20 bg-rose-500/10 text-rose-100"
+                }
+              >
+                {fixSummary.status.replaceAll("_", " ")}
+              </Badge>
+            </div>
+
+            <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Iterations</p>
+                <p className="mt-2 text-2xl font-semibold text-white">{fixSummary.iterations}</p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Rewrite Mode</p>
+                <p className="mt-2 text-lg font-semibold capitalize text-white">
+                  {fixSummary.rewriter_mode ?? "Unavailable"}
+                </p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Changed Sections</p>
+                <p className="mt-2 text-lg font-semibold text-white">
+                  {fixSummary.changed_sections.length}
+                </p>
+              </div>
+            </div>
+
+            {fixSummary.changed_sections.length > 0 ? (
+              <div className="mt-4 flex flex-wrap gap-2">
+                {fixSummary.changed_sections.map((sectionId) => (
+                  <Badge
+                    key={sectionId}
+                    variant="outline"
+                    className="border-white/10 bg-white/[0.03] text-slate-200"
+                  >
+                    {sectionId.replaceAll("_", " ")}
+                  </Badge>
+                ))}
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card className="border border-white/10 bg-[#181816]">
         <CardContent className="p-6">
