@@ -157,10 +157,20 @@ async def run_structuring_pipeline(
 
     active_reducer = reducer
     if active_reducer is None:
-        active_reducer = VertexSectionReducer(
-            client=resolved_vertex_client,
-            model_name=resolved_config.reducer_model,
-        )
+        if resolved_config.use_llm_reducer and resolved_config.reducer_model:
+            active_reducer = VertexSectionReducer(
+                client=resolved_vertex_client,
+                model_name=resolved_config.reducer_model,
+            )
+        else:
+            active_reducer = None
+
+    reduction_backend = "llm" if active_reducer is not None else "deterministic"
+    active_logger.info(
+        "Structuring trace %s using %s section reduction.",
+        resolved_trace_id,
+        reduction_backend,
+    )
 
     section_start = perf_counter()
     section_semaphore = asyncio.Semaphore(resolved_config.max_parallel_section_reductions)
@@ -215,6 +225,7 @@ async def run_structuring_pipeline(
             "trace_id": resolved_trace_id,
             "chunk_count": len(chunks),
             "retrieval_backend": retrieval_backend,
+            "reduction_backend": reduction_backend,
             "retrieval_counts": retrieval_counts,
             "timings_ms": timings_ms,
             "paper_topic": context["paper_topic"],
@@ -239,6 +250,7 @@ async def run_structuring_pipeline(
         metadata={
             "timings_ms": timings_ms,
             "retrieval_backend": retrieval_backend,
+            "reduction_backend": reduction_backend,
         },
     )
 

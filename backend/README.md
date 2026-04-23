@@ -73,6 +73,7 @@ AI_REQUEST_TIMEOUT_SECONDS=60
 AI_SOURCE_TEXT_MAX_CHARS=20000
 AI_TEMPERATURE=0.2
 AI_MAX_OUTPUT_TOKENS=2000
+STRUCTURING_USE_LLM_REDUCER=false
 AGENT_RETRY_ATTEMPTS=2
 AGENT_RETRY_BACKOFF_SECONDS=1
 CITATION_RESULT_LIMIT=3
@@ -85,6 +86,7 @@ Notes:
 - For Cloud Run, use `PERSISTENCE_BACKEND=gcp` and set `TEMP_DIR=/tmp`.
 - On Cloud Run, prefer the attached service account instead of `VERTEX_SERVICE_ACCOUNT_FILE`.
 - Locally, Vertex can use ADC from `gcloud auth application-default login`.
+- `STRUCTURING_USE_LLM_REDUCER=false` keeps the fast deterministic structuring path enabled by default. Set it to `true` only if you explicitly want the slower LLM reduction pass.
 
 ## Install dependencies
 

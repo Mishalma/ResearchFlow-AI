@@ -29,8 +29,8 @@ const steps = [
   },
   {
     id: 2,
-    title: "Writing your paper",
-    description: "Drafting introduction, methodology, results and references.",
+    title: "Generating manuscript",
+    description: "Structuring sections, drafting content, adding citations, and formatting the paper.",
     icon: Sparkles,
   },
   {
@@ -306,14 +306,14 @@ export default function ProcessingClientPage({
       ? "Generation paused"
       : processingState.kind === "success"
         ? "Opening your editor"
-        : "Generating your research paper";
+        : "Generating your manuscript";
 
   const description =
     processingState.kind === "error"
       ? processingState.message
       : processingState.kind === "success"
         ? "Your validation report is ready. The next workspace will open automatically."
-        : "Drafting manuscript sections in IEEE format and running fast validation.\nThe next workspace will open automatically when ready.";
+        : "Structuring the paper, drafting sections, adding citations, and running fast validation.\nThe next workspace will open automatically when ready.";
 
   const statusLabel =
     processingState.kind === "error"

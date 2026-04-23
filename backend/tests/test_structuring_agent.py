@@ -84,6 +84,11 @@ class ExplodingReducer:
         raise RuntimeError("title reducer unavailable")
 
 
+class ExplodingVertexClient:
+    async def generate_json(self, *args, **kwargs):
+        raise AssertionError("Vertex reducer should not be invoked in deterministic structuring mode")
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -203,6 +208,22 @@ def test_deterministic_reduction_fallback_when_reducer_fails():
 
     assert result.structured_draft is not None
     assert result.structured_draft.sections["methodology"].draft
+    assert result.structured_draft.title_candidates
+
+
+def test_structuring_defaults_to_deterministic_reduction_without_llm_reducer():
+    result = _run(
+        run_structuring_pipeline(
+            source_text=SAMPLE_SOURCE_TEXT,
+            config=StructuringConfig(use_llm_reducer=False),
+            vertex_client=ExplodingVertexClient(),
+            embedding_provider=FailingEmbeddingProvider(),
+        )
+    )
+
+    assert result.error is None
+    assert result.structured_draft is not None
+    assert result.metadata["reduction_backend"] == "deterministic"
     assert result.structured_draft.title_candidates
 
 
