@@ -1,119 +1,338 @@
 "use client";
 
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { startTransition, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import {
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  Loader2,
+  ScanSearch,
+  ShieldAlert,
+} from "lucide-react";
+
 import { Badge } from "@/components/ui/badge";
-import { ShieldCheck, AlertTriangle, CornerDownRight } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { fetchGenerationJobResult, type JobResultResponse } from "@/lib/backend";
+
+type ReportState =
+  | { kind: "loading" }
+  | { kind: "ready"; result: JobResultResponse }
+  | { kind: "error"; message: string };
+
+function scoreTone(value: number, cleanCutoff: number, flagCutoff: number) {
+  if (value > flagCutoff) {
+    return "red";
+  }
+  if (value >= cleanCutoff) {
+    return "amber";
+  }
+  return "emerald";
+}
 
 export default function PlagiarismReportPage() {
-  const score = 12;
-  const isSafe = score < 15;
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const projectId = searchParams.get("projectId");
+  const jobId = searchParams.get("jobId");
+  const [state, setState] = useState<ReportState>(() =>
+    jobId ? { kind: "loading" } : { kind: "error", message: "Missing job ID for the validation report." },
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    if (!jobId) {
+      return () => controller.abort();
+    }
+
+    async function loadReport() {
+      try {
+        const result = await fetchGenerationJobResult(jobId, controller.signal);
+        if (controller.signal.aborted) {
+          return;
+        }
+        setState({ kind: "ready", result });
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setState({
+          kind: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Unable to load the validation report right now.",
+        });
+      }
+    }
+
+    void loadReport();
+    return () => controller.abort();
+  }, [jobId]);
+
+  const report = state.kind === "ready" ? state.result.report : null;
+  const flaggedSections = useMemo(
+    () =>
+      report?.sections.filter(
+        (section) => section.risk !== "low" || section.spans.length > 0,
+      ) ?? [],
+    [report],
+  );
+
+  if (state.kind === "loading") {
+    return (
+      <div className="mx-auto flex min-h-[calc(100vh-8rem)] max-w-3xl items-center justify-center px-4 py-12">
+        <div className="flex flex-col items-center gap-4 text-center">
+          <div className="rounded-full border border-white/10 bg-white/[0.04] p-4 text-slate-100">
+            <Loader2 className="h-6 w-6 animate-spin" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-semibold text-white">Loading validation report</h1>
+            <p className="mt-2 text-slate-400">
+              Pulling the latest AI and overlap scores for this draft.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (state.kind === "error") {
+    return (
+      <div className="mx-auto max-w-3xl space-y-6 px-4 py-10">
+        <Card className="border-rose-400/20 bg-rose-500/10">
+          <CardContent className="p-6">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="mt-0.5 h-5 w-5 text-rose-200" />
+              <div className="space-y-3">
+                <div>
+                  <h1 className="text-xl font-semibold text-white">Validation report unavailable</h1>
+                  <p className="mt-1 text-sm text-rose-100/90">{state.message}</p>
+                </div>
+                <Button
+                  onClick={() => router.push(projectId ? `/editor?projectId=${projectId}` : "/new")}
+                  className="bg-white/10 text-white hover:bg-white/20"
+                >
+                  Back to workspace
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const { result } = state;
+  const aiScorePercent = report?.ai_score != null ? Math.round(report.ai_score * 100) : null;
+  const overlapPercent = report ? Math.round(report.plagiarism_score * 10) / 10 : null;
+  const aiTone = scoreTone(report?.ai_score ?? 0, 0.2, 0.45);
+  const overlapTone = scoreTone(report?.plagiarism_score ?? 0, 5, 10);
+  const accepted = result.final_disposition === "accepted";
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 pb-10">
-      
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+    <div className="mx-auto max-w-5xl space-y-8 px-4 py-10 pb-12">
+      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight mb-2">Plagiarism Analysis</h1>
-          <p className="text-zinc-500">
-            Multi-layer verification against academic databases and internal repositories.
+          <h1 className="text-3xl font-semibold tracking-tight text-white">
+            Validation Report
+          </h1>
+          <p className="mt-2 max-w-2xl text-slate-400">
+            Fast validation scored AI-writing risk first, then measured lexical overlap
+            against the uploaded source document.
           </p>
         </div>
-        <div className="flex gap-3">
-          <Button variant="outline" className="text-zinc-700">Download PDF Report</Button>
-          <Button className="bg-[#4F46E5] hover:bg-[#4338CA] text-white">Back to Editor</Button>
+        <div className="flex flex-wrap gap-3">
+          <Button
+            variant="outline"
+            className="border-white/10 bg-white/[0.03] text-slate-200 hover:bg-white/[0.08]"
+            onClick={() => {
+              startTransition(() => {
+                router.refresh();
+              });
+            }}
+          >
+            Refresh
+          </Button>
+          <Button
+            className="bg-white text-zinc-900 hover:bg-zinc-200"
+            onClick={() => {
+              startTransition(() => {
+                router.push(projectId ? `/editor?projectId=${projectId}` : "/editor");
+              });
+            }}
+          >
+            {accepted ? "Open Editor" : "Review In Editor"}
+            <ArrowRight className="ml-2 h-4 w-4" />
+          </Button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        
-        {/* Score Card */}
-        <Card className={`col-span-1 border-t-4 ${isSafe ? 'border-t-emerald-500' : 'border-t-red-500'} shadow-sm`}>
-          <CardContent className="p-6 text-center">
-             <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-zinc-50 border-8 border-zinc-100 mb-4">
-               {isSafe ? <ShieldCheck className="w-8 h-8 text-emerald-500" /> : <AlertTriangle className="w-8 h-8 text-red-500" />}
-             </div>
-             <h2 className="text-5xl font-bold tracking-tighter mb-2">{score}%</h2>
-             <p className="text-sm font-semibold text-zinc-900 mb-1">Similarity Index</p>
-             <p className="text-xs text-zinc-500">{isSafe ? 'Excellent. Ready for submission.' : 'High overlap detected. Review suggested.'}</p>
-             
-             <div className="mt-6 space-y-2 text-left bg-zinc-50 p-3 rounded-lg border border-zinc-100">
-               <div className="flex justify-between text-xs">
-                 <span className="text-zinc-600">Internet Sources</span>
-                 <span className="font-semibold">8%</span>
-               </div>
-               <div className="flex justify-between text-xs">
-                 <span className="text-zinc-600">Publications</span>
-                 <span className="font-semibold">3%</span>
-               </div>
-               <div className="flex justify-between text-xs">
-                 <span className="text-zinc-600">Student Papers</span>
-                 <span className="font-semibold">1%</span>
-               </div>
-             </div>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <Card className={`border ${aiTone === "red" ? "border-rose-400/20" : aiTone === "amber" ? "border-amber-400/20" : "border-emerald-400/20"} bg-[#181816]`}>
+          <CardContent className="p-6">
+            <p className="text-sm text-slate-400">AI Risk Score</p>
+            <div className="mt-3 flex items-center gap-3">
+              <div className={`rounded-full p-3 ${aiTone === "red" ? "bg-rose-500/10 text-rose-200" : aiTone === "amber" ? "bg-amber-500/10 text-amber-200" : "bg-emerald-500/10 text-emerald-200"}`}>
+                <ScanSearch className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="text-3xl font-semibold text-white">
+                  {aiScorePercent == null ? "--" : `${aiScorePercent}%`}
+                </p>
+                <p className="text-sm text-slate-400">
+                  {report?.routing_decision === "clean"
+                    ? "Low formulaic risk"
+                    : report?.routing_decision === "borderline"
+                      ? "Manual review suggested"
+                      : "High AI-style risk"}
+                </p>
+              </div>
+            </div>
           </CardContent>
         </Card>
 
-        {/* Detailed Results */}
-        <div className="col-span-1 md:col-span-2 space-y-4">
-          <h3 className="font-semibold text-lg">Matched Content</h3>
-          
-          <Card className="shadow-sm border-zinc-200 overflow-hidden">
-            <div className="border-b p-4 bg-zinc-50 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="bg-red-50 text-red-700 border-red-200 font-bold px-2.5 py-0.5">Match 1</Badge>
-                <span className="text-sm font-semibold">Source: IEEE Xplore - 2023 Educational Technology Review</span>
+        <Card className={`border ${overlapTone === "red" ? "border-rose-400/20" : overlapTone === "amber" ? "border-amber-400/20" : "border-emerald-400/20"} bg-[#181816]`}>
+          <CardContent className="p-6">
+            <p className="text-sm text-slate-400">Overlap Score</p>
+            <div className="mt-3 flex items-center gap-3">
+              <div className={`rounded-full p-3 ${overlapTone === "red" ? "bg-rose-500/10 text-rose-200" : overlapTone === "amber" ? "bg-amber-500/10 text-amber-200" : "bg-emerald-500/10 text-emerald-200"}`}>
+                <ShieldAlert className="h-5 w-5" />
               </div>
-              <span className="text-xs font-bold text-red-600 bg-red-100 px-2 py-1 rounded">8% overlap</span>
-            </div>
-            <CardContent className="p-5">
-              <div className="prose prose-zinc max-w-none text-sm leading-relaxed text-zinc-600 bg-white">
-                <p>
-                  The control group received standard instructional techniques while the experimental group interacted with the <span className="bg-red-100 text-red-900 border-b-2 border-red-300 font-medium">proprietary learning environment. Pre-test and post-test assessments were standardized across both cohorts</span> to ensure validity.
+              <div>
+                <p className="text-3xl font-semibold text-white">
+                  {overlapPercent == null ? "--" : `${overlapPercent}%`}
+                </p>
+                <p className="text-sm text-slate-400">
+                  Internal lexical overlap with the uploaded source.
                 </p>
               </div>
-              
-              <div className="mt-4 flex items-start gap-3 p-3 bg-indigo-50 border border-indigo-100 rounded-lg">
-                <CornerDownRight className="w-4 h-4 text-indigo-500 mt-0.5" />
-                <div className="flex-1">
-                  <p className="text-xs font-semibold text-indigo-900 mb-1">AI Rewrite Suggestion</p>
-                  <p className="text-sm text-indigo-700 italic">
-                    &ldquo;Standardized assessments were administered to both groups to
-                    guarantee validity, comparing traditional methods against the novel
-                    learning platform.&rdquo;
-                  </p>
-                </div>
-                <Button size="sm" className="bg-white hover:bg-zinc-50 text-indigo-700 border border-indigo-200 h-8 self-center">
-                  Apply Fix
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="shadow-sm border-zinc-200 overflow-hidden">
-            <div className="border-b p-4 bg-zinc-50 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 font-bold px-2.5 py-0.5">Match 2</Badge>
-                <span className="text-sm font-semibold">Source: Internal Repository - Pedagogy Draft</span>
-              </div>
-              <span className="text-xs font-bold text-amber-600 bg-amber-100 px-2 py-1 rounded">4% overlap</span>
             </div>
-            <CardContent className="p-5">
-              <div className="prose prose-zinc max-w-none text-sm leading-relaxed text-zinc-600 bg-white">
-                <p>
-                  <span className="bg-amber-100 text-amber-900 border-b-2 border-amber-300 font-medium">Data gathered from 240 subjects across multiple high-school districts</span> highlighted a significant performance increase when adaptive algorithms were utilized.
+          </CardContent>
+        </Card>
+
+        <Card className="border border-white/10 bg-[#181816]">
+          <CardContent className="p-6">
+            <p className="text-sm text-slate-400">Decision</p>
+            <div className="mt-3 flex items-center gap-3">
+              <div className={`rounded-full p-3 ${accepted ? "bg-emerald-500/10 text-emerald-200" : "bg-amber-500/10 text-amber-200"}`}>
+                {accepted ? (
+                  <CheckCircle2 className="h-5 w-5" />
+                ) : (
+                  <AlertTriangle className="h-5 w-5" />
+                )}
+              </div>
+              <div>
+                <p className="text-lg font-semibold capitalize text-white">
+                  {result.final_disposition.replaceAll("_", " ")}
+                </p>
+                <p className="text-sm text-slate-400">
+                  {report?.decision_summary ?? "Validation summary unavailable."}
                 </p>
               </div>
-              <div className="mt-4">
-                <Button variant="outline" size="sm" className="text-xs h-8">
-                  Cite as Self-Reference
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-        </div>
+            </div>
+          </CardContent>
+        </Card>
       </div>
+
+      <Card className="border border-white/10 bg-[#181816]">
+        <CardContent className="p-6">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-semibold text-white">Flagged Sections</h2>
+              <p className="mt-1 text-sm text-slate-400">
+                Section-level summaries from the fast validation pass.
+              </p>
+            </div>
+            <Badge
+              variant="outline"
+              className="border-white/10 bg-white/[0.03] text-slate-200"
+            >
+              {flaggedSections.length} flagged
+            </Badge>
+          </div>
+
+          <div className="mt-6 space-y-4">
+            {flaggedSections.length === 0 ? (
+              <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">
+                No section-level issues were flagged in the fast validation pass.
+              </div>
+            ) : (
+              flaggedSections.map((section) => (
+                <div
+                  key={section.section_name}
+                  className="rounded-2xl border border-white/10 bg-white/[0.02] p-4"
+                >
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-lg font-semibold capitalize text-white">
+                          {section.section_name.replaceAll("_", " ")}
+                        </h3>
+                        <Badge
+                          variant="outline"
+                          className={
+                            section.risk === "severe"
+                              ? "border-rose-300/20 bg-rose-500/10 text-rose-100"
+                              : "border-amber-300/20 bg-amber-500/10 text-amber-100"
+                          }
+                        >
+                          {section.risk}
+                        </Badge>
+                      </div>
+                      <p className="mt-2 text-sm text-slate-300">
+                        {section.summary[0] ?? "Manual review recommended for this section."}
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 text-sm text-slate-300 md:min-w-[14rem]">
+                      <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                        <p className="text-xs uppercase tracking-wide text-slate-500">AI</p>
+                        <p className="mt-1 text-lg font-semibold text-white">
+                          {section.ai_score == null ? "--" : `${Math.round(section.ai_score * 100)}%`}
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                        <p className="text-xs uppercase tracking-wide text-slate-500">Overlap</p>
+                        <p className="mt-1 text-lg font-semibold text-white">
+                          {Math.round(section.plagiarism_score * 10) / 10}%
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {section.spans.length > 0 ? (
+                    <div className="mt-4 space-y-3">
+                      {section.spans.slice(0, 3).map((span, index) => (
+                        <div
+                          key={`${section.section_name}-${index}-${span.start_char}`}
+                          className="rounded-xl border border-white/8 bg-[#111110] p-3"
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge
+                              variant="outline"
+                              className="border-white/10 bg-white/[0.03] text-slate-200"
+                            >
+                              {span.classification.replaceAll("_", " ")}
+                            </Badge>
+                            <span className="text-xs text-slate-500">
+                              Similarity {span.similarity_score == null ? "--" : `${Math.round(span.similarity_score * 100)}%`}
+                            </span>
+                          </div>
+                          <p className="mt-2 line-clamp-3 text-sm leading-6 text-slate-300">
+                            {span.matched_text}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ))
+            )}
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

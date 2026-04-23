@@ -14,7 +14,11 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { createGenerationJob, fetchGenerationJob } from "@/lib/backend";
+import {
+  createGenerationJob,
+  fetchGenerationJob,
+  fetchGenerationJobResult,
+} from "@/lib/backend";
 
 const steps = [
   {
@@ -31,9 +35,15 @@ const steps = [
   },
   {
     id: 3,
-    title: "Finalizing output",
-    description: "Preparing references and opening the editor view.",
+    title: "Running validation",
+    description: "Scoring AI patterns and source overlap before final approval.",
     icon: Layers,
+  },
+  {
+    id: 4,
+    title: "Finalizing result",
+    description: "Preparing the accepted draft or review report.",
+    icon: FileText,
   },
 ];
 
@@ -198,12 +208,14 @@ export default function ProcessingClientPage({
         }
 
         setProgress(job.progress.percent);
-        if (job.status === "GENERATING") {
+        if (job.progress.current_step === "generation") {
           setCurrentStep(2);
-        } else if (job.status === "GENERATED") {
+        } else if (job.progress.current_step === "validation") {
           setCurrentStep(3);
+        } else if (job.progress.current_step === "finalizing") {
+          setCurrentStep(4);
         } else if (job.status === "DONE") {
-          setCurrentStep(3);
+          setCurrentStep(4);
         } else if (job.status === "FAILED") {
           setCurrentStep((previous) => Math.max(previous, 2));
         } else {
@@ -215,19 +227,26 @@ export default function ProcessingClientPage({
             window.clearInterval(pollTimer);
             pollTimer = null;
           }
+          const result = await fetchGenerationJobResult(currentJobId, controller.signal);
+
+          if (!active || controller.signal.aborted) {
+            return;
+          }
+
           setProcessingState({ kind: "success" });
           if (!redirectScheduledRef.current) {
             redirectScheduledRef.current = true;
             window.setTimeout(() => {
-              const nextParams = new URLSearchParams({
-                projectId: currentProjectId,
-              });
-              if (title) {
-                nextParams.set("title", title);
-              }
-
               startTransition(() => {
-                router.push(`/editor?${nextParams.toString()}`);
+                if (result.final_disposition === "accepted" && result.editor_url) {
+                  router.push(result.editor_url);
+                  return;
+                }
+                const nextParams = new URLSearchParams({
+                  projectId: currentProjectId,
+                  jobId: currentJobId,
+                });
+                router.push(`/plagiarism?${nextParams.toString()}`);
               });
             }, 500);
           }
@@ -293,8 +312,8 @@ export default function ProcessingClientPage({
     processingState.kind === "error"
       ? processingState.message
       : processingState.kind === "success"
-        ? "Your manuscript is ready. The editor will open automatically."
-        : "Drafting manuscript sections in IEEE format.\nThe editor will open automatically when ready.";
+        ? "Your validation report is ready. The next workspace will open automatically."
+        : "Drafting manuscript sections in IEEE format and running fast validation.\nThe next workspace will open automatically when ready.";
 
   const statusLabel =
     processingState.kind === "error"

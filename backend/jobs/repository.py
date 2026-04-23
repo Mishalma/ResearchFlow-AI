@@ -13,7 +13,15 @@ from models.job import JobRecord
 
 logger = logging.getLogger("papereasy.backend.jobs.repository")
 
-ACTIVE_JOB_STATUSES = {"CREATED", "GENERATION_REQUESTED", "GENERATING", "GENERATED"}
+ACTIVE_JOB_STATUSES = {
+    "CREATED",
+    "GENERATION_REQUESTED",
+    "GENERATING",
+    "GENERATED",
+    "VALIDATION_REQUESTED",
+    "VALIDATING",
+    "FINALIZING",
+}
 
 
 class JobRepository(Protocol):

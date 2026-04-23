@@ -18,6 +18,7 @@ from models.generation import (
 from models.job import GenerationTaskRequest, JobRecord
 from models.job import WorkflowArtifactPointer
 from models.project import ProjectRecord
+from models.validation import ValidationReport, ValidationSectionReport, ValidationServiceResponse
 
 
 @pytest.fixture
@@ -50,7 +51,15 @@ class InMemoryJobRepository:
 
     def find_active_by_user(self, user_id: str) -> JobRecord | None:
         for job in self.jobs.values():
-            if job.user_id == user_id and job.status in {"CREATED", "GENERATION_REQUESTED", "GENERATING"}:
+            if job.user_id == user_id and job.status in {
+                "CREATED",
+                "GENERATION_REQUESTED",
+                "GENERATING",
+                "GENERATED",
+                "VALIDATION_REQUESTED",
+                "VALIDATING",
+                "FINALIZING",
+            }:
                 return job
         return None
 
@@ -120,6 +129,42 @@ def _artifact_pointer(version: str, uri: str) -> WorkflowArtifactPointer:
         content_type="application/json",
         created_at=datetime.now(UTC),
         checksum_sha256=None,
+    )
+
+
+def _make_validation_response(*, routing_decision: str = "clean", ai_score: float = 0.11, plagiarism_score: float = 2.4):
+    return ValidationServiceResponse(
+        job_id="job-123",
+        status="VALIDATING",
+        stage="validation",
+        output={
+            "mode": "fast",
+            "ai_score": ai_score,
+            "plagiarism_score": plagiarism_score,
+            "confidence_band": "low" if routing_decision == "clean" else "medium",
+            "routing_decision": routing_decision,
+            "section_flags": [],
+            "validation_report_uri": "gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v1.json",
+            "report": ValidationReport(
+                ai_score=ai_score,
+                plagiarism_score=plagiarism_score,
+                confidence_band="low" if routing_decision == "clean" else "medium",
+                routing_decision=routing_decision,
+                deep_validation_used=False,
+                sections=[
+                    ValidationSectionReport(
+                        section_name="introduction",
+                        ai_score=ai_score,
+                        plagiarism_score=plagiarism_score,
+                        status="clean" if routing_decision == "clean" else "needs_manual_review",
+                        risk="low" if routing_decision == "clean" else "medium",
+                        summary=["Validation summary."],
+                        spans=[],
+                    )
+                ],
+                decision_summary="Validation complete.",
+            ),
+        },
     )
 
 
@@ -215,6 +260,11 @@ async def test_run_generation_task_success_transitions_to_done(monkeypatch):
             )
 
     monkeypatch.setattr("jobs.service.get_generation_service_client", lambda: FakeGenerationClient())
+    class FakeValidationClient:
+        async def run_validation(self, request):
+            return _make_validation_response()
+
+    monkeypatch.setattr("jobs.service.get_validation_service_client", lambda: FakeValidationClient())
 
     def fake_save_generated_paper(**kwargs):
         return project.model_copy(
@@ -270,11 +320,16 @@ async def test_run_generation_task_success_transitions_to_done(monkeypatch):
     assert saved.status == "DONE"
     assert saved.stage == "done"
     assert saved.artifacts.draft_v1 is not None
+    assert saved.artifacts.final_accepted_draft is not None
     assert saved.artifacts.final_report is not None
-    assert saved.scores.ai_score is None
-    assert saved.scores.routing_decision == "pending"
+    assert saved.scores.ai_score == 0.11
+    assert saved.scores.plagiarism_score == 2.4
+    assert saved.scores.routing_decision == "clean"
     assert ("GENERATING", "generation") in repository.save_history
-    assert ("GENERATED", "finalize") in repository.save_history
+    assert ("GENERATED", "generation") in repository.save_history
+    assert ("VALIDATION_REQUESTED", "validation") in repository.save_history
+    assert ("VALIDATING", "validation") in repository.save_history
+    assert ("FINALIZING", "finalize") in repository.save_history
     assert calls
     status_response = get_job_status(job.job_id, project.owner_uid)
     assert status_response.progress.current_step == "complete"
@@ -318,3 +373,174 @@ async def test_run_generation_task_failure_transitions_to_failed(monkeypatch):
     assert saved.status == "FAILED"
     assert saved.error is not None
     assert saved.error.stage == "generation"
+
+
+@pytest.mark.anyio
+async def test_run_generation_task_manual_review_does_not_write_final_accepted_draft(monkeypatch):
+    repository = InMemoryJobRepository()
+    project = _make_project()
+    job = JobRecord(
+        job_id="job-123",
+        project_id=project.id,
+        user_id=project.owner_uid,
+        idempotency_key="phase3-project-123",
+        status="GENERATION_REQUESTED",
+    )
+    repository.save(job)
+
+    generated_paper = _make_generated_paper()
+    metadata = _make_generation_metadata()
+
+    monkeypatch.setattr("jobs.service.get_job_repository", lambda: repository)
+    monkeypatch.setattr("jobs.service.get_project", lambda project_id, owner_uid: project)
+
+    class FakeGenerationClient:
+        async def run_generation(self, request):
+            return GenerationServiceResponse(
+                job_id=request.job_id,
+                project_id=request.project_id,
+                generated_paper=generated_paper,
+                metadata=metadata,
+                generated_figures=None,
+                generated_tables=None,
+                figure_table_status="skipped",
+                figure_table_error=None,
+                boundary="formatting_complete",
+            )
+
+    class FakeValidationClient:
+        async def run_validation(self, request):
+            return _make_validation_response(
+                routing_decision="borderline",
+                ai_score=0.31,
+                plagiarism_score=6.2,
+            )
+
+    monkeypatch.setattr("jobs.service.get_generation_service_client", lambda: FakeGenerationClient())
+    monkeypatch.setattr("jobs.service.get_validation_service_client", lambda: FakeValidationClient())
+    monkeypatch.setattr(
+        "jobs.service.save_generated_paper",
+        lambda **kwargs: project.model_copy(
+            update={
+                "generated_paper": generated_paper,
+                "generation_metadata": metadata,
+                "display_paper_text": generated_paper.formatted_text,
+                "latex_ready": generated_paper.latex_ready,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "jobs.service.store_generated_draft_artifact",
+        lambda project_id, job_id, version, generated_paper: _artifact_pointer(
+            version,
+            f"gs://bucket/projects/{project_id}/jobs/{job_id}/drafts/{version}.json",
+        ),
+    )
+    monkeypatch.setattr(
+        "jobs.service.store_final_accepted_draft_artifact",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not store final accepted draft")),
+    )
+    monkeypatch.setattr(
+        "jobs.service.store_job_result_report",
+        lambda project_id, job_id, result: _artifact_pointer(
+            "final_report",
+            f"gs://bucket/projects/{project_id}/jobs/{job_id}/reports/final_report.json",
+        ),
+    )
+
+    class _Storage:
+        def get_uri(self, key: str) -> str:
+            return f"gs://bucket/{key}"
+
+    monkeypatch.setattr("jobs.service.get_object_storage", lambda: _Storage())
+
+    await run_generation_task(
+        GenerationTaskRequest(
+            task_id="task-123",
+            job_id=job.job_id,
+            project_id=project.id,
+            user_id=project.owner_uid,
+            idempotency_key=job.idempotency_key,
+        )
+    )
+
+    saved = repository.get(job.job_id)
+    assert saved is not None
+    assert saved.status == "DONE"
+    assert saved.scores.routing_decision == "borderline"
+    assert saved.artifacts.final_accepted_draft is None
+
+
+@pytest.mark.anyio
+async def test_run_generation_task_validation_failure_transitions_to_failed(monkeypatch):
+    repository = InMemoryJobRepository()
+    project = _make_project()
+    job = JobRecord(
+        job_id="job-123",
+        project_id=project.id,
+        user_id=project.owner_uid,
+        idempotency_key="phase3-project-123",
+        status="GENERATION_REQUESTED",
+    )
+    repository.save(job)
+
+    generated_paper = _make_generated_paper()
+    metadata = _make_generation_metadata()
+
+    monkeypatch.setattr("jobs.service.get_job_repository", lambda: repository)
+    monkeypatch.setattr("jobs.service.get_project", lambda project_id, owner_uid: project)
+
+    class FakeGenerationClient:
+        async def run_generation(self, request):
+            return GenerationServiceResponse(
+                job_id=request.job_id,
+                project_id=request.project_id,
+                generated_paper=generated_paper,
+                metadata=metadata,
+                generated_figures=None,
+                generated_tables=None,
+                figure_table_status="skipped",
+                figure_table_error=None,
+                boundary="formatting_complete",
+            )
+
+    class FailingValidationClient:
+        async def run_validation(self, request):
+            raise RuntimeError("validation service exploded")
+
+    monkeypatch.setattr("jobs.service.get_generation_service_client", lambda: FakeGenerationClient())
+    monkeypatch.setattr("jobs.service.get_validation_service_client", lambda: FailingValidationClient())
+    monkeypatch.setattr(
+        "jobs.service.save_generated_paper",
+        lambda **kwargs: project.model_copy(
+            update={
+                "generated_paper": generated_paper,
+                "generation_metadata": metadata,
+                "display_paper_text": generated_paper.formatted_text,
+                "latex_ready": generated_paper.latex_ready,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "jobs.service.store_generated_draft_artifact",
+        lambda project_id, job_id, version, generated_paper: _artifact_pointer(
+            version,
+            f"gs://bucket/projects/{project_id}/jobs/{job_id}/drafts/{version}.json",
+        ),
+    )
+
+    await run_generation_task(
+        GenerationTaskRequest(
+            task_id="task-123",
+            job_id=job.job_id,
+            project_id=project.id,
+            user_id=project.owner_uid,
+            idempotency_key=job.idempotency_key,
+        )
+    )
+
+    saved = repository.get(job.job_id)
+    assert saved is not None
+    assert saved.status == "FAILED"
+    assert saved.error is not None
+    assert saved.error.stage == "validation"

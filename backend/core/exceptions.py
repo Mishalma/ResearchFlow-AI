@@ -147,6 +147,15 @@ class GenerationError(AppError):
         super().__init__(message, status.HTTP_502_BAD_GATEWAY, details=details)
 
 
+class ValidationError(AppError):
+    def __init__(
+        self,
+        message: str = "Unable to validate the generated paper",
+        details: dict[str, object] | None = None,
+    ):
+        super().__init__(message, status.HTTP_502_BAD_GATEWAY, details=details)
+
+
 class PaperValidationError(GenerationError):
     def __init__(self, agent_name: str, issues: list[str]):
         joined = "; ".join(issues)

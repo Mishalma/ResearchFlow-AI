@@ -10,6 +10,34 @@ from persistence.base import DownloadedObject, ObjectStorage, ProjectRepository,
 logger = logging.getLogger("papereasy.backend.persistence.gcp")
 
 
+def _describe_storage_failure(exc: Exception) -> str:
+    message = " ".join(str(exc).split())
+    lowered = message.lower()
+
+    if "billing account for the owning project is disabled" in lowered:
+        return (
+            "The bucket's owning Google Cloud project has billing disabled. "
+            "Re-enable billing or use a bucket in an active billed project."
+        )
+
+    if "403" in lowered or "forbidden" in lowered or "permission" in lowered:
+        return (
+            "Google Cloud returned 403 Forbidden. Verify bucket IAM for the runtime "
+            "service account and confirm project billing is active."
+        )
+
+    return message
+
+
+def _build_storage_error_message(action: str, key: str, bucket_name: str, exc: Exception) -> str:
+    preposition = "to" if action == "upload" else "from"
+    detail = _describe_storage_failure(exc)
+    message = f"Unable to {action} object '{key}' {preposition} Cloud Storage bucket '{bucket_name}'."
+    if detail:
+        return f"{message} {detail}"
+    return message
+
+
 class FirestoreProjectRepository(ProjectRepository):
     def __init__(self, *, project_id: str, collection_name: str):
         try:
@@ -97,7 +125,9 @@ class GCSObjectStorage(ObjectStorage):
                 self._client.project,
                 source_path,
             )
-            raise PersistenceError(f"Unable to upload object '{key}' to Cloud Storage.") from exc
+            raise PersistenceError(
+                _build_storage_error_message("upload", key, self._bucket.name, exc)
+            ) from exc
 
         return StoredObject(
             key=key,
@@ -118,7 +148,9 @@ class GCSObjectStorage(ObjectStorage):
                 self._bucket.name,
                 self._client.project,
             )
-            raise PersistenceError(f"Unable to download object '{key}' from Cloud Storage.") from exc
+            raise PersistenceError(
+                _build_storage_error_message("download", key, self._bucket.name, exc)
+            ) from exc
 
         return DownloadedObject(
             key=key,
@@ -140,7 +172,9 @@ class GCSObjectStorage(ObjectStorage):
                 self._bucket.name,
                 self._client.project,
             )
-            raise PersistenceError(f"Unable to download object '{key}' from Cloud Storage.") from exc
+            raise PersistenceError(
+                _build_storage_error_message("download", key, self._bucket.name, exc)
+            ) from exc
 
         return destination
 

@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from models.generation import GeneratedPaper, GenerationMetadata
+from models.validation import ValidationReport
 
 WorkflowJobStatus = Literal[
     "CREATED",
@@ -130,7 +131,7 @@ class CreateJobResponse(BaseModel):
 
 
 class JobProgress(BaseModel):
-    current_step: Literal["queued", "generation", "complete", "failed"]
+    current_step: Literal["queued", "generation", "validation", "finalizing", "complete", "failed"]
     percent: int = Field(ge=0, le=100)
 
 
@@ -167,6 +168,7 @@ class JobResultResponse(BaseModel):
     editor_url: str | None = None
     generated_paper: GeneratedPaper | None = None
     metadata: GenerationMetadata | None = None
+    report: ValidationReport | None = None
     artifacts: JobResultArtifacts = Field(default_factory=JobResultArtifacts)
     error: WorkflowErrorPayload | None = None
 

@@ -40,7 +40,9 @@ from models.job import (
     WorkflowScores,
 )
 from app.services.generation_service import get_generation_service_client
+from app.services.validation_service import get_validation_service_client
 from app.services.project_service import get_project, save_generated_paper
+from models.validation import ValidationServiceRequest
 from persistence import get_object_storage
 
 logger = logging.getLogger("papereasy.backend.jobs.service")
@@ -75,11 +77,13 @@ def _job_error(stage: str, error: Exception, *, retryable: bool = False, attempt
 
 def _progress_for_status(status: str) -> JobProgress:
     if status in {"CREATED", "GENERATION_REQUESTED"}:
-        return JobProgress(current_step="queued", percent=25)
+        return JobProgress(current_step="queued", percent=20)
     if status == "GENERATING":
-        return JobProgress(current_step="generation", percent=70)
-    if status == "GENERATED":
-        return JobProgress(current_step="generation", percent=90)
+        return JobProgress(current_step="generation", percent=55)
+    if status in {"GENERATED", "VALIDATION_REQUESTED", "VALIDATING"}:
+        return JobProgress(current_step="validation", percent=80 if status != "VALIDATING" else 88)
+    if status == "FINALIZING":
+        return JobProgress(current_step="finalizing", percent=96)
     if status == "DONE":
         return JobProgress(current_step="complete", percent=100)
     return JobProgress(current_step="failed", percent=100)
@@ -135,12 +139,25 @@ def _build_job_result(
         final_disposition=final_disposition,
         validation_mode=job.validation_mode,
         boundary=boundary,
-        editor_url=f"/editor?projectId={job.project_id}" if final_disposition != "failed" else None,
+        editor_url=(
+            f"/editor?projectId={job.project_id}"
+            if final_disposition in {"accepted", "accepted_after_fix"}
+            else None
+        ),
         generated_paper=project.generated_paper,
         metadata=project.generation_metadata,
+        report=None,
         artifacts=_result_artifacts_from_job(job),
         error=job.error,
     )
+
+
+def _final_disposition_from_routing(routing_decision: str) -> WorkflowFinalDisposition:
+    if routing_decision == "clean":
+        return "accepted"
+    if routing_decision in {"borderline", "flagged", "manual_review_required"}:
+        return "manual_review_required"
+    return "failed"
 
 
 def create_generation_job(
@@ -298,11 +315,6 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
             version="draft_v1",
             generated_paper=generation_result.generated_paper,
         )
-        final_accepted_draft = store_final_accepted_draft_artifact(
-            job.project_id,
-            job.job_id,
-            generation_result.generated_paper,
-        )
 
         score_update = WorkflowScores(
             ai_score=None,
@@ -315,15 +327,73 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
         job = _save_job(
             job,
             status="GENERATED",
-            stage="finalize",
+            stage="generation",
             current_draft_uri=draft_v1.uri,
             artifacts=job.artifacts.model_copy(
                 update={
                     "draft_v1": draft_v1,
-                    "final_accepted_draft": final_accepted_draft,
                 }
             ),
             scores=score_update,
+            error=None,
+        )
+
+        validation_client = get_validation_service_client()
+        job = _save_job(
+            job,
+            status="VALIDATION_REQUESTED",
+            stage="validation",
+            validation_mode="fast",
+            error=None,
+        )
+        job = _save_job(
+            job,
+            status="VALIDATING",
+            stage="validation",
+        )
+
+        validation_result = await validation_client.run_validation(
+            ValidationServiceRequest(
+                task_id=f"validation-{job.job_id}",
+                job_id=job.job_id,
+                project_id=job.project_id,
+                user_id=job.user_id,
+                idempotency_key=job.idempotency_key,
+                expected_status="VALIDATING",
+                current_draft_uri=draft_v1.uri,
+                artifacts={"extracted_text_uri": job.artifacts.extracted_text.uri if job.artifacts.extracted_text else None},
+                config={"mode": "fast", "changed_sections_only": False},
+            )
+        )
+        validation_output = validation_result.output
+        final_disposition = _final_disposition_from_routing(validation_output.routing_decision)
+
+        final_accepted_draft = None
+        if final_disposition == "accepted":
+            final_accepted_draft = store_final_accepted_draft_artifact(
+                job.project_id,
+                job.job_id,
+                generation_result.generated_paper,
+            )
+
+        job = _save_job(
+            job,
+            status="FINALIZING",
+            stage="finalize",
+            scores=WorkflowScores(
+                ai_score=validation_output.ai_score,
+                plagiarism_score=validation_output.plagiarism_score,
+                confidence_band=validation_output.confidence_band,
+                routing_decision=validation_output.routing_decision,
+                deep_validation_used=False,
+            ),
+            artifacts=job.artifacts.model_copy(
+                update=(
+                    {"final_accepted_draft": final_accepted_draft}
+                    if final_accepted_draft is not None
+                    else {}
+                )
+            ),
             error=None,
         )
 
@@ -332,12 +402,13 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
             job_id=job.job_id,
             project_id=job.project_id,
             status="DONE",
-            final_disposition="accepted",
+            final_disposition=final_disposition,
             validation_mode=job.validation_mode,
             boundary="formatting_complete",
-            editor_url=f"/editor?projectId={job.project_id}",
+            editor_url=f"/editor?projectId={job.project_id}" if final_disposition == "accepted" else None,
             generated_paper=updated_project.generated_paper,
             metadata=updated_project.generation_metadata,
+            report=validation_output.report,
             artifacts=_result_artifacts_from_job(job).model_copy(
                 update={"final_report_uri": predicted_final_report_uri}
             ),
@@ -358,11 +429,12 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
         )
     except Exception as exc:
         logger.exception("Workflow generation failed for job %s", job.job_id)
+        failed_stage = job.stage if job.stage in {"validation", "finalize"} else "generation"
         _save_job(
             job,
             status="FAILED",
             stage="failed",
-            error=_job_error("generation", exc),
+            error=_job_error(failed_stage, exc),
             timestamps=job.timestamps.model_copy(
                 update={"updated_at": _timestamp(), "completed_at": _timestamp()}
             ),

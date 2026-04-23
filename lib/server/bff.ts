@@ -59,6 +59,17 @@ export class ApiRouteError extends Error {
   }
 }
 
+type BackendTarget =
+  | {
+      kind: "cloud-run";
+      serviceUrl: URL;
+      targetAudience: string;
+    }
+  | {
+      kind: "direct";
+      serviceUrl: URL;
+    };
+
 function parseCookieValue(cookieHeader: string | null, name: string) {
   if (!cookieHeader) {
     return null;
@@ -82,6 +93,18 @@ function parseCookieValue(cookieHeader: string | null, name: string) {
   return null;
 }
 
+function getDirectBackendServiceUrl() {
+  const value =
+    process.env.BACKEND_BASE_URL?.trim() ||
+    process.env.NEXT_PUBLIC_BACKEND_URL?.trim();
+
+  if (!value) {
+    return null;
+  }
+
+  return new URL(value);
+}
+
 function getCloudRunServiceUrl() {
   const value = process.env.CLOUD_RUN_SERVICE_URL?.trim();
 
@@ -93,6 +116,23 @@ function getCloudRunServiceUrl() {
   }
 
   return new URL(value);
+}
+
+function getBackendTarget(): BackendTarget {
+  const directServiceUrl = getDirectBackendServiceUrl();
+  if (directServiceUrl) {
+    return {
+      kind: "direct",
+      serviceUrl: directServiceUrl,
+    };
+  }
+
+  const serviceUrl = getCloudRunServiceUrl();
+  return {
+    kind: "cloud-run",
+    serviceUrl,
+    targetAudience: getTargetAudience(serviceUrl),
+  };
 }
 
 function getTargetAudience(serviceUrl: URL) {
@@ -135,8 +175,18 @@ function filterResponseHeaders(source: Headers) {
   return filtered;
 }
 
-function normalizeProxyError(error: unknown): ApiRouteError {
+function normalizeProxyError(
+  error: unknown,
+  targetKind: BackendTarget["kind"] | null,
+): ApiRouteError {
   const message = error instanceof Error ? error.message : "Unexpected proxy failure.";
+
+  if (/invalid url/i.test(message)) {
+    return new ApiRouteError(
+      500,
+      "The server proxy has an invalid backend URL configuration.",
+    );
+  }
 
   if (/missing cloud_run_service_url/i.test(message)) {
     return new ApiRouteError(
@@ -146,23 +196,38 @@ function normalizeProxyError(error: unknown): ApiRouteError {
   }
 
   if (/default credentials|application default credentials|google authentication/i.test(message)) {
-    return new ApiRouteError(
-      500,
-      "Google Cloud authentication is not configured for the server proxy.",
-    );
+    return targetKind === "cloud-run"
+      ? new ApiRouteError(
+          500,
+          "Google Cloud authentication is not configured for the server proxy.",
+        )
+      : new ApiRouteError(
+          502,
+          "The server proxy could not authenticate with the configured backend service.",
+        );
   }
 
   if (/permission|forbidden|invoker|unauthorized|401|403/i.test(message)) {
-    return new ApiRouteError(
-      502,
-      "The server proxy could not authenticate with the private Cloud Run service.",
-    );
+    return targetKind === "cloud-run"
+      ? new ApiRouteError(
+          502,
+          "The server proxy could not authenticate with the private Cloud Run service.",
+        )
+      : new ApiRouteError(
+          502,
+          "The server proxy could not authenticate with the configured backend service.",
+        );
   }
 
-  return new ApiRouteError(
-    502,
-    "The server proxy could not reach the private Cloud Run service.",
-  );
+  return targetKind === "direct"
+    ? new ApiRouteError(
+        502,
+        "The server proxy could not reach the configured backend service.",
+      )
+    : new ApiRouteError(
+        502,
+        "The server proxy could not reach the private Cloud Run service.",
+      );
 }
 
 function getClientIp(request: Request) {
@@ -282,19 +347,22 @@ export async function forwardCloudRunRequest(options: {
   search?: string;
 }) {
   let targetUrl: URL | null = null;
+  let targetKind: BackendTarget["kind"] | null = null;
 
   try {
-    const serviceUrl = getCloudRunServiceUrl();
-    const targetAudience = getTargetAudience(serviceUrl);
+    const target = getBackendTarget();
+    targetKind = target.kind;
     targetUrl = buildTargetUrl(
-      serviceUrl,
+      target.serviceUrl,
       options.pathSegments,
       options.search ?? new URL(options.request.url).search,
     );
 
     const outboundHeaders = filterRequestHeaders(options.request.headers);
-    const idToken = await getCloudRunIdToken(targetAudience);
-    ensureCloudRunAuthHeader(outboundHeaders, idToken);
+    if (target.kind === "cloud-run") {
+      const idToken = await getCloudRunIdToken(target.targetAudience);
+      ensureCloudRunAuthHeader(outboundHeaders, idToken);
+    }
 
     // When we rebuild a multipart body in the BFF, the browser's original
     // boundary no longer matches. Let fetch generate the correct header.
@@ -323,9 +391,10 @@ export async function forwardCloudRunRequest(options: {
 
     return upstreamResponse;
   } catch (error) {
-    const normalized = normalizeProxyError(error);
-    console.error("Cloud Run proxy request failed.", {
+    const normalized = normalizeProxyError(error, targetKind);
+    console.error("Backend proxy request failed.", {
       method: options.request.method,
+      targetKind: targetKind ?? "unresolved",
       targetUrl: targetUrl?.toString() ?? "unresolved",
       error: error instanceof Error ? error.message : "Unknown error",
     });

@@ -286,7 +286,7 @@ gcloud builds submit --config cloudbuild-generation.yaml \
 
 This deploys `papereasy-generation` with:
 
-- private Cloud Run ingress (`--ingress=internal`)
+- public ingress with authenticated invocation only (`--ingress=all` plus `--no-allow-unauthenticated`)
 - authenticated invocation only
 - a 30 minute request timeout
 - `uvicorn app.generation_main:app`
@@ -301,6 +301,32 @@ GENERATION_SERVICE_TIMEOUT_SECONDS=1500
 ```
 
 The backend service account must also have `roles/run.invoker` on the generation service.
+
+### Phase 3 validation-service deploy
+
+Phase 3 adds a separate internal validation service for fast AI-risk and overlap scoring. Deploy it with:
+
+```bash
+gcloud builds submit --config cloudbuild-validation.yaml \
+  --substitutions=_SERVICE_ACCOUNT=YOUR_VALIDATION_SERVICE_ACCOUNT,_GCS_BUCKET=YOUR_BUCKET
+```
+
+This deploys `papereasy-validation` with:
+
+- public ingress with authenticated invocation only
+- a 3 minute request timeout
+- `uvicorn app.validation_main:app`
+
+After the validation service is deployed, update the main backend service to call it by setting:
+
+```env
+WORKFLOW_VALIDATION_BACKEND=service
+VALIDATION_SERVICE_BASE_URL=https://YOUR-VALIDATION-SERVICE-URL
+VALIDATION_SERVICE_AUDIENCE=https://YOUR-VALIDATION-SERVICE-URL
+VALIDATION_SERVICE_TIMEOUT_SECONDS=120
+```
+
+The backend service account must also have `roles/run.invoker` on the validation service.
 
 ## Verification
 

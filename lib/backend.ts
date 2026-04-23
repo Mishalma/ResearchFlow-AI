@@ -153,8 +153,54 @@ export type WorkflowErrorPayload = {
 };
 
 export type WorkflowJobProgress = {
-  current_step: "queued" | "generation" | "complete" | "failed";
+  current_step:
+    | "queued"
+    | "generation"
+    | "validation"
+    | "finalizing"
+    | "complete"
+    | "failed";
   percent: number;
+};
+
+export type ValidationReportSpan = {
+  section_name: string;
+  start_char: number;
+  end_char: number;
+  matched_text: string;
+  provider_name: string;
+  similarity_score: number | null;
+  matched_source_title: string | null;
+  matched_source_url: string | null;
+  classification: string;
+  severity: number;
+  remediation_actions: string[];
+  metadata: Record<string, unknown>;
+};
+
+export type ValidationSectionReport = {
+  section_name: string;
+  ai_score: number | null;
+  plagiarism_score: number;
+  status: string;
+  risk: "low" | "medium" | "severe";
+  summary: string[];
+  spans: ValidationReportSpan[];
+};
+
+export type ValidationReport = {
+  ai_score: number | null;
+  plagiarism_score: number;
+  confidence_band: "unknown" | "low" | "medium" | "high";
+  routing_decision:
+    | "pending"
+    | "clean"
+    | "borderline"
+    | "flagged"
+    | "manual_review_required";
+  deep_validation_used: boolean;
+  sections: ValidationSectionReport[];
+  decision_summary: string;
 };
 
 export type CreateJobResponse = {
@@ -208,6 +254,7 @@ export type JobResultResponse = {
     trace_id: string;
     agent_timings: AgentTiming[];
   } | null;
+  report: ValidationReport | null;
   artifacts: JobResultArtifacts;
   error: WorkflowErrorPayload | null;
 };
