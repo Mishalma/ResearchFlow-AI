@@ -45,10 +45,11 @@ export default function PlagiarismReportPage() {
     if (!jobId) {
       return () => controller.abort();
     }
+    const reportJobId = jobId;
 
     async function loadReport() {
       try {
-        const result = await fetchGenerationJobResult(jobId, controller.signal);
+        const result = await fetchGenerationJobResult(reportJobId, controller.signal);
         if (controller.signal.aborted) {
           return;
         }
