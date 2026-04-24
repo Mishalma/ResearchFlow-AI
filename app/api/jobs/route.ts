@@ -21,7 +21,7 @@ const CreateJobRequestSchema = z.object({
     .object({
       validation_depth: z.literal("standard").optional(),
       enable_fix_loop: z.boolean().optional(),
-      max_iterations: z.number().int().min(1).max(5).optional(),
+      max_iterations: z.number().int().min(1).max(3).optional(),
     })
     .optional(),
 });

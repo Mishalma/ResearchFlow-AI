@@ -466,7 +466,7 @@ export async function createGenerationJob(
       config: {
         validation_depth: "standard",
         enable_fix_loop: true,
-        max_iterations: 5,
+        max_iterations: 3,
       },
     }),
     signal,

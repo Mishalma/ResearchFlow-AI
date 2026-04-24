@@ -200,7 +200,7 @@ def create_generation_job(
     current_user: AuthenticatedRequestUser,
     idempotency_key: str,
     enable_fix_loop: bool = True,
-    max_iterations: int = 5,
+    max_iterations: int = 3,
 ) -> tuple[JobRecord, bool]:
     normalized_key = idempotency_key.strip()
     if len(normalized_key) < 8:
@@ -231,7 +231,7 @@ def create_generation_job(
         user_id=current_user.user_id,
         idempotency_key=normalized_key,
         enable_fix_loop=enable_fix_loop,
-        max_iterations=max(1, min(5, int(max_iterations))),
+        max_iterations=max(1, min(3, int(max_iterations))),
         artifacts=WorkflowArtifacts(
             raw_upload=None,
             extracted_text=extracted_text_artifact,

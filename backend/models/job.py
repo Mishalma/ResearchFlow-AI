@@ -37,7 +37,7 @@ def _timestamp() -> datetime:
 class WorkflowJobConfig(BaseModel):
     validation_depth: Literal["standard"] = "standard"
     enable_fix_loop: bool = True
-    max_iterations: int = Field(default=5, ge=1, le=5)
+    max_iterations: int = Field(default=3, ge=1, le=3)
 
 
 class WorkflowArtifactPointer(BaseModel):
@@ -78,7 +78,7 @@ class WorkflowScores(BaseModel):
 class FixSummary(BaseModel):
     attempted: bool = False
     status: Literal["not_needed", "applied", "failed"] = "not_needed"
-    iterations: int = Field(default=0, ge=0, le=5)
+    iterations: int = Field(default=0, ge=0, le=3)
     changed_sections: list[str] = Field(default_factory=list)
     rewriter_mode: str | None = None
 
@@ -115,8 +115,8 @@ class JobRecord(BaseModel):
     stage: WorkflowJobStage = "job"
     validation_mode: WorkflowValidationMode = "none"
     enable_fix_loop: bool = True
-    iteration: int = Field(default=0, ge=0, le=5)
-    max_iterations: int = Field(default=5, ge=1, le=5)
+    iteration: int = Field(default=0, ge=0, le=3)
+    max_iterations: int = Field(default=3, ge=1, le=3)
     idempotency_key: str = Field(min_length=8)
     current_draft_uri: str | None = None
     artifacts: WorkflowArtifacts = Field(default_factory=WorkflowArtifacts)
@@ -158,7 +158,7 @@ class JobStatusResponse(BaseModel):
     status: WorkflowJobStatus
     stage: WorkflowJobStage
     validation_mode: WorkflowValidationMode
-    iteration: int = Field(ge=0, le=5)
+    iteration: int = Field(ge=0, le=3)
     progress: JobProgress
     current_draft_uri: str | None = None
     scores: WorkflowScores
