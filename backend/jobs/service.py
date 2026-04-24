@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.auth import AuthenticatedRequestUser
+from core.config import get_settings
 from core.exceptions import (
     AppError,
     EmptyGenerationSourceError,
@@ -80,7 +81,8 @@ def _job_error(stage: str, error: Exception, *, retryable: bool = False, attempt
     )
 
 
-def _progress_for_status(status: str) -> JobProgress:
+def _progress_for_job(job: JobRecord) -> JobProgress:
+    status = job.status
     if status in {"CREATED", "GENERATION_REQUESTED"}:
         return JobProgress(current_step="queued", percent=20)
     if status == "GENERATING":
@@ -103,6 +105,8 @@ def _result_artifacts_from_job(job: JobRecord) -> JobResultArtifacts:
         draft_v1_uri=job.artifacts.draft_v1.uri if job.artifacts.draft_v1 else None,
         draft_v2_uri=job.artifacts.draft_v2.uri if job.artifacts.draft_v2 else None,
         draft_v3_uri=job.artifacts.draft_v3.uri if job.artifacts.draft_v3 else None,
+        draft_v4_uri=job.artifacts.draft_v4.uri if job.artifacts.draft_v4 else None,
+        draft_v5_uri=job.artifacts.draft_v5.uri if job.artifacts.draft_v5 else None,
         final_report_uri=job.artifacts.final_report.uri if job.artifacts.final_report else None,
         final_accepted_draft_uri=(
             job.artifacts.final_accepted_draft.uri if job.artifacts.final_accepted_draft else None
@@ -162,17 +166,17 @@ def _build_job_result(
 
 
 def _final_disposition_from_routing(routing_decision: str) -> WorkflowFinalDisposition:
-    if routing_decision == "clean":
+    if routing_decision == "accepted":
         return "accepted"
-    if routing_decision in {"borderline", "flagged", "manual_review_required"}:
-        return "manual_review_required"
+    if routing_decision == "flagged":
+        return "flagged"
     return "failed"
 
 
 def _build_fix_targets(validation_output: ValidationServiceOutput) -> list[FixSectionTarget]:
     targets: list[FixSectionTarget] = []
     for flag in validation_output.section_flags:
-        if flag.flag_type != "ai" or flag.risk != "medium":
+        if flag.flag_type != "ai" or flag.risk not in {"medium", "severe"}:
             continue
         targets.append(
             FixSectionTarget(
@@ -196,7 +200,7 @@ def create_generation_job(
     current_user: AuthenticatedRequestUser,
     idempotency_key: str,
     enable_fix_loop: bool = True,
-    max_iterations: int = 3,
+    max_iterations: int = 5,
 ) -> tuple[JobRecord, bool]:
     normalized_key = idempotency_key.strip()
     if len(normalized_key) < 8:
@@ -227,7 +231,7 @@ def create_generation_job(
         user_id=current_user.user_id,
         idempotency_key=normalized_key,
         enable_fix_loop=enable_fix_loop,
-        max_iterations=max(1, min(3, int(max_iterations))),
+        max_iterations=max(1, min(5, int(max_iterations))),
         artifacts=WorkflowArtifacts(
             raw_upload=None,
             extracted_text=extracted_text_artifact,
@@ -355,7 +359,6 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
             plagiarism_score=None,
             confidence_band="unknown",
             routing_decision="pending",
-            deep_validation_used=False,
         )
 
         job = _save_job(
@@ -372,6 +375,7 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
             error=None,
         )
 
+        resolved_settings = get_settings()
         validation_client = get_validation_service_client()
         fix_client = get_fix_service_client()
         current_draft_uri = draft_v1.uri
@@ -385,7 +389,7 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
             changed_sections=[],
             rewriter_mode=None,
         )
-        final_disposition: WorkflowFinalDisposition = "manual_review_required"
+        final_disposition: WorkflowFinalDisposition = "flagged"
 
         while True:
             job = _save_job(
@@ -399,6 +403,7 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
                 job,
                 status="VALIDATING",
                 stage="validation",
+                validation_mode="fast",
             )
 
             validation_result = await validation_client.run_validation(
@@ -426,7 +431,7 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
             changed_section_ids = []
 
             routing_decision = latest_validation_output.routing_decision
-            if routing_decision == "clean":
+            if routing_decision == "accepted":
                 final_disposition = "accepted_after_fix" if fix_summary.attempted else "accepted"
                 if fix_summary.attempted:
                     current_generated_paper = load_generated_draft_artifact(current_draft_uri)
@@ -450,22 +455,16 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
                     )
                 break
 
-            if routing_decision == "flagged" or not _fix_iteration_available(job):
-                final_disposition = "manual_review_required"
+            fix_targets = _build_fix_targets(latest_validation_output)
+            if not fix_targets:
+                final_disposition = "flagged"
                 break
 
-            fix_targets = _build_fix_targets(latest_validation_output)
-            next_iteration = job.iteration + 1
-            if not fix_targets:
-                fix_summary = FixSummary(
-                    attempted=True,
-                    status="failed",
-                    iterations=next_iteration,
-                    changed_sections=[],
-                    rewriter_mode=None,
-                )
-                final_disposition = "manual_review_required"
+            if not _fix_iteration_available(job):
+                final_disposition = "flagged"
                 break
+
+            next_iteration = job.iteration + 1
 
             job = _save_job(
                 job,
@@ -505,7 +504,7 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
                     changed_sections=[],
                     rewriter_mode=None,
                 )
-                final_disposition = "manual_review_required"
+                final_disposition = "flagged"
                 break
 
             fix_summary = fix_result.output.fix_summary
@@ -515,13 +514,13 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
                 or draft_artifact is None
                 or not fix_result.output.changed_sections
             ):
-                final_disposition = "manual_review_required"
+                final_disposition = "flagged"
                 break
 
             current_draft_uri = fix_result.output.updated_draft_uri
             changed_section_ids = list(fix_result.output.changed_sections)
             artifact_updates: dict[str, object] = {}
-            if draft_artifact.version in {"draft_v2", "draft_v3"}:
+            if draft_artifact.version in {"draft_v2", "draft_v3", "draft_v4", "draft_v5"}:
                 artifact_updates[draft_artifact.version] = draft_artifact
             job = _save_job(
                 job,
@@ -552,7 +551,6 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
                 plagiarism_score=latest_validation_output.plagiarism_score if latest_validation_output else None,
                 confidence_band=latest_validation_output.confidence_band if latest_validation_output else "unknown",
                 routing_decision=latest_validation_output.routing_decision if latest_validation_output else "pending",
-                deep_validation_used=False,
             ),
             artifacts=job.artifacts.model_copy(
                 update=(
@@ -622,7 +620,7 @@ def get_job_status(job_id: str, user_id: str) -> JobStatusResponse:
         stage=job.stage,
         validation_mode=job.validation_mode,
         iteration=job.iteration,
-        progress=_progress_for_status(job.status),
+        progress=_progress_for_job(job),
         current_draft_uri=job.current_draft_uri,
         scores=job.scores,
         error=job.error,

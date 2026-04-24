@@ -29,6 +29,7 @@ from originality.config import OriginalityConfig
 from originality.schemas import ProviderFinding, ProviderSectionScan
 from originality.utils import SECTION_ORDER, build_section_map, summarize_status_counts
 from validation.config import ValidationConfig
+from validation.desklib_detector import get_desklib_detector
 from validation.stylometry import iter_sentence_spans, stylometry_profile, tokenize_words
 
 logger = logging.getLogger("papereasy.validation.runtime")
@@ -74,20 +75,16 @@ def _merge_span_lengths(spans: list[tuple[int, int]]) -> int:
 def _confidence_band(routing_decision: str) -> str:
     if routing_decision == "flagged":
         return "high"
-    if routing_decision == "borderline":
-        return "medium"
-    if routing_decision == "clean":
+    if routing_decision == "accepted":
         return "low"
     return "unknown"
 
 
 def _decision_summary(routing_decision: str) -> str:
-    if routing_decision == "clean":
-        return "The manuscript cleared the fast AI and overlap validation checks."
-    if routing_decision == "borderline":
-        return "The manuscript requires manual review because fast validation found moderate AI or overlap risk."
+    if routing_decision == "accepted":
+        return "The manuscript stayed within the 10% acceptance thresholds for AI and source overlap."
     if routing_decision == "flagged":
-        return "The manuscript requires manual review because fast validation found high AI or overlap risk."
+        return "The manuscript stayed above the 10% acceptance threshold for AI or source overlap."
     return "Validation is pending."
 
 
@@ -98,39 +95,45 @@ def _draft_revision_from_uri(uri: str) -> str:
     return f"v{match.group(1)}"
 
 
-def _section_status(spans: list, *, ai_score: float | None, plagiarism_score: float, config: ValidationConfig) -> tuple[str, str, list[str]]:
+def _section_status(
+    spans: list,
+    *,
+    ai_score: float | None,
+    plagiarism_score: float,
+    config: ValidationConfig,
+) -> tuple[str, str, list[str]]:
     classifications = {span.classification for span in spans}
     severe = (
         "likely_unattributed_copying" in classifications
-        or (ai_score is not None and ai_score >= config.ai_flag_threshold)
-        or plagiarism_score > config.plagiarism_flag_threshold
+        or (ai_score is not None and ai_score > config.ai_severe_threshold)
+        or plagiarism_score > config.plagiarism_severe_threshold
     )
-    medium = (
+    flagged = (
         severe
         or bool(classifications & {"possible_self_overlap", "manual_review_required", "uncited_close_paraphrase"})
-        or (ai_score is not None and ai_score >= config.ai_clean_threshold)
-        or plagiarism_score >= config.plagiarism_clean_threshold
+        or (ai_score is not None and ai_score > config.ai_accept_threshold)
+        or plagiarism_score > config.plagiarism_accept_threshold
     )
 
     if severe:
         return (
-            "blocked",
+            "flagged",
             "severe",
-            ["High-risk AI or unattributed overlap signals were detected in this section."],
+            ["This section stayed above the acceptance threshold with severe AI or source-overlap signals."],
         )
-    if medium:
+    if flagged:
         return (
-            "needs_manual_review",
+            "flagged",
             "medium",
-            ["This section contains moderate AI or overlap signals and should be reviewed manually."],
+            ["This section stayed above the 10% acceptance threshold and was flagged for remediation."],
         )
     if spans:
         return (
-            "clean_with_notes",
+            "accepted_with_notes",
             "low",
-            ["Only low-risk or citation-safe overlap was detected in this section."],
+            ["Only citation-safe or low-risk overlap was detected in this section."],
         )
-    return ("clean", "low", ["No blocking AI or overlap signals were detected in this section."])
+    return ("accepted", "low", ["This section stayed within the 10% acceptance thresholds."])
 
 
 def _routing_decision_for_report(
@@ -140,22 +143,14 @@ def _routing_decision_for_report(
     section_flags: list[ValidationSectionFlag],
     config: ValidationConfig,
 ) -> str:
-    severe_section_flag = any(flag.risk == "severe" for flag in section_flags)
-    medium_section_flag = any(flag.risk == "medium" for flag in section_flags)
-
+    has_any_flag = any(flag.risk in {"medium", "severe"} for flag in section_flags)
     if (
-        (ai_score is not None and ai_score >= config.ai_flag_threshold)
-        or plagiarism_score > config.plagiarism_flag_threshold
-        or severe_section_flag
+        (ai_score is not None and ai_score > config.ai_accept_threshold)
+        or plagiarism_score > config.plagiarism_accept_threshold
+        or has_any_flag
     ):
         return "flagged"
-    if (
-        (ai_score is not None and ai_score >= config.ai_clean_threshold)
-        or plagiarism_score >= config.plagiarism_clean_threshold
-        or medium_section_flag
-    ):
-        return "borderline"
-    return "clean"
+    return "accepted"
 
 
 def _build_source_index(source_text: str, *, ngram_size: int, min_tokens: int) -> tuple[list[_SourceSentence], dict[tuple[str, ...], set[int]]]:
@@ -296,27 +291,27 @@ def _build_section_flags_from_reports(
 ) -> list[ValidationSectionFlag]:
     section_flags: list[ValidationSectionFlag] = []
     for section in section_reports:
-        if section.ai_score is not None and section.ai_score >= config.ai_clean_threshold:
+        if section.ai_score is not None and section.ai_score > config.ai_accept_threshold:
             section_flags.append(
                 ValidationSectionFlag(
                     section_id=section.section_name,
                     flag_type="ai",
                     score=round(section.ai_score, 4),
-                    risk="severe" if section.ai_score >= config.ai_flag_threshold else "medium",
-                    summary=f"{section.section_name.replace('_', ' ').title()} shows elevated AI-style signals.",
+                    risk="severe" if section.ai_score > config.ai_severe_threshold else "medium",
+                    summary=f"{section.section_name.replace('_', ' ').title()} stayed above the AI acceptance threshold.",
                 )
             )
         suspicious_spans = _suspicious_spans_for_section(section)
-        if suspicious_spans and section.plagiarism_score >= config.plagiarism_clean_threshold:
+        if suspicious_spans and section.plagiarism_score > config.plagiarism_accept_threshold:
             section_flags.append(
                 ValidationSectionFlag(
                     section_id=section.section_name,
                     flag_type="plagiarism",
                     score=section.plagiarism_score,
                     risk="severe"
-                    if section.plagiarism_score > config.plagiarism_flag_threshold
+                    if section.plagiarism_score > config.plagiarism_severe_threshold
                     else "medium",
-                    summary=f"{section.section_name.replace('_', ' ').title()} contains lexical overlap with the uploaded source.",
+                    summary=f"{section.section_name.replace('_', ' ').title()} stayed above the overlap acceptance threshold.",
                 )
             )
     return section_flags
@@ -340,9 +335,21 @@ def _perplexity_risk(text: str, *, config: ValidationConfig) -> tuple[float | No
     return value, round(max(0.0, min(1.0, normalized)), 4)
 
 
-def _ai_score_for_section(text: str, *, config: ValidationConfig) -> tuple[float | None, dict[str, float]]:
+def _ai_score_for_section(
+    text: str,
+    *,
+    config: ValidationConfig,
+) -> tuple[float | None, dict[str, float | int | str]]:
     if not text.strip():
         return None, {}
+
+    if config.ai_detector_backend == "desklib":
+        detector = get_desklib_detector(
+            config,
+            project_id=get_settings().google_cloud_project,
+        )
+        prediction = detector.score_text(text)
+        return prediction.score, prediction.as_metadata()
 
     detector_scores = composite_ai_score(text)
     stylometry_scores = stylometry_profile(text)
@@ -412,9 +419,16 @@ def _build_section_report(
 
     metadata_summary: list[str] = []
     if ai_metadata:
-        metadata_summary.append(
-            f"AI composite {ai_metadata.get('composite_score', 0.0):.2f}; stylometry {ai_metadata.get('stylometry_score', 0.0):.2f}"
-        )
+        if "desklib_probability" in ai_metadata:
+            metadata_summary.append(
+                "AI detector "
+                f"{ai_metadata.get('desklib_probability', 0.0):.2f} "
+                f"({ai_metadata.get('ai_detector_model_id', 'desklib')})"
+            )
+        else:
+            metadata_summary.append(
+                f"AI composite {ai_metadata.get('composite_score', 0.0):.2f}; stylometry {ai_metadata.get('stylometry_score', 0.0):.2f}"
+            )
 
     return ValidationSectionReport(
         section_name=section_name,
@@ -535,7 +549,6 @@ async def execute_fast_validation(
         plagiarism_score=plagiarism_score,
         confidence_band=_confidence_band(routing_decision),
         routing_decision=routing_decision,
-        deep_validation_used=False,
         sections=section_reports,
         decision_summary=_decision_summary(routing_decision),
     )
@@ -544,6 +557,14 @@ async def execute_fast_validation(
         "project_id": request.project_id,
         "mode": request.config.mode,
         "provider_name": resolved_validation_config.provider_name,
+        "ai_detector": {
+            "backend": resolved_validation_config.ai_detector_backend,
+            "model_id": resolved_validation_config.ai_detector_model_id
+            if resolved_validation_config.ai_detector_backend == "desklib"
+            else "heuristic",
+            "max_length": resolved_validation_config.ai_detector_max_length,
+            "batch_size": resolved_validation_config.ai_detector_batch_size,
+        },
         "report": report,
         "section_flags": section_flags,
         "section_status_counts": summarize_status_counts(section.status for section in section_reports),

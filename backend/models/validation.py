@@ -6,9 +6,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from originality.schemas import OriginalitySpan
 
-ValidationMode = Literal["fast", "deep"]
+ValidationMode = Literal["fast"]
 ValidationConfidenceBand = Literal["unknown", "low", "medium", "high"]
-ValidationRoutingDecision = Literal["pending", "clean", "borderline", "flagged", "manual_review_required"]
+ValidationRoutingDecision = Literal["pending", "accepted", "flagged"]
 ValidationSectionRisk = Literal["low", "medium", "severe"]
 ValidationSectionFlagType = Literal["ai", "plagiarism"]
 
@@ -59,7 +59,6 @@ class ValidationReport(BaseModel):
     plagiarism_score: float = Field(default=0.0, ge=0.0, le=100.0)
     confidence_band: ValidationConfidenceBand = "unknown"
     routing_decision: ValidationRoutingDecision = "pending"
-    deep_validation_used: bool = False
     sections: list[ValidationSectionReport] = Field(default_factory=list)
     decision_summary: str = Field(min_length=1)
 

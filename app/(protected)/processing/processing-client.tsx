@@ -49,7 +49,7 @@ const steps = [
   {
     id: 5,
     title: "Finalizing result",
-    description: "Preparing the accepted draft or review report.",
+    description: "Preparing the accepted draft or final flagged report.",
     icon: FileText,
   },
 ];
@@ -325,8 +325,8 @@ export default function ProcessingClientPage({
     processingState.kind === "error"
       ? processingState.message
       : processingState.kind === "success"
-        ? "Your validation report is ready. The next workspace will open automatically."
-        : "Structuring the paper, drafting sections, validating AI signals, and applying targeted fixes when needed.\nThe next workspace will open automatically when ready.";
+        ? "Your final workflow result is ready. The next workspace will open automatically."
+        : "Structuring the paper, running validation, and applying targeted AI fixes when needed.\nThe next workspace will open automatically when ready.";
 
   const statusLabel =
     processingState.kind === "error"

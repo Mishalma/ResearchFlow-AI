@@ -115,7 +115,6 @@ export type WorkflowJobStatus =
   | "GENERATED"
   | "VALIDATION_REQUESTED"
   | "VALIDATING"
-  | "DEEP_VALIDATION_REQUESTED"
   | "FIX_REQUESTED"
   | "FIXING"
   | "FINALIZING"
@@ -135,13 +134,7 @@ export type WorkflowScores = {
   ai_score: number | null;
   plagiarism_score: number | null;
   confidence_band: "unknown" | "low" | "medium" | "high";
-  routing_decision:
-    | "pending"
-    | "clean"
-    | "borderline"
-    | "flagged"
-    | "manual_review_required";
-  deep_validation_used: boolean;
+  routing_decision: "pending" | "accepted" | "flagged";
 };
 
 export type WorkflowErrorPayload = {
@@ -193,13 +186,7 @@ export type ValidationReport = {
   ai_score: number | null;
   plagiarism_score: number;
   confidence_band: "unknown" | "low" | "medium" | "high";
-  routing_decision:
-    | "pending"
-    | "clean"
-    | "borderline"
-    | "flagged"
-    | "manual_review_required";
-  deep_validation_used: boolean;
+  routing_decision: "pending" | "accepted" | "flagged";
   sections: ValidationSectionReport[];
   decision_summary: string;
 };
@@ -225,7 +212,7 @@ export type JobStatusResponse = {
   project_id: string;
   status: WorkflowJobStatus;
   stage: WorkflowJobStage;
-  validation_mode: "none" | "fast" | "deep";
+  validation_mode: "none" | "fast";
   iteration: number;
   progress: WorkflowJobProgress;
   current_draft_uri: string | null;
@@ -239,6 +226,8 @@ export type JobResultArtifacts = {
   draft_v1_uri: string | null;
   draft_v2_uri: string | null;
   draft_v3_uri: string | null;
+  draft_v4_uri: string | null;
+  draft_v5_uri: string | null;
   final_report_uri: string | null;
   final_accepted_draft_uri: string | null;
 };
@@ -247,12 +236,8 @@ export type JobResultResponse = {
   job_id: string;
   project_id: string;
   status: "DONE" | "FAILED";
-  final_disposition:
-    | "accepted"
-    | "accepted_after_fix"
-    | "manual_review_required"
-    | "failed";
-  validation_mode: "none" | "fast" | "deep";
+  final_disposition: "accepted" | "accepted_after_fix" | "flagged" | "failed";
+  validation_mode: "none" | "fast";
   boundary: "legacy_full_pipeline" | "formatting_complete" | null;
   editor_url: string | null;
   generated_paper: GeneratedPaper | null;
@@ -481,7 +466,7 @@ export async function createGenerationJob(
       config: {
         validation_depth: "standard",
         enable_fix_loop: true,
-        max_iterations: 3,
+        max_iterations: 5,
       },
     }),
     signal,

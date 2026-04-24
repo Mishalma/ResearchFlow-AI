@@ -16,6 +16,9 @@ pytest
 httpx
 transformers
 torch
+safetensors
+accelerate
+sentencepiece
 spacy
 sentence-transformers>=2.2.0
 nltk>=3.8

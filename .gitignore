@@ -44,6 +44,12 @@ next-env.d.ts
 **/__pycache__/
 *.py[cod]
 backend/.tmp/
+backend/.tmp-tests/
+backend/.model-cache/
+backend/gcs-model-cache-test*/
+backend/pytest-cache-files-*/
+backend/pytest-temp*/
+backend/verify-temp/
 backend/uploads/*
 !backend/uploads/.gitkeep
 backend/static/figures/*
@@ -55,4 +61,9 @@ backend/data/*
 !backend/data/projects/
 backend/data/projects/*
 !backend/data/projects/.gitkeep
+.tmp/
+.codex-pytest-temp-*/
+pytest-cache-files-*/
+test-temp/
+verify-temp/
 .vercel

@@ -15,7 +15,6 @@ WorkflowJobStatus = Literal[
     "GENERATED",
     "VALIDATION_REQUESTED",
     "VALIDATING",
-    "DEEP_VALIDATION_REQUESTED",
     "FIX_REQUESTED",
     "FIXING",
     "FINALIZING",
@@ -24,10 +23,10 @@ WorkflowJobStatus = Literal[
 ]
 
 WorkflowJobStage = Literal["job", "generation", "validation", "fix", "finalize", "done", "failed"]
-WorkflowValidationMode = Literal["none", "fast", "deep"]
+WorkflowValidationMode = Literal["none", "fast"]
 WorkflowConfidenceBand = Literal["unknown", "low", "medium", "high"]
-WorkflowRoutingDecision = Literal["pending", "clean", "borderline", "flagged", "manual_review_required"]
-WorkflowFinalDisposition = Literal["accepted", "accepted_after_fix", "manual_review_required", "failed"]
+WorkflowRoutingDecision = Literal["pending", "accepted", "flagged"]
+WorkflowFinalDisposition = Literal["accepted", "accepted_after_fix", "flagged", "failed"]
 WorkflowBoundary = Literal["legacy_full_pipeline", "formatting_complete"]
 
 
@@ -36,9 +35,9 @@ def _timestamp() -> datetime:
 
 
 class WorkflowJobConfig(BaseModel):
-    validation_depth: Literal["standard", "deep"] = "standard"
+    validation_depth: Literal["standard"] = "standard"
     enable_fix_loop: bool = True
-    max_iterations: int = Field(default=3, ge=1, le=3)
+    max_iterations: int = Field(default=5, ge=1, le=5)
 
 
 class WorkflowArtifactPointer(BaseModel):
@@ -63,6 +62,8 @@ class WorkflowArtifacts(BaseModel):
     draft_v1: WorkflowArtifactPointer | None = None
     draft_v2: WorkflowArtifactPointer | None = None
     draft_v3: WorkflowArtifactPointer | None = None
+    draft_v4: WorkflowArtifactPointer | None = None
+    draft_v5: WorkflowArtifactPointer | None = None
     final_report: WorkflowArtifactPointer | None = None
     final_accepted_draft: WorkflowArtifactPointer | None = None
 
@@ -72,13 +73,12 @@ class WorkflowScores(BaseModel):
     plagiarism_score: float | None = Field(default=None, ge=0, le=100)
     confidence_band: WorkflowConfidenceBand = "unknown"
     routing_decision: WorkflowRoutingDecision = "pending"
-    deep_validation_used: bool = False
 
 
 class FixSummary(BaseModel):
     attempted: bool = False
     status: Literal["not_needed", "applied", "failed"] = "not_needed"
-    iterations: int = Field(default=0, ge=0, le=3)
+    iterations: int = Field(default=0, ge=0, le=5)
     changed_sections: list[str] = Field(default_factory=list)
     rewriter_mode: str | None = None
 
@@ -115,8 +115,8 @@ class JobRecord(BaseModel):
     stage: WorkflowJobStage = "job"
     validation_mode: WorkflowValidationMode = "none"
     enable_fix_loop: bool = True
-    iteration: int = Field(default=0, ge=0, le=3)
-    max_iterations: int = Field(default=3, ge=1, le=3)
+    iteration: int = Field(default=0, ge=0, le=5)
+    max_iterations: int = Field(default=5, ge=1, le=5)
     idempotency_key: str = Field(min_length=8)
     current_draft_uri: str | None = None
     artifacts: WorkflowArtifacts = Field(default_factory=WorkflowArtifacts)
@@ -140,7 +140,15 @@ class CreateJobResponse(BaseModel):
 
 
 class JobProgress(BaseModel):
-    current_step: Literal["queued", "generation", "validation", "fixing", "finalizing", "complete", "failed"]
+    current_step: Literal[
+        "queued",
+        "generation",
+        "validation",
+        "fixing",
+        "finalizing",
+        "complete",
+        "failed",
+    ]
     percent: int = Field(ge=0, le=100)
 
 
@@ -150,7 +158,7 @@ class JobStatusResponse(BaseModel):
     status: WorkflowJobStatus
     stage: WorkflowJobStage
     validation_mode: WorkflowValidationMode
-    iteration: int = Field(ge=0, le=3)
+    iteration: int = Field(ge=0, le=5)
     progress: JobProgress
     current_draft_uri: str | None = None
     scores: WorkflowScores
@@ -163,6 +171,8 @@ class JobResultArtifacts(BaseModel):
     draft_v1_uri: str | None = None
     draft_v2_uri: str | None = None
     draft_v3_uri: str | None = None
+    draft_v4_uri: str | None = None
+    draft_v5_uri: str | None = None
     final_report_uri: str | None = None
     final_accepted_draft_uri: str | None = None
 

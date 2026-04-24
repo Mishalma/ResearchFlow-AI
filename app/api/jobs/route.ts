@@ -19,9 +19,9 @@ const CreateJobRequestSchema = z.object({
   project_id: z.string().min(1, "Project ID is required."),
   config: z
     .object({
-      validation_depth: z.enum(["standard", "deep"]).optional(),
+      validation_depth: z.literal("standard").optional(),
       enable_fix_loop: z.boolean().optional(),
-      max_iterations: z.number().int().min(1).max(3).optional(),
+      max_iterations: z.number().int().min(1).max(5).optional(),
     })
     .optional(),
 });

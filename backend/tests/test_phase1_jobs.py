@@ -140,8 +140,8 @@ def _artifact_pointer(version: str, uri: str) -> WorkflowArtifactPointer:
 
 def _make_validation_response(
     *,
-    routing_decision: str = "clean",
-    ai_score: float = 0.11,
+    routing_decision: str = "accepted",
+    ai_score: float = 0.08,
     plagiarism_score: float = 2.4,
     validation_report_uri: str = "gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v1.json",
     section_flags: list[ValidationSectionFlag] | None = None,
@@ -154,23 +154,22 @@ def _make_validation_response(
             "mode": "fast",
             "ai_score": ai_score,
             "plagiarism_score": plagiarism_score,
-            "confidence_band": "low" if routing_decision == "clean" else "medium",
+            "confidence_band": "low" if routing_decision == "accepted" else "high",
             "routing_decision": routing_decision,
             "section_flags": section_flags or [],
             "validation_report_uri": validation_report_uri,
             "report": ValidationReport(
                 ai_score=ai_score,
                 plagiarism_score=plagiarism_score,
-                confidence_band="low" if routing_decision == "clean" else "medium",
+                confidence_band="low" if routing_decision == "accepted" else "high",
                 routing_decision=routing_decision,
-                deep_validation_used=False,
                 sections=[
                     ValidationSectionReport(
                         section_name="introduction",
                         ai_score=ai_score,
                         plagiarism_score=plagiarism_score,
-                        status="clean" if routing_decision == "clean" else "needs_manual_review",
-                        risk="low" if routing_decision == "clean" else "medium",
+                        status="accepted" if routing_decision == "accepted" else "flagged",
+                        risk="low" if routing_decision == "accepted" else "medium",
                         summary=["Validation summary."],
                         spans=[],
                     )
@@ -335,9 +334,9 @@ async def test_run_generation_task_success_transitions_to_done(monkeypatch):
     assert saved.artifacts.draft_v1 is not None
     assert saved.artifacts.final_accepted_draft is not None
     assert saved.artifacts.final_report is not None
-    assert saved.scores.ai_score == 0.11
+    assert saved.scores.ai_score == 0.08
     assert saved.scores.plagiarism_score == 2.4
-    assert saved.scores.routing_decision == "clean"
+    assert saved.scores.routing_decision == "accepted"
     assert ("GENERATING", "generation") in repository.save_history
     assert ("GENERATED", "generation") in repository.save_history
     assert ("VALIDATION_REQUESTED", "validation") in repository.save_history
@@ -389,7 +388,7 @@ async def test_run_generation_task_failure_transitions_to_failed(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_run_generation_task_manual_review_does_not_write_final_accepted_draft(monkeypatch):
+async def test_run_generation_task_flagged_result_does_not_write_final_accepted_draft(monkeypatch):
     repository = InMemoryJobRepository()
     project = _make_project()
     job = JobRecord(
@@ -485,7 +484,7 @@ async def test_run_generation_task_manual_review_does_not_write_final_accepted_d
 
 
 @pytest.mark.anyio
-async def test_run_generation_task_borderline_fix_can_finish_as_accepted_after_fix(monkeypatch):
+async def test_run_generation_task_fix_can_finish_as_accepted_after_fix(monkeypatch):
     repository = InMemoryJobRepository()
     project = _make_project()
     job = JobRecord(
@@ -525,8 +524,8 @@ async def test_run_generation_task_borderline_fix_can_finish_as_accepted_after_f
             validation_calls["count"] += 1
             if validation_calls["count"] == 1:
                 return _make_validation_response(
-                    routing_decision="borderline",
-                    ai_score=0.31,
+                    routing_decision="flagged",
+                    ai_score=0.18,
                     plagiarism_score=6.2,
                     validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v1.json",
                     section_flags=[
@@ -542,8 +541,8 @@ async def test_run_generation_task_borderline_fix_can_finish_as_accepted_after_f
             assert request.config.changed_sections_only is True
             assert request.config.changed_section_ids == ["introduction"]
             return _make_validation_response(
-                routing_decision="clean",
-                ai_score=0.14,
+                routing_decision="accepted",
+                ai_score=0.09,
                 plagiarism_score=2.1,
                 validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v2.json",
             )
@@ -639,14 +638,14 @@ async def test_run_generation_task_borderline_fix_can_finish_as_accepted_after_f
     assert saved.current_draft_uri == "gs://bucket/projects/project-123/jobs/job-123/drafts/draft_v2.json"
     assert saved.artifacts.draft_v2 is not None
     assert saved.artifacts.final_accepted_draft is not None
-    assert saved.scores.routing_decision == "clean"
+    assert saved.scores.routing_decision == "accepted"
     assert ("FIX_REQUESTED", "fix") in repository.save_history
     assert ("FIXING", "fix") in repository.save_history
     assert save_calls["count"] == 2
 
 
 @pytest.mark.anyio
-async def test_run_generation_task_fix_failure_finishes_manual_review(monkeypatch):
+async def test_run_generation_task_fix_failure_finishes_flagged(monkeypatch):
     repository = InMemoryJobRepository()
     project = _make_project()
     job = JobRecord(
@@ -681,8 +680,8 @@ async def test_run_generation_task_fix_failure_finishes_manual_review(monkeypatc
     class FakeValidationClient:
         async def run_validation(self, request):
             return _make_validation_response(
-                routing_decision="borderline",
-                ai_score=0.33,
+                routing_decision="flagged",
+                ai_score=0.14,
                 plagiarism_score=5.8,
                 section_flags=[
                     ValidationSectionFlag(
@@ -752,7 +751,7 @@ async def test_run_generation_task_fix_failure_finishes_manual_review(monkeypatc
     assert saved is not None
     assert saved.status == "DONE"
     assert saved.artifacts.final_accepted_draft is None
-    assert saved.scores.routing_decision == "borderline"
+    assert saved.scores.routing_decision == "flagged"
     assert ("FIX_REQUESTED", "fix") in repository.save_history
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -20,7 +21,13 @@ from models.validation import (
     ValidationServiceRequest,
     ValidationServiceResponse,
 )
-from validation.runtime import execute_fast_validation
+from validation.config import ValidationConfig
+from validation.desklib_detector import (
+    DesklibDetectorError,
+    DesklibPrediction,
+    ensure_desklib_model_available,
+)
+from validation.runtime import _ai_score_for_section, execute_fast_validation
 
 
 @pytest.fixture
@@ -64,6 +71,49 @@ def _artifact_pointer(version: str, uri: str) -> WorkflowArtifactPointer:
     )
 
 
+def test_desklib_detector_fails_fast_when_artifacts_are_missing():
+    config = ValidationConfig(
+        ai_detector_backend="desklib",
+        ai_detector_model_path=Path("missing-desklib-snapshot-for-test"),
+        ai_detector_model_gcs_uri="",
+    )
+
+    with pytest.raises(DesklibDetectorError):
+        ensure_desklib_model_available(config)
+
+
+def test_ai_score_for_section_uses_desklib_backend(monkeypatch):
+    class _FakeDetector:
+        def score_text(self, text: str) -> DesklibPrediction:
+            assert "academic" in text.lower()
+            return DesklibPrediction(
+                score=0.0732,
+                model_id="desklib/ai-text-detector-academic-v1.01",
+                device="cuda",
+                window_count=1,
+                batch_size=8,
+            )
+
+    def fake_get_detector(config: ValidationConfig, *, project_id: str = "") -> _FakeDetector:
+        assert config.ai_detector_backend == "desklib"
+        return _FakeDetector()
+
+    monkeypatch.setattr("validation.runtime.get_desklib_detector", fake_get_detector)
+
+    score, metadata = _ai_score_for_section(
+        "This academic section is being checked by the Desklib detector.",
+        config=ValidationConfig(
+            ai_detector_backend="desklib",
+            ai_detector_model_path=Path("unused-desklib-snapshot-for-test"),
+        ),
+    )
+
+    assert score == 0.0732
+    assert metadata["ai_detector_backend"] == "desklib"
+    assert metadata["ai_detector_model_id"] == "desklib/ai-text-detector-academic-v1.01"
+    assert metadata["desklib_probability"] == 0.0732
+
+
 @pytest.mark.anyio
 async def test_execute_fast_validation_returns_report_and_flags_overlap(monkeypatch):
     generated_paper = _generated_paper()
@@ -104,7 +154,7 @@ async def test_execute_fast_validation_returns_report_and_flags_overlap(monkeypa
 
     assert response.output.mode == "fast"
     assert response.output.validation_report_uri.endswith("validation_fast_v1.json")
-    assert response.output.report.routing_decision in {"borderline", "flagged"}
+    assert response.output.report.routing_decision == "flagged"
     assert response.output.report.plagiarism_score > 0
     assert any(flag.flag_type == "plagiarism" for flag in response.output.section_flags)
 
@@ -120,17 +170,16 @@ async def test_local_validation_service_client_runs_without_http(monkeypatch):
             "ai_score": 0.1,
             "plagiarism_score": 2.0,
             "confidence_band": "low",
-            "routing_decision": "clean",
+            "routing_decision": "accepted",
             "section_flags": [],
             "validation_report_uri": "gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v1.json",
             "report": {
                 "ai_score": 0.1,
                 "plagiarism_score": 2.0,
                 "confidence_band": "low",
-                "routing_decision": "clean",
-                "deep_validation_used": False,
+                "routing_decision": "accepted",
                 "sections": [],
-                "decision_summary": "Validation complete.",
+                "decision_summary": "Accepted.",
             },
         },
     }
@@ -155,7 +204,7 @@ async def test_local_validation_service_client_runs_without_http(monkeypatch):
     )
 
     assert response.job_id == "job-123"
-    assert response.output.routing_decision == "clean"
+    assert response.output.routing_decision == "accepted"
 
 
 @pytest.mark.anyio
@@ -188,8 +237,8 @@ async def test_http_validation_service_client_serializes_and_deserializes():
                     "mode": "fast",
                     "ai_score": 0.27,
                     "plagiarism_score": 6.4,
-                    "confidence_band": "medium",
-                    "routing_decision": "borderline",
+                    "confidence_band": "high",
+                    "routing_decision": "flagged",
                     "section_flags": [
                         {
                             "section_id": "introduction",
@@ -204,10 +253,9 @@ async def test_http_validation_service_client_serializes_and_deserializes():
                         "ai_score": 0.27,
                         "plagiarism_score": 6.4,
                         "confidence_band": "medium",
-                        "routing_decision": "borderline",
-                        "deep_validation_used": False,
+                        "routing_decision": "flagged",
                         "sections": [],
-                        "decision_summary": "Manual review suggested.",
+                        "decision_summary": "Flagged.",
                     },
                 },
             },
@@ -231,7 +279,7 @@ async def test_http_validation_service_client_serializes_and_deserializes():
         )
     )
 
-    assert response.output.routing_decision == "borderline"
+    assert response.output.routing_decision == "flagged"
     assert response.output.validation_report_uri.endswith("validation_fast_v1.json")
 
 
@@ -243,23 +291,22 @@ async def test_execute_fast_validation_only_rescores_changed_sections(monkeypatc
         ai_score=0.28,
         plagiarism_score=6.1,
         confidence_band="medium",
-        routing_decision="borderline",
-        deep_validation_used=False,
+        routing_decision="flagged",
         sections=[
             ValidationSectionReport(
                 section_name="abstract",
                 ai_score=0.12,
                 plagiarism_score=0.0,
-                status="clean",
+                status="accepted",
                 risk="low",
-                summary=["Abstract was clean in the previous pass."],
+                summary=["Abstract stayed within threshold in the previous pass."],
                 spans=[],
             ),
             ValidationSectionReport(
                 section_name="introduction",
                 ai_score=0.34,
                 plagiarism_score=7.5,
-                status="needs_manual_review",
+                status="flagged",
                 risk="medium",
                 summary=["Introduction required revalidation."],
                 spans=[],
@@ -268,25 +315,25 @@ async def test_execute_fast_validation_only_rescores_changed_sections(monkeypatc
                 section_name="related_work",
                 ai_score=0.18,
                 plagiarism_score=0.0,
-                status="clean",
+                status="accepted",
                 risk="low",
-                summary=["Related work stayed clean."],
+                summary=["Related work stayed within threshold."],
                 spans=[],
             ),
             ValidationSectionReport(
                 section_name="methodology",
                 ai_score=0.19,
                 plagiarism_score=0.0,
-                status="clean",
+                status="accepted",
                 risk="low",
-                summary=["Methodology stayed clean."],
+                summary=["Methodology stayed within threshold."],
                 spans=[],
             ),
             ValidationSectionReport(
                 section_name="results",
                 ai_score=0.29,
                 plagiarism_score=0.0,
-                status="needs_manual_review",
+                status="flagged",
                 risk="medium",
                 summary=["Results still carry moderate AI-style risk."],
                 spans=[],
@@ -295,31 +342,31 @@ async def test_execute_fast_validation_only_rescores_changed_sections(monkeypatc
                 section_name="discussion",
                 ai_score=0.17,
                 plagiarism_score=0.0,
-                status="clean",
+                status="accepted",
                 risk="low",
-                summary=["Discussion stayed clean."],
+                summary=["Discussion stayed within threshold."],
                 spans=[],
             ),
             ValidationSectionReport(
                 section_name="limitations",
                 ai_score=0.14,
                 plagiarism_score=0.0,
-                status="clean",
+                status="accepted",
                 risk="low",
-                summary=["Limitations stayed clean."],
+                summary=["Limitations stayed within threshold."],
                 spans=[],
             ),
             ValidationSectionReport(
                 section_name="conclusion",
                 ai_score=0.13,
                 plagiarism_score=0.0,
-                status="clean",
+                status="accepted",
                 risk="low",
-                summary=["Conclusion stayed clean."],
+                summary=["Conclusion stayed within threshold."],
                 spans=[],
             ),
         ],
-        decision_summary="Previous validation suggested manual review.",
+        decision_summary="Previous validation flagged the draft.",
     )
 
     rescored_sections: list[str] = []
@@ -340,7 +387,7 @@ async def test_execute_fast_validation_only_rescores_changed_sections(monkeypatc
             section_name=section_name,
             ai_score=0.08,
             plagiarism_score=0.0,
-            status="clean",
+            status="accepted",
             risk="low",
             summary=["Introduction was rescored after the fix."],
             spans=[],
@@ -395,4 +442,4 @@ async def test_execute_fast_validation_only_rescores_changed_sections(monkeypatc
     )
     assert results_section.summary == ["Results still carry moderate AI-style risk."]
     assert introduction_section.summary == ["Introduction was rescored after the fix."]
-    assert response.output.routing_decision == "borderline"
+    assert response.output.routing_decision == "flagged"

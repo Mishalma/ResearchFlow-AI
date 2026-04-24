@@ -22,11 +22,11 @@ type ReportState =
   | { kind: "ready"; result: JobResultResponse }
   | { kind: "error"; message: string };
 
-function scoreTone(value: number, cleanCutoff: number, flagCutoff: number) {
-  if (value > flagCutoff) {
+function scoreTone(value: number, acceptCutoff: number, severeCutoff: number) {
+  if (value > severeCutoff) {
     return "red";
   }
-  if (value >= cleanCutoff) {
+  if (value > acceptCutoff) {
     return "amber";
   }
   return "emerald";
@@ -129,8 +129,8 @@ export default function PlagiarismReportPage() {
   const { result } = state;
   const aiScorePercent = report?.ai_score != null ? Math.round(report.ai_score * 100) : null;
   const overlapPercent = report ? Math.round(report.plagiarism_score * 10) / 10 : null;
-  const aiTone = scoreTone(report?.ai_score ?? 0, 0.2, 0.45);
-  const overlapTone = scoreTone(report?.plagiarism_score ?? 0, 5, 10);
+  const aiTone = scoreTone(report?.ai_score ?? 0, 0.1, 0.1);
+  const overlapTone = scoreTone(report?.plagiarism_score ?? 0, 10, 10);
   const accepted =
     result.final_disposition === "accepted" ||
     result.final_disposition === "accepted_after_fix";
@@ -144,8 +144,7 @@ export default function PlagiarismReportPage() {
             Validation Report
           </h1>
           <p className="mt-2 max-w-2xl text-slate-400">
-            Fast validation scored AI-writing risk first, then measured lexical overlap
-            against the uploaded source document.
+            Validation checked the 10% acceptance gate and applied targeted AI fixes when the draft stayed above threshold.
           </p>
         </div>
         <div className="flex flex-wrap gap-3">
@@ -168,7 +167,7 @@ export default function PlagiarismReportPage() {
               });
             }}
           >
-            {accepted ? "Open Editor" : "Review In Editor"}
+            {accepted ? "Open Editor" : "Open Latest Draft"}
             <ArrowRight className="ml-2 h-4 w-4" />
           </Button>
         </div>
@@ -187,11 +186,9 @@ export default function PlagiarismReportPage() {
                   {aiScorePercent == null ? "--" : `${aiScorePercent}%`}
                 </p>
                 <p className="text-sm text-slate-400">
-                  {report?.routing_decision === "clean"
-                    ? "Low formulaic risk"
-                    : report?.routing_decision === "borderline"
-                      ? "Manual review suggested"
-                      : "High AI-style risk"}
+                  {report?.routing_decision === "accepted"
+                    ? "Within the 10% acceptance gate"
+                    : "Above the 10% AI threshold"}
                 </p>
               </div>
             </div>
@@ -210,7 +207,7 @@ export default function PlagiarismReportPage() {
                   {overlapPercent == null ? "--" : `${overlapPercent}%`}
                 </p>
                 <p className="text-sm text-slate-400">
-                  Internal lexical overlap with the uploaded source.
+                  Final overlap score against the uploaded source.
                 </p>
               </div>
             </div>
@@ -240,6 +237,51 @@ export default function PlagiarismReportPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Card className="border border-white/10 bg-[#181816]">
+        <CardContent className="p-6">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold text-white">Workflow Summary</h2>
+              <p className="mt-1 text-sm text-slate-400">
+                Fast validation scores the draft against the 10% acceptance threshold before the workflow finalizes.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Badge
+                variant="outline"
+                className="border-white/10 bg-white/[0.03] text-slate-200"
+              >
+                Final status {result.final_disposition.replaceAll("_", " ")}
+              </Badge>
+            </div>
+          </div>
+
+          <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-3">
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Acceptance Gate</p>
+              <p className="mt-2 text-lg font-semibold text-white">AI ≤ 10% and overlap ≤ 10%</p>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Fix Loop</p>
+              <p className="mt-2 text-lg font-semibold text-white">
+                {fixSummary?.attempted ? `${fixSummary.iterations} pass${fixSummary.iterations === 1 ? "" : "es"}` : "Not needed"}
+              </p>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Latest Draft</p>
+              <p className="mt-2 break-all text-sm font-semibold text-white">
+                {result.artifacts.draft_v5_uri ??
+                  result.artifacts.draft_v4_uri ??
+                  result.artifacts.draft_v3_uri ??
+                  result.artifacts.draft_v2_uri ??
+                  result.artifacts.draft_v1_uri ??
+                  "Unavailable"}
+              </p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {fixSummary?.attempted ? (
         <Card className="border border-white/10 bg-[#181816]">
@@ -312,7 +354,7 @@ export default function PlagiarismReportPage() {
             <div>
               <h2 className="text-xl font-semibold text-white">Flagged Sections</h2>
               <p className="mt-1 text-sm text-slate-400">
-                Section-level summaries from the fast validation pass.
+                Section-level summaries from the final validation pass.
               </p>
             </div>
             <Badge
@@ -326,7 +368,7 @@ export default function PlagiarismReportPage() {
           <div className="mt-6 space-y-4">
             {flaggedSections.length === 0 ? (
               <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">
-                No section-level issues were flagged in the fast validation pass.
+                No section-level issues remained above the final acceptance threshold.
               </div>
             ) : (
               flaggedSections.map((section) => (
@@ -352,7 +394,7 @@ export default function PlagiarismReportPage() {
                         </Badge>
                       </div>
                       <p className="mt-2 text-sm text-slate-300">
-                        {section.summary[0] ?? "Manual review recommended for this section."}
+                        {section.summary[0] ?? "This section stayed above the product threshold."}
                       </p>
                     </div>
 

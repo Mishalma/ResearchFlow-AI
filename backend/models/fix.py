@@ -35,7 +35,7 @@ class FixServiceRequest(BaseModel):
     idempotency_key: str = Field(min_length=8)
     current_draft_uri: str = Field(min_length=1)
     validation_report_uri: str = Field(min_length=1)
-    iteration: int = Field(default=1, ge=1, le=3)
+    iteration: int = Field(default=1, ge=1, le=5)
     mode: FixMode = "ai_style"
     targets: list[FixSectionTarget] = Field(default_factory=list)
 

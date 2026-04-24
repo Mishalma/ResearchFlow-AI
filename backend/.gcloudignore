@@ -4,12 +4,13 @@ __pycache__/
 .env
 .model-cache/
 .tmp/
+.tmp-tests/
 uploads/
 outputs/
 static/figures/
 data/
 deep_validation/
-.tmp-*
-pytest-cache-files-*
-pytest-temp/
+gcs-model-cache-test*/
+pytest-cache-files-*/
+pytest-temp*/
 verify-temp/

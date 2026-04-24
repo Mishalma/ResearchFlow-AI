@@ -40,7 +40,7 @@ def _next_draft_version(current_draft_uri: str) -> str:
     if not match:
         return "draft_v2"
     next_version = int(match.group(1)) + 1
-    if next_version > 3:
+    if next_version > 5:
         raise ValueError("Fix loop exceeded the supported immutable draft versions.")
     return f"draft_v{next_version}"
 
@@ -54,7 +54,7 @@ def _load_section_targets(request: FixServiceRequest) -> list[FixSectionTarget]:
     targets: list[FixSectionTarget] = []
     for raw_flag in raw_flags:
         flag = ValidationSectionFlag.model_validate(raw_flag)
-        if flag.flag_type != "ai" or flag.risk != "medium":
+        if flag.flag_type != "ai" or flag.risk not in {"medium", "severe"}:
             continue
         targets.append(
             FixSectionTarget(

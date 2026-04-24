@@ -15,6 +15,8 @@ from app.core.exceptions import AppError
 from app.services.file_service import ensure_upload_dir
 from persistence import get_object_storage, get_project_repository
 from services.figure_service import ensure_figure_dir
+from validation.config import ValidationConfig
+from validation.desklib_detector import warm_desklib_detector
 
 settings = get_settings()
 settings.static_dir.mkdir(parents=True, exist_ok=True)
@@ -48,6 +50,11 @@ async def lifespan(_app: FastAPI):
     settings.temp_dir.mkdir(parents=True, exist_ok=True)
     get_project_repository()
     get_object_storage()
+    validation_config = ValidationConfig.from_settings(settings)
+    warm_desklib_detector(
+        validation_config,
+        project_id=settings.google_cloud_project,
+    )
     logger.info("Validation service ready with persistence backend: %s", settings.persistence_backend)
     yield
 
