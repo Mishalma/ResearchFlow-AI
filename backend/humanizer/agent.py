@@ -126,8 +126,10 @@ class HumanizerRuntimeAgent:
                 run_log.append(f"{section_name}: skipped (outside targeted fix scope)")
                 continue
 
+            externally_targeted = targeted_sections is not None and section_name in targeted_sections
             if (
-                before_scores.get("composite_score", 0.0) <= self.config.max_ai_pattern_score_to_pass
+                not externally_targeted
+                and before_scores.get("composite_score", 0.0) <= self.config.max_ai_pattern_score_to_pass
                 and before_scores.get("burstiness", 0.0) >= self.config.min_burstiness_to_pass
             ):
                 updated_sections[section_name] = original_text
@@ -136,11 +138,16 @@ class HumanizerRuntimeAgent:
                 run_log.append(f"{section_name}: pass without rewrite")
                 continue
 
+            if externally_targeted:
+                run_log.append(f"{section_name}: targeted by validation detector")
+
             rewrite_result = self.rewriter.rewrite_section(
                 section_text=original_text,
                 ai_scores=before_scores,
                 style_persona=_style_persona(section_name),
                 section_name=section_name,
+                force_rewrite=externally_targeted,
+                require_quality_improvement=not externally_targeted,
             )
             rewritten_text = rewrite_result["rewritten_text"]
             after_scores = composite_ai_score(rewritten_text)

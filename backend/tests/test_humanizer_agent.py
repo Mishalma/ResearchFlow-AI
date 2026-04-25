@@ -11,6 +11,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from agents.humanizer_agent import HumanizerAgent as PipelineHumanizerAgent
+from humanizer.agent import HumanizerRuntimeAgent
 from humanizer.agent import run_humanizer_pipeline
 from humanizer.config import HumanizerConfig
 from humanizer.detectors import PassiveVoiceAnalyzer, analyze_section, composite_ai_score
@@ -346,6 +347,116 @@ def test_valid_hf_output_is_accepted(monkeypatch: pytest.MonkeyPatch):
     )
     result = rewriter.rewrite_section(original, composite_ai_score(original), section_name="results")
 
+    assert result["rewriter_used"] == "huggingface"
+    assert result["changed"] is True
+    assert result["rewritten_text"] != original
+
+
+def test_targeted_runtime_forces_rewrite_even_when_local_score_passes(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "humanizer.agent.composite_ai_score",
+        lambda text: {
+            "composite_score": 0.1,
+            "burstiness": 0.8,
+            "transition_uniformity": 0.1,
+            "cadence_uniformity": 0.1,
+        },
+    )
+    captured: dict[str, object] = {}
+
+    def fake_rewrite_section(
+        self,
+        section_text,
+        ai_scores,
+        style_persona="Academic but conversational",
+        *,
+        section_name=None,
+        force_rewrite=False,
+        require_quality_improvement=True,
+    ):
+        del self, ai_scores, style_persona
+        captured["section_name"] = section_name
+        captured["force_rewrite"] = force_rewrite
+        captured["require_quality_improvement"] = require_quality_improvement
+        return {
+            "rewritten_text": f"{section_text} Revised.",
+            "paragraphs_targeted": 1,
+            "paragraphs_accepted": 1,
+            "paragraphs_rejected_drift": 0,
+            "rewriter_used": "vertex",
+            "changed": True,
+            "failure_reasons": [],
+        }
+
+    monkeypatch.setattr(HumanizerRewriter, "rewrite_section", fake_rewrite_section)
+
+    runtime = HumanizerRuntimeAgent(
+        config=HumanizerConfig(rewriter_backend="none", enable_perplexity=False),
+    )
+    result = runtime.run(
+        {
+            "introduction": (
+                "This section reads as locally acceptable, but Desklib still flagged it for review."
+            )
+        },
+        iteration=1,
+        target_sections={"introduction"},
+    )
+
+    assert captured == {
+        "section_name": "introduction",
+        "force_rewrite": True,
+        "require_quality_improvement": False,
+    }
+    assert result["sections_rewritten"] == 1
+    assert result["rewriter_mode"] == "vertex"
+
+
+def test_forced_rewrite_accepts_safe_candidate_without_local_quality_gain(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    score = {
+        "composite_score": 0.1,
+        "burstiness": 0.8,
+        "transition_uniformity": 0.1,
+        "cadence_uniformity": 0.1,
+    }
+    monkeypatch.setattr("humanizer.rewriter.composite_ai_score", lambda text: dict(score))
+    monkeypatch.setattr(
+        "humanizer.rewriter.verify_rewrite_safety",
+        lambda **kwargs: type("SafetyResult", (), {"passed": True, "reasons": []})(),
+    )
+    monkeypatch.setattr(
+        "humanizer.rewriter.SemanticDriftChecker.drift",
+        lambda self, original, rewritten: 0.0,
+    )
+    monkeypatch.setattr(
+        HuggingFaceRewriter,
+        "rewrite_paragraph",
+        lambda self, **kwargs: RewriteAttemptResult(
+            text=(
+                "This study compares two training settings, reports a 12% improvement [1], "
+                "and preserves \\cite{trace} across review."
+            ),
+            rewriter_used="huggingface",
+            changed=True,
+        ),
+    )
+
+    rewriter = HumanizerRewriter(HumanizerConfig(rewriter_backend="huggingface"))
+    original = (
+        "The study compares two training settings with 12% improvement [1] and preserves "
+        "\\cite{trace} across review."
+    )
+    result = rewriter.rewrite_section(
+        original,
+        composite_ai_score(original),
+        section_name="results",
+        force_rewrite=True,
+        require_quality_improvement=False,
+    )
+
+    assert result["paragraphs_targeted"] == 1
     assert result["rewriter_used"] == "huggingface"
     assert result["changed"] is True
     assert result["rewritten_text"] != original

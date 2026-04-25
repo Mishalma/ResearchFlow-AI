@@ -603,6 +603,8 @@ class HumanizerRewriter:
         style_persona: str = "Academic but conversational",
         *,
         section_name: str | None = None,
+        force_rewrite: bool = False,
+        require_quality_improvement: bool = True,
     ) -> dict[str, Any]:
         del ai_scores
         paragraphs = _split_paragraphs(section_text)
@@ -618,8 +620,10 @@ class HumanizerRewriter:
             }
 
         scored_paragraphs: list[tuple[int, dict[str, float], str]] = []
+        all_scored_paragraphs: list[tuple[int, dict[str, float], str]] = []
         for index, paragraph in enumerate(paragraphs):
             paragraph_scores = composite_ai_score(paragraph)
+            all_scored_paragraphs.append((index, paragraph_scores, paragraph))
             if (
                 paragraph_scores.get("composite_score", 0.0) > self.config.max_ai_pattern_score_to_pass
                 or paragraph_scores.get("burstiness", 0.0) < self.config.min_burstiness_to_pass
@@ -634,6 +638,11 @@ class HumanizerRewriter:
             reverse=True,
         )
         targets = scored_paragraphs[: self.config.max_target_paragraphs_per_section]
+        if force_rewrite and not targets:
+            targets = _select_substantive_paragraph_targets(
+                all_scored_paragraphs,
+                limit=self.config.max_target_paragraphs_per_section,
+            )
         if not targets:
             return {
                 "rewritten_text": section_text,
@@ -667,10 +676,11 @@ class HumanizerRewriter:
 
             rewritten = restore_protected_spans(attempt.text.strip(), spans)
             rewritten_scores = composite_ai_score(rewritten)
-            if not _rewrite_improves_quality(
+            quality_improved = _rewrite_improves_quality(
                 original_scores=paragraph_scores,
                 rewritten_scores=rewritten_scores,
-            ):
+            )
+            if require_quality_improvement and not quality_improved:
                 failure_reasons.append("quality_not_improved")
                 continue
 
@@ -771,6 +781,34 @@ class HybridSectionRewriter:
 
 def _split_paragraphs(text: str) -> list[str]:
     return [paragraph.strip() for paragraph in re.split(r"\n\s*\n", (text or "").strip()) if paragraph.strip()]
+
+
+def _select_substantive_paragraph_targets(
+    scored_paragraphs: list[tuple[int, dict[str, float], str]],
+    *,
+    limit: int,
+) -> list[tuple[int, dict[str, float], str]]:
+    """Select fallback targets when the external detector flagged a section."""
+
+    substantive = [
+        item
+        for item in scored_paragraphs
+        if _word_count(item[2]) >= 12
+    ]
+    candidates = substantive or scored_paragraphs
+    candidates.sort(
+        key=lambda item: (
+            _word_count(item[2]),
+            item[1].get("composite_score", 0.0),
+            len(item[2]),
+        ),
+        reverse=True,
+    )
+    return candidates[: max(1, limit)]
+
+
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\b[\w'-]+\b", text or ""))
 
 
 def _rewrite_similarity_threshold(semantic_drift_threshold: float) -> float:
