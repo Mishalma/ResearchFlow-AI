@@ -16,6 +16,7 @@ from humanizer.agent import run_humanizer_pipeline
 from humanizer.config import HumanizerConfig
 from humanizer.detectors import PassiveVoiceAnalyzer, analyze_section, composite_ai_score
 from humanizer.rewriter import (
+    CandidateDetectionScore,
     DeterministicRewriter,
     HuggingFaceRewriter,
     HybridSectionRewriter,
@@ -564,6 +565,175 @@ def test_multi_candidate_rewrite_selects_safe_lowest_score_candidate(
     assert result["rewriter_used"] == "vertex"
     assert "throughout the review" in result["rewritten_text"]
     assert "semantic_drift" in result["failure_reasons"]
+
+
+def test_desklib_candidate_scoring_ranks_candidates_ahead_of_local_score(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class CandidateBackend:
+        def rewrite_paragraph_candidates(self, **kwargs):
+            return [
+                RewriteAttemptResult(
+                    text="The study reports a 12% improvement [1], and \\cite{trace} documents the review.",
+                    rewriter_used="vertex",
+                    changed=True,
+                ),
+                RewriteAttemptResult(
+                    text=(
+                        "The 12% improvement [1] appears in the review record, with \\cite{trace} "
+                        "kept as supporting evidence."
+                    ),
+                    rewriter_used="vertex",
+                    changed=True,
+                ),
+            ]
+
+    class FakeDesklibScorer:
+        def score_text(self, text):
+            if "appears in the review record" in text:
+                return CandidateDetectionScore(score=0.21, backend="desklib")
+            if "documents the review" in text:
+                return CandidateDetectionScore(score=0.84, backend="desklib")
+            return CandidateDetectionScore(score=0.95, backend="desklib")
+
+    def fake_local_score(text):
+        if "documents the review" in text:
+            return {
+                "composite_score": 0.1,
+                "burstiness": 0.8,
+                "transition_uniformity": 0.1,
+                "cadence_uniformity": 0.1,
+            }
+        return {
+            "composite_score": 0.5,
+            "burstiness": 0.4,
+            "transition_uniformity": 0.4,
+            "cadence_uniformity": 0.4,
+        }
+
+    monkeypatch.setattr("humanizer.rewriter.composite_ai_score", fake_local_score)
+    monkeypatch.setattr(
+        "humanizer.rewriter.verify_rewrite_safety",
+        lambda **kwargs: type("SafetyResult", (), {"passed": True, "reasons": [], "similarity": 0.9})(),
+    )
+    monkeypatch.setattr(
+        "humanizer.rewriter.SemanticDriftChecker.drift",
+        lambda self, original, rewritten: 0.0,
+    )
+    monkeypatch.setattr(
+        HumanizerRewriter,
+        "_build_detector_scorer",
+        lambda self: FakeDesklibScorer(),
+    )
+
+    rewriter = HumanizerRewriter(
+        HumanizerConfig(
+            rewriter_backend="none",
+            use_desklib_candidate_scoring=True,
+            rewrite_candidate_count=2,
+        ),
+    )
+    rewriter.backend = CandidateBackend()
+    original = "The study reports a 12% improvement [1] with \\cite{trace}."
+    result = rewriter.rewrite_section(
+        original,
+        composite_ai_score(original),
+        section_name="results",
+        force_rewrite=True,
+        require_quality_improvement=False,
+    )
+
+    assert result["changed"] is True
+    assert result["rewriter_used"] == "vertex"
+    assert "appears in the review record" in result["rewritten_text"]
+
+
+def test_desklib_candidate_scoring_rejects_non_improving_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class CandidateBackend:
+        def rewrite_paragraph_candidates(self, **kwargs):
+            return [
+                RewriteAttemptResult(
+                    text=(
+                        "The study reports a 12% improvement [1], while \\cite{trace} remains "
+                        "available for review."
+                    ),
+                    rewriter_used="vertex",
+                    changed=True,
+                )
+            ]
+
+    class FakeDesklibScorer:
+        def score_text(self, text):
+            if "available for review" in text:
+                return CandidateDetectionScore(score=0.96, backend="desklib")
+            return CandidateDetectionScore(score=0.95, backend="desklib")
+
+    monkeypatch.setattr(
+        "humanizer.rewriter.verify_rewrite_safety",
+        lambda **kwargs: type("SafetyResult", (), {"passed": True, "reasons": [], "similarity": 0.9})(),
+    )
+    monkeypatch.setattr(
+        "humanizer.rewriter.SemanticDriftChecker.drift",
+        lambda self, original, rewritten: 0.0,
+    )
+    monkeypatch.setattr(
+        HumanizerRewriter,
+        "_build_detector_scorer",
+        lambda self: FakeDesklibScorer(),
+    )
+
+    rewriter = HumanizerRewriter(
+        HumanizerConfig(rewriter_backend="none", use_desklib_candidate_scoring=True),
+    )
+    rewriter.backend = CandidateBackend()
+    original = "The study reports a 12% improvement [1] with \\cite{trace}."
+    result = rewriter.rewrite_section(
+        original,
+        composite_ai_score(original),
+        section_name="results",
+        force_rewrite=True,
+        require_quality_improvement=False,
+    )
+
+    assert result["changed"] is False
+    assert result["rewritten_text"] == original
+    assert "desklib_not_improved" in result["failure_reasons"]
+
+
+def test_desklib_candidate_scorer_failure_returns_no_change(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FailingDesklibScorer:
+        def score_text(self, text):
+            return CandidateDetectionScore(
+                score=None,
+                backend="desklib",
+                failure_reason="desklib_scorer_unavailable",
+            )
+
+    monkeypatch.setattr(
+        HumanizerRewriter,
+        "_build_detector_scorer",
+        lambda self: FailingDesklibScorer(),
+    )
+
+    rewriter = HumanizerRewriter(
+        HumanizerConfig(rewriter_backend="none", use_desklib_candidate_scoring=True),
+    )
+    original = "The study reports a 12% improvement [1] with \\cite{trace}."
+    result = rewriter.rewrite_section(
+        original,
+        composite_ai_score(original),
+        section_name="results",
+        force_rewrite=True,
+        require_quality_improvement=False,
+    )
+
+    assert result["changed"] is False
+    assert result["rewritten_text"] == original
+    assert "desklib_scorer_unavailable" in result["failure_reasons"]
 
 
 def test_fallback_semantic_threshold_accepts_safe_candidate_when_embedding_unavailable(

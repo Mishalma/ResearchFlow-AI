@@ -105,7 +105,8 @@ def build_section_prompt(
 ) -> str:
     return (
         f"You are the Writing Agent for an IEEE paper generation pipeline.\n"
-        f"Rewrite the {section_name.replace('_', ' ')} section into polished academic prose.\n\n"
+        f"Rewrite the {section_name.replace('_', ' ')} section into natural academic prose that "
+        "sounds like a careful human researcher, not a generic template.\n\n"
         f"Rhetorical objective: {persona.rhetorical_objective}\n"
         f"Allowed tone: {persona.allowed_tone}\n"
         f"Forbidden patterns: {', '.join(persona.forbidden_patterns)}\n"
@@ -124,6 +125,11 @@ def build_section_prompt(
         "- Keep the output to one well-structured paragraph.\n"
         "- Preserve the distinction between direct evidence and inference.\n"
         "- If evidence is limited, say so clearly and professionally.\n"
+        "- Vary sentence length and rhythm; avoid using the same sentence frame twice.\n"
+        "- Prefer specific nouns and source-grounded details over broad filler phrases.\n"
+        "- Avoid stock academic openers such as 'Furthermore', 'Moreover', 'In conclusion', "
+        "'This study demonstrates', and 'The findings highlight'.\n"
+        "- Avoid over-polished marketing cadence; keep the prose scholarly, direct, and slightly uneven where natural.\n"
         "- Return JSON only.\n\n"
         f"Section skeleton JSON:\n{skeleton.model_dump_json(indent=2)}"
     )

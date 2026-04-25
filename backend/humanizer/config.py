@@ -140,6 +140,9 @@ class HumanizerConfig:
     model_timeout_seconds: int = 20
     rewrite_candidate_count: int = 3
     rewrite_mode: str = "standard"
+    use_desklib_candidate_scoring: bool = False
+    require_desklib_candidate_improvement: bool = True
+    desklib_candidate_min_improvement: float = 0.0005
     debug_logging: bool = False
 
     @property
@@ -272,6 +275,18 @@ class HumanizerConfig:
             model_timeout_seconds=max(5, _get_int("HUMANIZER_MODEL_TIMEOUT_SECONDS", 20)),
             rewrite_candidate_count=max(1, min(5, _get_int("HUMANIZER_REWRITE_CANDIDATES", 3))),
             rewrite_mode=_normalize_rewrite_mode(os.getenv("HUMANIZER_REWRITE_MODE", "standard")),
+            use_desklib_candidate_scoring=_get_bool("HUMANIZER_USE_DESKLIB_SCORING", False),
+            require_desklib_candidate_improvement=_get_bool(
+                "HUMANIZER_REQUIRE_DESKLIB_IMPROVEMENT",
+                True,
+            ),
+            desklib_candidate_min_improvement=max(
+                0.0,
+                min(
+                    1.0,
+                    _get_float("HUMANIZER_DESKLIB_MIN_IMPROVEMENT", 0.0005),
+                ),
+            ),
             debug_logging=_get_bool("HUMANIZER_DEBUG_LOGGING", resolved_settings.debug),
         )
 

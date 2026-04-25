@@ -18,9 +18,10 @@ from models.generation import ResearchPaperSchema, WritingAgentOutput
 from structuring.schemas import SectionSkeleton, SourceSpan, StructuredPaperDraft
 from writing.agent import run_writing_pipeline
 from writing.config import WritingConfig
+from writing.prompts import SECTION_PERSONAS, build_section_prompt
 from writing.schemas import BODY_WRITING_SECTIONS
 from writing.section_writer import SectionGenerationResponse, TitleGenerationResponse
-from writing.utils import annotate_section_text
+from writing.utils import annotate_section_text, confidence_profile
 
 
 def _run(coro):
@@ -341,3 +342,26 @@ def test_compatibility_wrapper_returns_legacy_snapshot(monkeypatch: pytest.Monke
     assert writing_output.written_draft is not None
     assert paper_snapshot.sections.limitations
     assert paper_snapshot.keywords == ["academic drafting", "evidence"]
+
+
+def test_section_prompt_instructs_natural_non_template_cadence():
+    skeleton = _build_structured_draft().sections["discussion"]
+    prompt = build_section_prompt(
+        section_name="discussion",
+        persona=SECTION_PERSONAS["discussion"],
+        skeleton=skeleton,
+        confidence_profile=confidence_profile(
+            skeleton.confidence,
+            low_threshold=0.35,
+            medium_threshold=0.60,
+            high_threshold=0.78,
+        ),
+        paper_topic="AI drafting",
+        paper_domain="academic workflow automation",
+        writing_style_preferences="",
+    )
+
+    assert "sounds like a careful human researcher" in prompt
+    assert "Vary sentence length and rhythm" in prompt
+    assert "Avoid stock academic openers" in prompt
+    assert "This study demonstrates" in prompt

@@ -132,6 +132,15 @@ class RewriteAttemptResult:
     failure_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class CandidateDetectionScore:
+    """AI detector score used to rank candidate rewrites without exposing text."""
+
+    score: float | None
+    backend: str = "none"
+    failure_reason: str | None = None
+
+
 class NoChangeRewriter:
     """Explicit no-op backend for production-safe no-change behavior."""
 
@@ -700,6 +709,70 @@ class DeterministicRewriter:
         return rewritten.strip()
 
 
+class DesklibCandidateScorer:
+    """Lazy local Desklib scorer for ranking rewrite candidates inside fix service."""
+
+    backend_name = "desklib"
+
+    def __init__(self, config: HumanizerConfig):
+        self.config = config
+        self._detector: Any | None = None
+        self._failure_reason: str | None = None
+        self._lock = threading.Lock()
+
+    def _load_detector(self) -> Any:
+        if self._detector is not None:
+            return self._detector
+        if self._failure_reason:
+            raise RuntimeError(self._failure_reason)
+
+        with self._lock:
+            if self._detector is not None:
+                return self._detector
+            if self._failure_reason:
+                raise RuntimeError(self._failure_reason)
+
+            try:
+                from validation.config import ValidationConfig
+                from validation.desklib_detector import get_desklib_detector
+
+                detector_config = ValidationConfig.from_settings()
+                self._detector = get_desklib_detector(
+                    detector_config,
+                    project_id=self.config.google_project,
+                )
+                logger.info("Loaded Desklib candidate scorer for humanizer ranking.")
+                return self._detector
+            except Exception as exc:  # pragma: no cover - environment/model dependent
+                self._failure_reason = "desklib_scorer_unavailable"
+                logger.warning("Desklib candidate scorer unavailable: %s", exc)
+                raise RuntimeError(self._failure_reason) from exc
+
+    def score_text(self, text: str) -> CandidateDetectionScore:
+        if not str(text or "").strip():
+            return CandidateDetectionScore(score=0.0, backend=self.backend_name)
+        try:
+            detector = self._load_detector()
+            prediction = detector.score_text(text)
+            return CandidateDetectionScore(
+                score=round(max(0.0, min(1.0, float(prediction.score))), 4),
+                backend=self.backend_name,
+            )
+        except RuntimeError as exc:
+            return CandidateDetectionScore(
+                score=None,
+                backend=self.backend_name,
+                failure_reason=str(exc) or "desklib_scorer_unavailable",
+            )
+        except Exception as exc:  # pragma: no cover - detector runtime dependent
+            logger.warning("Desklib candidate scoring failed: %s", exc)
+            return CandidateDetectionScore(
+                score=None,
+                backend=self.backend_name,
+                failure_reason="desklib_scoring_failed",
+            )
+
+
 class HumanizerRewriter:
     """Main humanizer rewrite interface with model-only no-change failure behavior."""
 
@@ -708,10 +781,12 @@ class HumanizerRewriter:
         self.mode = self.config.runtime_mode
         self.semantic_drift = SemanticDriftChecker()
         self.backend = self._build_backend()
+        self.detector_scorer = self._build_detector_scorer()
         logger.info(
-            "HumanizerRewriter initialized in %s mode with backend=%s.",
+            "HumanizerRewriter initialized in %s mode with backend=%s detector_scoring=%s.",
             self.mode,
             self.config.selected_rewriter_backend,
+            "desklib" if self.detector_scorer is not None else "disabled",
         )
 
     def _build_backend(self) -> Any:
@@ -726,6 +801,11 @@ class HumanizerRewriter:
                 timeout_seconds=self.config.model_timeout_seconds,
             )
         return NoChangeRewriter()
+
+    def _build_detector_scorer(self) -> DesklibCandidateScorer | None:
+        if not self.config.use_desklib_candidate_scoring:
+            return None
+        return DesklibCandidateScorer(self.config)
 
     def rewrite_section(
         self,
@@ -754,15 +834,20 @@ class HumanizerRewriter:
         all_scored_paragraphs: list[tuple[int, dict[str, float], str]] = []
         for index, paragraph in enumerate(paragraphs):
             paragraph_scores = composite_ai_score(paragraph)
+            paragraph_detection = _score_candidate_text(self.detector_scorer, paragraph)
+            if paragraph_detection.score is not None:
+                paragraph_scores["desklib_score"] = paragraph_detection.score
             all_scored_paragraphs.append((index, paragraph_scores, paragraph))
             if (
                 paragraph_scores.get("composite_score", 0.0) > self.config.max_ai_pattern_score_to_pass
                 or paragraph_scores.get("burstiness", 0.0) < self.config.min_burstiness_to_pass
+                or paragraph_scores.get("desklib_score", 0.0) > 0.10
             ):
                 scored_paragraphs.append((index, paragraph_scores, paragraph))
 
         scored_paragraphs.sort(
             key=lambda item: (
+                item[1].get("desklib_score", 0.0),
                 item[1].get("composite_score", 0.0),
                 1.0 - item[1].get("burstiness", 0.0),
             ),
@@ -793,6 +878,14 @@ class HumanizerRewriter:
         persona = style_persona or SECTION_STYLE_PERSONAS.get(section_name or "", "Academic but conversational")
 
         for index, paragraph_scores, original_paragraph in targets:
+            original_detection = _score_candidate_text(self.detector_scorer, original_paragraph)
+            if self.detector_scorer is not None and original_detection.score is None:
+                _append_reason(
+                    failure_reasons,
+                    original_detection.failure_reason or "desklib_scorer_unavailable",
+                )
+                continue
+
             protected_text, spans = extract_protected_spans(original_paragraph)
             attempts = _rewrite_paragraph_candidates(
                 self.backend,
@@ -812,11 +905,34 @@ class HumanizerRewriter:
 
                 rewritten = restore_protected_spans(attempt.text.strip(), spans)
                 rewritten_scores = composite_ai_score(rewritten)
+                candidate_detection = _score_candidate_text(self.detector_scorer, rewritten)
+                if self.detector_scorer is not None:
+                    if candidate_detection.score is None:
+                        _append_reason(
+                            failure_reasons,
+                            candidate_detection.failure_reason or "desklib_scoring_failed",
+                        )
+                        continue
+                    if (
+                        self.config.require_desklib_candidate_improvement
+                        and not _desklib_score_improves(
+                            original_score=original_detection.score,
+                            candidate_score=candidate_detection.score,
+                            min_improvement=self.config.desklib_candidate_min_improvement,
+                        )
+                    ):
+                        _append_reason(failure_reasons, "desklib_not_improved")
+                        continue
+
                 quality_improved = _rewrite_improves_quality(
                     original_scores=paragraph_scores,
                     rewritten_scores=rewritten_scores,
                 )
-                if require_quality_improvement and not quality_improved:
+                if (
+                    self.detector_scorer is None
+                    and require_quality_improvement
+                    and not quality_improved
+                ):
                     _append_reason(failure_reasons, "quality_not_improved")
                     continue
 
@@ -860,6 +976,7 @@ class HumanizerRewriter:
                             original=original_paragraph,
                             rewritten=rewritten,
                             rewritten_scores=rewritten_scores,
+                            desklib_score=candidate_detection.score,
                             drift_value=drift_value,
                             safety_similarity=float(getattr(safety, "similarity", 1.0)),
                             quality_improved=quality_improved,
@@ -1038,12 +1155,14 @@ def _candidate_rank_key(
     original: str,
     rewritten: str,
     rewritten_scores: dict[str, float],
+    desklib_score: float | None,
     drift_value: float | None,
     safety_similarity: float,
     quality_improved: bool,
 ) -> tuple[float, ...]:
     length_delta = abs(_word_count(original) - _word_count(rewritten)) / max(1, _word_count(original))
     return (
+        float(desklib_score) if desklib_score is not None else 1.0,
         float(rewritten_scores.get("composite_score", 0.0)),
         1.0 - float(rewritten_scores.get("burstiness", 0.0)),
         float(drift_value or 0.0),
@@ -1057,6 +1176,28 @@ def _append_reason(reasons: list[str], reason: str) -> None:
     cleaned = str(reason or "").strip()
     if cleaned and cleaned not in reasons:
         reasons.append(cleaned)
+
+
+def _score_candidate_text(
+    scorer: DesklibCandidateScorer | None,
+    text: str,
+) -> CandidateDetectionScore:
+    if scorer is None:
+        return CandidateDetectionScore(score=None, backend="none")
+    return scorer.score_text(text)
+
+
+def _desklib_score_improves(
+    *,
+    original_score: float | None,
+    candidate_score: float | None,
+    min_improvement: float,
+) -> bool:
+    if original_score is None or candidate_score is None:
+        return False
+    if candidate_score <= 0.10:
+        return True
+    return candidate_score <= original_score - max(0.0, float(min_improvement))
 
 
 def _rewrite_similarity_threshold(semantic_drift_threshold: float) -> float:
@@ -1246,7 +1387,9 @@ __all__ = [
     "VertexRewriter",
     "HuggingFaceRewriter",
     "NoChangeRewriter",
+    "DesklibCandidateScorer",
     "DeterministicRewriter",
     "HumanizerRewriter",
     "HybridSectionRewriter",
+    "CandidateDetectionScore",
 ]
