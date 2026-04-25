@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import random
 import re
+import threading
+from ast import literal_eval
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +23,7 @@ from humanizer.utils import (
 
 logger = logging.getLogger(__name__)
 _RANDOM = random.Random()
+_MODEL_TIMEOUT_SECONDS = 20
 
 TRANSITION_REPLACEMENTS = {
     "Furthermore,": ["Beyond this,", "What's more,", "Building on this,", ""],
@@ -81,7 +84,7 @@ AI_VOCAB_REPLACEMENTS = {
     r"\btapestry\b": "mix",
     r"\btestament\b": "sign",
 }
-TAILING_NEGATION_PATTERN = re.compile(r"[,—]\s*no ([a-z][a-z-]*)([.!?])", re.IGNORECASE)
+TAILING_NEGATION_PATTERN = re.compile(r"[,â€”]\s*no ([a-z][a-z-]*)([.!?])", re.IGNORECASE)
 COLLABORATIVE_ARTIFACT_PATTERNS = (
     re.compile(r"(?i)\bwould you like[^.?!]*[.?!]?"),
     re.compile(r"(?i)\blet me know if you'?d like[^.?!]*[.?!]?"),
@@ -120,8 +123,41 @@ class CompatibilityRewriteOutcome:
     analysis_after: CompatibilityAnalysis
 
 
+@dataclass(frozen=True)
+class RewriteAttemptResult:
+    text: str
+    rewriter_used: str
+    changed: bool
+    failure_reason: str | None = None
+
+
+class NoChangeRewriter:
+    """Explicit no-op backend for production-safe no-change behavior."""
+
+    backend_name = "none"
+    available = True
+
+    def rewrite_paragraph(
+        self,
+        *,
+        target_para: str,
+        section_context: str,
+        style_persona: str,
+        ai_scores: dict[str, float],
+    ) -> RewriteAttemptResult:
+        del section_context, style_persona, ai_scores
+        return RewriteAttemptResult(
+            text=target_para,
+            rewriter_used="none",
+            changed=False,
+            failure_reason="backend_disabled",
+        )
+
+
 class VertexRewriter:
-    """Primary Vertex-backed paragraph rewriter."""
+    """Vertex-backed paragraph rewriter."""
+
+    backend_name = "vertex"
 
     def __init__(self, project: str, location: str, model: str = "gemini-1.5-pro"):
         self.project = project
@@ -131,16 +167,13 @@ class VertexRewriter:
         self._client = None
 
         if not project or not location:
-            logger.warning(
-                "VertexRewriter disabled because project or location is missing.",
-            )
+            logger.warning("Vertex rewriter disabled because project or location is missing.")
             return
 
         try:
             from google import genai
             from google.genai import types
 
-            self._genai_types = types
             self._client = genai.Client(
                 vertexai=True,
                 project=project,
@@ -149,44 +182,36 @@ class VertexRewriter:
             )
             self.available = True
         except Exception as exc:  # pragma: no cover - dependency/runtime dependent
-            logger.warning("VertexRewriter initialization failed: %s", exc)
+            logger.warning("Vertex rewriter initialization failed: %s", exc)
 
     def rewrite_paragraph(
         self,
+        *,
         target_para: str,
         section_context: str,
         style_persona: str,
         ai_scores: dict[str, float],
-    ) -> str:
-        """Rewrite one paragraph with Vertex while preserving meaning and citations."""
-
+    ) -> RewriteAttemptResult:
         if not self.available or self._client is None:
-            return target_para
+            return RewriteAttemptResult(
+                text=target_para,
+                rewriter_used="none",
+                changed=False,
+                failure_reason="model_load_failed",
+            )
 
         prompt = (
-            "You are rewriting one paragraph from an academic manuscript to sound authentically "
-            "human-written. Do not change the meaning, citations, or factual content.\n\n"
-            f"STYLE TARGET: {style_persona}\n\n"
-            "DETECTED AI PATTERNS TO FIX:\n"
-            f"- Burstiness score: {ai_scores.get('burstiness', 0.0):.2f} (target > 0.45)\n"
-            f"- Cadence uniformity: {ai_scores.get('cadence_uniformity', 0.0):.2f} (target < 0.4)\n"
-            f"- Flagged transitions: {ai_scores.get('transition_uniformity', 0.0):.2f} (target < 0.1)\n\n"
-            "FULL SECTION CONTEXT (read for tone and flow — do not rewrite):\n"
+            "Rewrite one academic paragraph so it reads more naturally human-written while "
+            "preserving meaning, citations, numeric values, and technical notation.\n\n"
+            f"STYLE TARGET: {style_persona}\n"
+            f"BURSTINESS SCORE: {ai_scores.get('burstiness', 0.0):.2f}\n"
+            f"CADENCE UNIFORMITY: {ai_scores.get('cadence_uniformity', 0.0):.2f}\n"
+            f"TRANSITION UNIFORMITY: {ai_scores.get('transition_uniformity', 0.0):.2f}\n\n"
+            "SECTION CONTEXT:\n"
             f"{section_context}\n\n"
-            "PARAGRAPH TO REWRITE:\n"
+            "PARAGRAPH:\n"
             f"{target_para}\n\n"
-            "REWRITING RULES:\n"
-            "1. Vary sentence length aggressively — mix short punchy sentences (5–8 words) "
-            "with longer complex ones (25–40 words). Aim for burstiness > 0.5.\n"
-            "2. Break subject-verb-object monotony — use fronted adverbials, participial "
-            "phrases, and inverted syntax occasionally.\n"
-            "3. Remove ALL of these phrases: \"Furthermore\", \"Moreover\", \"In addition\", "
-            "\"It is worth noting\", \"It is important to note\", \"Notably\", \"Importantly\","
-            "\n   \"In conclusion\", \"This study aims to\".\n"
-            "4. Add ONE concrete real-world anchor or sensory detail if it fits naturally.\n"
-            "5. Use em-dashes and parentheticals at least once if the paragraph is > 4 sentences.\n"
-            "6. Preserve all citation markers exactly (e.g. [1], (Smith, 2020), etc.)\n"
-            "7. Output ONLY the rewritten paragraph. No preamble, no explanation.\n"
+            "Return only the rewritten paragraph."
         )
 
         def _call_vertex() -> str:
@@ -194,43 +219,247 @@ class VertexRewriter:
                 model=self.model,
                 contents=prompt,
             )
-            return (getattr(response, "text", "") or "").strip()
+            return _normalize_model_output(getattr(response, "text", "") or "")
 
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_call_vertex)
-                rewritten = future.result(timeout=15)
-            return rewritten or target_para
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(_call_vertex)
+            try:
+                rewritten = future.result(timeout=_MODEL_TIMEOUT_SECONDS)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
         except FuturesTimeoutError:
-            logger.error("Vertex rewrite timed out after 15 seconds.")
-            return target_para
+            return RewriteAttemptResult(
+                text=target_para,
+                rewriter_used="none",
+                changed=False,
+                failure_reason="generation_timeout",
+            )
         except Exception as exc:  # pragma: no cover - provider dependent
-            logger.error("Vertex rewrite failed: %s", exc)
-            return target_para
+            logger.warning("Vertex generation failed: %s", exc)
+            return RewriteAttemptResult(
+                text=target_para,
+                rewriter_used="none",
+                changed=False,
+                failure_reason="generation_failed",
+            )
+
+        if not rewritten or rewritten.strip() == target_para.strip():
+            return RewriteAttemptResult(
+                text=target_para,
+                rewriter_used="none",
+                changed=False,
+                failure_reason="generation_failed",
+            )
+
+        return RewriteAttemptResult(
+            text=rewritten.strip(),
+            rewriter_used="vertex",
+            changed=True,
+        )
+
+
+class HuggingFaceRewriter:
+    """Lazy-loaded Hugging Face seq2seq paragraph rewriter."""
+
+    backend_name = "huggingface"
+    _load_lock = threading.Lock()
+    _generation_lock = threading.Lock()
+    _cached_model_id: str | None = None
+    _cached_device: str | None = None
+    _cached_tokenizer: Any = None
+    _cached_model: Any = None
+
+    def __init__(self, config: HumanizerConfig):
+        self.config = config
+        self.available = True
+
+    def _ensure_loaded(self) -> tuple[Any, Any, str]:
+        model_id = self.config.hf_model_id.strip()
+        device = (self.config.hf_device or "cpu").strip().lower()
+        if (
+            self.__class__._cached_tokenizer is not None
+            and self.__class__._cached_model is not None
+            and self.__class__._cached_model_id == model_id
+            and self.__class__._cached_device == device
+        ):
+            return (
+                self.__class__._cached_tokenizer,
+                self.__class__._cached_model,
+                device,
+            )
+
+        with self.__class__._load_lock:
+            if (
+                self.__class__._cached_tokenizer is not None
+                and self.__class__._cached_model is not None
+                and self.__class__._cached_model_id == model_id
+                and self.__class__._cached_device == device
+            ):
+                return (
+                    self.__class__._cached_tokenizer,
+                    self.__class__._cached_model,
+                    device,
+                )
+
+            try:
+                import torch
+                from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+            except Exception as exc:  # pragma: no cover - dependency dependent
+                raise RuntimeError("model_load_failed") from exc
+
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_id,
+                    use_fast=False,
+                    local_files_only=self.config.hf_local_files_only,
+                )
+                model = AutoModelForSeq2SeqLM.from_pretrained(
+                    model_id,
+                    local_files_only=self.config.hf_local_files_only,
+                )
+                resolved_device = "cuda" if device == "auto" and torch.cuda.is_available() else device
+                if resolved_device == "auto":
+                    resolved_device = "cpu"
+                model = model.to(resolved_device)
+                model.eval()
+            except Exception as exc:  # pragma: no cover - dependency/runtime dependent
+                raise RuntimeError("model_load_failed") from exc
+
+            self.__class__._cached_tokenizer = tokenizer
+            self.__class__._cached_model = model
+            self.__class__._cached_model_id = model_id
+            self.__class__._cached_device = resolved_device
+            logger.info("Loaded Hugging Face humanizer model %s on %s.", model_id, resolved_device)
+            return tokenizer, model, resolved_device
+
+    def rewrite_paragraph(
+        self,
+        *,
+        target_para: str,
+        section_context: str,
+        style_persona: str,
+        ai_scores: dict[str, float],
+    ) -> RewriteAttemptResult:
+        del ai_scores
+        try:
+            tokenizer, model, device = self._ensure_loaded()
+        except RuntimeError as exc:
+            return RewriteAttemptResult(
+                text=target_para,
+                rewriter_used="none",
+                changed=False,
+                failure_reason=str(exc),
+            )
+
+        prompt = _build_hf_prompt(
+            target_para=target_para,
+            section_context=section_context,
+            style_persona=style_persona,
+            model_id=self.config.hf_model_id,
+        )
+
+        try:
+            encoded = tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.config.hf_max_input_tokens,
+            )
+        except Exception:
+            return RewriteAttemptResult(
+                text=target_para,
+                rewriter_used="none",
+                changed=False,
+                failure_reason="generation_failed",
+            )
+
+        input_ids = encoded.get("input_ids")
+        if input_ids is None:
+            return RewriteAttemptResult(
+                text=target_para,
+                rewriter_used="none",
+                changed=False,
+                failure_reason="generation_failed",
+            )
+        if int(getattr(input_ids, "shape", [0, 0])[-1]) >= self.config.hf_max_input_tokens:
+            return RewriteAttemptResult(
+                text=target_para,
+                rewriter_used="none",
+                changed=False,
+                failure_reason="input_too_long",
+            )
+
+        def _generate() -> str:
+            import torch
+
+            local_inputs = {
+                key: value.to(device) if hasattr(value, "to") else value
+                for key, value in encoded.items()
+            }
+            with self.__class__._generation_lock:
+                with torch.no_grad():
+                    output = model.generate(
+                        **local_inputs,
+                        max_new_tokens=self.config.hf_max_new_tokens,
+                        num_beams=self.config.hf_num_beams,
+                        do_sample=self.config.hf_do_sample,
+                        early_stopping=True,
+                    )
+            decoded = tokenizer.decode(output[0], skip_special_tokens=True)
+            return _normalize_model_output(decoded)
+
+        try:
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(_generate)
+            try:
+                rewritten = future.result(timeout=self.config.model_timeout_seconds)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+        except FuturesTimeoutError:
+            return RewriteAttemptResult(
+                text=target_para,
+                rewriter_used="none",
+                changed=False,
+                failure_reason="generation_timeout",
+            )
+        except Exception as exc:  # pragma: no cover - backend/runtime dependent
+            logger.warning("Hugging Face generation failed: %s", exc)
+            return RewriteAttemptResult(
+                text=target_para,
+                rewriter_used="none",
+                changed=False,
+                failure_reason="generation_failed",
+            )
+
+        if not rewritten or rewritten.strip() == target_para.strip():
+            return RewriteAttemptResult(
+                text=target_para,
+                rewriter_used="none",
+                changed=False,
+                failure_reason="generation_failed",
+            )
+
+        return RewriteAttemptResult(
+            text=rewritten.strip(),
+            rewriter_used="huggingface",
+            changed=True,
+        )
 
 
 class DeterministicRewriter:
-    """Fallback paragraph rewriter using layered structural transforms."""
+    """Legacy deterministic rewriter kept for compatibility-only callers/tests."""
 
     def transition_strip(self, text: str) -> str:
-        """Replace repeated stock transitions with more varied alternatives."""
-
         rewritten = text
         for source, choices in TRANSITION_REPLACEMENTS.items():
             replacement = _RANDOM.choice(choices)
-            rewritten = re.sub(
-                re.escape(source),
-                replacement,
-                rewritten,
-                flags=re.IGNORECASE,
-            )
+            rewritten = re.sub(re.escape(source), replacement, rewritten, flags=re.IGNORECASE)
         rewritten = re.sub(r"\s{2,}", " ", rewritten)
         rewritten = re.sub(r"\s+([,.;:])", r"\1", rewritten)
         return rewritten.strip()
 
     def sentence_split(self, text: str) -> str:
-        """Split long sentences once at the first eligible conjunction."""
-
         sentences = split_sentences(text)
         updated: list[str] = []
         for sentence in sentences:
@@ -254,8 +483,6 @@ class DeterministicRewriter:
         return " ".join(part for part in updated if part).strip()
 
     def sentence_fuse(self, text: str) -> str:
-        """Fuse consecutive short sentences into more varied combined lines."""
-
         sentences = split_sentences(text)
         if len(sentences) < 2:
             return text
@@ -280,15 +507,10 @@ class DeterministicRewriter:
         return " ".join(fused).strip()
 
     def fronting(self, text: str) -> str:
-        """Front up to two result-style sentences with adverbial variation."""
-
         sentences = split_sentences(text)
         fronted: list[str] = []
         rewrites = 0
-        pattern = re.compile(
-            r"^(The\s+(?:results|data|analysis|findings)\b.*)$",
-            re.IGNORECASE,
-        )
+        pattern = re.compile(r"^(The\s+(?:results|data|analysis|findings)\b.*)$", re.IGNORECASE)
         for sentence in sentences:
             if rewrites < 2 and pattern.match(sentence):
                 adverb = _RANDOM.choice(FRONTING_ADVERBS)
@@ -299,22 +521,13 @@ class DeterministicRewriter:
         return " ".join(fronted).strip()
 
     def qualifier_variation(self, text: str) -> str:
-        """Vary a small set of overused academic verbs and stock phrases."""
-
         rewritten = text
         for source, choices in QUALIFIER_REPLACEMENTS.items():
             replacement = _RANDOM.choice(choices)
-            rewritten = re.sub(
-                rf"\b{re.escape(source)}\b",
-                replacement,
-                rewritten,
-                flags=re.IGNORECASE,
-            )
+            rewritten = re.sub(rf"\b{re.escape(source)}\b", replacement, rewritten, flags=re.IGNORECASE)
         return rewritten
 
     def anti_ai_cleanup(self, text: str) -> str:
-        """Run a final deterministic cleanup pass for obvious AI-writing artifacts."""
-
         rewritten = text
         for pattern, replacement in STOCK_PHRASE_REPLACEMENTS.items():
             rewritten = re.sub(pattern, replacement, rewritten, flags=re.IGNORECASE)
@@ -322,15 +535,14 @@ class DeterministicRewriter:
             rewritten = re.sub(pattern, replacement, rewritten, flags=re.IGNORECASE)
         for pattern, replacement in AI_VOCAB_REPLACEMENTS.items():
             rewritten = re.sub(pattern, replacement, rewritten, flags=re.IGNORECASE)
-
         for pattern in COLLABORATIVE_ARTIFACT_PATTERNS:
             rewritten = pattern.sub("", rewritten)
         for pattern in GENERIC_POSITIVE_CONCLUSION_PATTERNS:
             rewritten = pattern.sub("", rewritten)
 
         rewritten = TAILING_NEGATION_PATTERN.sub(r" without \1\2", rewritten)
-        rewritten = rewritten.replace("—", ", ")
-        rewritten = rewritten.replace("“", '"').replace("”", '"').replace("’", "'")
+        rewritten = rewritten.replace("â€”", ", ")
+        rewritten = rewritten.replace("â€œ", '"').replace("â€", '"').replace("â€™", "'")
         rewritten = re.sub(r"\s{2,}", " ", rewritten)
         rewritten = re.sub(r"\s+([,.;:!?])", r"\1", rewritten)
         rewritten = re.sub(r"([,.;:!?])([A-Za-z])", r"\1 \2", rewritten)
@@ -338,8 +550,6 @@ class DeterministicRewriter:
         return rewritten.strip()
 
     def apply_all(self, text: str) -> str:
-        """Apply all deterministic rewriting passes in sequence."""
-
         rewritten = self.transition_strip(text)
         rewritten = self.sentence_split(rewritten)
         rewritten = self.sentence_fuse(rewritten)
@@ -352,21 +562,30 @@ class DeterministicRewriter:
 
 
 class HumanizerRewriter:
-    """Main humanizer rewriting interface with Vertex + deterministic fallback."""
+    """Main humanizer rewrite interface with model-only no-change failure behavior."""
 
     def __init__(self, config: HumanizerConfig | None):
         self.config = config or HumanizerConfig.from_settings()
         self.mode = self.config.runtime_mode
-        self.deterministic = DeterministicRewriter()
         self.semantic_drift = SemanticDriftChecker()
-        self.vertex = None
-        if self.config.model_rewriter_enabled:
-            self.vertex = VertexRewriter(
+        self.backend = self._build_backend()
+        logger.info(
+            "HumanizerRewriter initialized in %s mode with backend=%s.",
+            self.mode,
+            self.config.selected_rewriter_backend,
+        )
+
+    def _build_backend(self) -> Any:
+        backend = self.config.selected_rewriter_backend
+        if backend == "huggingface":
+            return HuggingFaceRewriter(self.config)
+        if backend == "vertex":
+            return VertexRewriter(
                 project=self.config.google_project,
                 location=self.config.google_location,
                 model=self.config.vertex_model or "gemini-1.5-pro",
             )
-        logger.info("HumanizerRewriter initialized in %s mode.", self.mode)
+        return NoChangeRewriter()
 
     def rewrite_section(
         self,
@@ -376,8 +595,7 @@ class HumanizerRewriter:
         *,
         section_name: str | None = None,
     ) -> dict[str, Any]:
-        """Rewrite the most AI-like paragraphs in one section."""
-
+        del ai_scores
         paragraphs = _split_paragraphs(section_text)
         if not paragraphs:
             return {
@@ -385,7 +603,9 @@ class HumanizerRewriter:
                 "paragraphs_targeted": 0,
                 "paragraphs_accepted": 0,
                 "paragraphs_rejected_drift": 0,
-                "rewriter_used": "deterministic" if self.mode == "lite" else "vertex",
+                "rewriter_used": "none",
+                "changed": False,
+                "failure_reasons": [],
             }
 
         scored_paragraphs: list[tuple[int, dict[str, float], str]] = []
@@ -405,99 +625,57 @@ class HumanizerRewriter:
             reverse=True,
         )
         targets = scored_paragraphs[: self.config.max_target_paragraphs_per_section]
+        if not targets:
+            return {
+                "rewritten_text": section_text,
+                "paragraphs_targeted": 0,
+                "paragraphs_accepted": 0,
+                "paragraphs_rejected_drift": 0,
+                "rewriter_used": "none",
+                "changed": False,
+                "failure_reasons": [],
+            }
 
         accepted = 0
         rejected_drift = 0
         rewriter_modes: set[str] = set()
+        failure_reasons: list[str] = []
         updated = list(paragraphs)
-        persona = style_persona or SECTION_STYLE_PERSONAS.get(
-            section_name or "",
-            "Academic but conversational",
-        )
+        persona = style_persona or SECTION_STYLE_PERSONAS.get(section_name or "", "Academic but conversational")
 
         for index, paragraph_scores, original_paragraph in targets:
-            rewritten = original_paragraph
-            rewriter_used = "deterministic"
-            if self.vertex is not None and self.vertex.available:
-                candidate = self.vertex.rewrite_paragraph(
-                    target_para=original_paragraph,
-                    section_context=section_text,
-                    style_persona=persona,
-                    ai_scores=paragraph_scores,
-                )
-                if candidate.strip() != original_paragraph.strip():
-                    rewritten = candidate.strip()
-                    rewriter_used = "vertex"
-                else:
-                    protected_text, spans = extract_protected_spans(original_paragraph)
-                    rewritten = restore_protected_spans(
-                        self.deterministic.apply_all(protected_text),
-                        spans,
-                    )
-            else:
-                protected_text, spans = extract_protected_spans(original_paragraph)
-                rewritten = restore_protected_spans(
-                    self.deterministic.apply_all(protected_text),
-                    spans,
-                )
+            protected_text, spans = extract_protected_spans(original_paragraph)
+            attempt = self.backend.rewrite_paragraph(
+                target_para=protected_text,
+                section_context=section_text,
+                style_persona=persona,
+                ai_scores=paragraph_scores,
+            )
+            if not attempt.changed:
+                if attempt.failure_reason:
+                    failure_reasons.append(attempt.failure_reason)
+                continue
 
-            cleaned = self.deterministic.anti_ai_cleanup(rewritten)
-            if cleaned != rewritten:
-                cleaned_scores = composite_ai_score(cleaned)
-                if _audit_cleanup_is_acceptable(
-                    baseline_scores=composite_ai_score(rewritten),
-                    cleaned_scores=cleaned_scores,
-                ):
-                    rewritten = cleaned
-
+            rewritten = restore_protected_spans(attempt.text.strip(), spans)
             rewritten_scores = composite_ai_score(rewritten)
             if not _rewrite_improves_quality(
                 original_scores=paragraph_scores,
                 rewritten_scores=rewritten_scores,
             ):
-                if rewriter_used == "vertex":
-                    protected_text, spans = extract_protected_spans(original_paragraph)
-                    fallback = restore_protected_spans(
-                        self.deterministic.apply_all(protected_text),
-                        spans,
-                    )
-                    fallback_scores = composite_ai_score(fallback)
-                    if _rewrite_improves_quality(
-                        original_scores=paragraph_scores,
-                        rewritten_scores=fallback_scores,
-                    ):
-                        rewritten = fallback
-                        rewritten_scores = fallback_scores
-                        rewriter_used = "deterministic"
-                    else:
-                        continue
-                else:
-                    continue
+                failure_reasons.append("quality_not_improved")
+                continue
 
             drift_value = self.semantic_drift.drift(original_paragraph, rewritten)
             if drift_value is not None and drift_value > self.config.semantic_drift_threshold:
                 rejected_drift += 1
+                failure_reasons.append("semantic_drift")
                 logger.warning(
-                    "Rejected humanizer rewrite for paragraph %s because semantic drift %.3f exceeded threshold %.3f.",
+                    "Rejected rewrite for paragraph %s because semantic drift %.3f exceeded threshold %.3f.",
                     index,
                     drift_value,
                     self.config.semantic_drift_threshold,
                 )
-                if self.config.retry_on_drift and rewriter_used == "vertex":
-                    protected_text, spans = extract_protected_spans(original_paragraph)
-                    fallback = restore_protected_spans(
-                        self.deterministic.apply_all(protected_text),
-                        spans,
-                    )
-                    fallback_drift = self.semantic_drift.drift(original_paragraph, fallback)
-                    if fallback_drift is None or fallback_drift <= self.config.semantic_drift_threshold:
-                        rewritten = fallback
-                        rewritten_scores = composite_ai_score(fallback)
-                        rewriter_used = "deterministic"
-                    else:
-                        continue
-                else:
-                    continue
+                continue
 
             safety = verify_rewrite_safety(
                 original=original_paragraph,
@@ -508,8 +686,9 @@ class HumanizerRewriter:
             )
             if not safety.passed:
                 rejected_drift += 1
+                failure_reasons.append(_map_safety_failure_reason(safety.reasons))
                 logger.warning(
-                    "Rejected humanizer rewrite for paragraph %s because safety checks failed: %s",
+                    "Rejected rewrite for paragraph %s because safety checks failed: %s",
                     index,
                     ",".join(safety.reasons),
                 )
@@ -517,21 +696,17 @@ class HumanizerRewriter:
 
             updated[index] = rewritten
             accepted += 1
-            rewriter_modes.add(rewriter_used)
+            rewriter_modes.add(attempt.rewriter_used)
 
-        if not rewriter_modes:
-            used = "deterministic" if self.mode == "lite" else ("vertex" if self.vertex and self.vertex.available else "deterministic")
-        elif len(rewriter_modes) == 1:
-            used = next(iter(rewriter_modes))
-        else:
-            used = "mixed"
-
+        used = _resolve_used_rewriter(rewriter_modes)
         return {
             "rewritten_text": "\n\n".join(updated).strip(),
             "paragraphs_targeted": len(targets),
             "paragraphs_accepted": accepted,
             "paragraphs_rejected_drift": rejected_drift,
             "rewriter_used": used,
+            "changed": accepted > 0,
+            "failure_reasons": failure_reasons,
         }
 
 
@@ -545,6 +720,7 @@ class HybridSectionRewriter:
         vertex_client: Any | None = None,
         perplexity_scorer: Any | None = None,
     ):
+        del vertex_client, perplexity_scorer
         self.config = config or HumanizerConfig.from_settings()
         self._rewriter = HumanizerRewriter(self.config)
 
@@ -562,10 +738,7 @@ class HybridSectionRewriter:
         rewrite_result = self._rewriter.rewrite_section(
             section_text=text,
             ai_scores=before,
-            style_persona=SECTION_STYLE_PERSONAS.get(
-                section_name,
-                "Academic but conversational",
-            ),
+            style_persona=SECTION_STYLE_PERSONAS.get(section_name, "Academic but conversational"),
             section_name=section_name,
         )
         after_text = rewrite_result["rewritten_text"]
@@ -592,7 +765,6 @@ def _split_paragraphs(text: str) -> list[str]:
 
 
 def _rewrite_similarity_threshold(semantic_drift_threshold: float) -> float:
-    # This safety gate should catch genuine meaning changes, not block normal paraphrases.
     return round(max(0.5, 0.68 - (max(0.0, min(1.0, semantic_drift_threshold)) * 0.2)), 4)
 
 
@@ -613,7 +785,6 @@ def _rewrite_improves_quality(
     cadence_gain = float(original_scores.get("cadence_uniformity", 0.0)) - float(
         rewritten_scores.get("cadence_uniformity", 0.0),
     )
-
     return (
         composite_gain >= 0.03
         or (
@@ -627,27 +798,77 @@ def _rewrite_improves_quality(
     )
 
 
-def _audit_cleanup_is_acceptable(
+def _build_hf_prompt(
     *,
-    baseline_scores: dict[str, float],
-    cleaned_scores: dict[str, float],
-) -> bool:
-    baseline_composite = float(baseline_scores.get("composite_score", 0.0))
-    cleaned_composite = float(cleaned_scores.get("composite_score", 0.0))
-    baseline_stock = float(baseline_scores.get("stock_phrase_density", 0.0))
-    cleaned_stock = float(cleaned_scores.get("stock_phrase_density", 0.0))
-    baseline_dash = float(baseline_scores.get("em_dash_overuse", 0.0))
-    cleaned_dash = float(cleaned_scores.get("em_dash_overuse", 0.0))
-
+    target_para: str,
+    section_context: str,
+    style_persona: str,
+    model_id: str,
+) -> str:
+    if model_id.strip().lower() == "aventiq-ai/t5-paraphrase-generation":
+        return target_para
+    trimmed_context = section_context[:1200]
     return (
-        cleaned_composite <= (baseline_composite + 0.02)
-        and cleaned_stock <= baseline_stock
-        and cleaned_dash <= baseline_dash
+        "paraphrase: Rewrite the academic paragraph below so it sounds naturally human-written "
+        "without changing meaning, citations, numbers, latex, or technical entities.\n"
+        f"Style: {style_persona}\n"
+        f"Context: {trimmed_context}\n"
+        f"Paragraph: {target_para}"
     )
+
+
+def _normalize_model_output(text: str) -> str:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return ""
+    if normalized.startswith("[") and normalized.endswith("]"):
+        try:
+            parsed = literal_eval(normalized)
+        except (SyntaxError, ValueError):
+            parsed = None
+        if isinstance(parsed, list):
+            candidates = [str(item).strip() for item in parsed if str(item).strip()]
+            if candidates:
+                normalized = candidates[0]
+    if "'." not in normalized and "', '" in normalized:
+        normalized = re.split(r"'\s*,\s*'", normalized, maxsplit=1)[0]
+    elif "', '" in normalized:
+        normalized = re.split(r"'\s*,\s*'", normalized, maxsplit=1)[0]
+    normalized = re.sub(r"^\s*(rewritten paragraph|rewrite|output)\s*:\s*", "", normalized, flags=re.IGNORECASE)
+    lines = [line.strip(" \"'") for line in normalized.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    normalized = " ".join(lines)
+    normalized = re.sub(r"\s{2,}", " ", normalized)
+    return normalized.strip()
+
+
+def _map_safety_failure_reason(reasons: list[str]) -> str:
+    joined = ",".join(reasons)
+    lowered = joined.lower()
+    if "citation" in lowered:
+        return "protected_span_changed"
+    if "latex" in lowered:
+        return "protected_span_changed"
+    if "number" in lowered:
+        return "protected_span_changed"
+    if "similarity" in lowered:
+        return "similarity_too_low"
+    return "protected_span_changed"
+
+
+def _resolve_used_rewriter(rewriter_modes: set[str]) -> str:
+    if not rewriter_modes:
+        return "none"
+    if len(rewriter_modes) == 1:
+        return next(iter(rewriter_modes))
+    return "mixed"
 
 
 __all__ = [
     "VertexRewriter",
+    "HuggingFaceRewriter",
+    "NoChangeRewriter",
     "DeterministicRewriter",
     "HumanizerRewriter",
     "HybridSectionRewriter",

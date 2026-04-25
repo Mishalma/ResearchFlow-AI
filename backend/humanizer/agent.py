@@ -98,6 +98,7 @@ class HumanizerRuntimeAgent:
         sections_skipped = 0
         sections_rewritten = 0
         actual_modes: set[str] = set()
+        failure_reasons: list[str] = []
         targeted_sections = (
             {section_name.strip() for section_name in target_sections if str(section_name).strip()}
             if target_sections is not None
@@ -148,6 +149,7 @@ class HumanizerRuntimeAgent:
             if rewritten_text.strip() != original_text.strip():
                 sections_rewritten += 1
             actual_modes.add(str(rewrite_result["rewriter_used"]))
+            failure_reasons.extend(list(rewrite_result.get("failure_reasons", [])))
 
             if self.config.perplexity_enabled:
                 after_perplexity = self.perplexity.score(rewritten_text)
@@ -197,6 +199,7 @@ class HumanizerRuntimeAgent:
             "sections_skipped": sections_skipped,
             "sections_rewritten": sections_rewritten,
             "rewriter_mode": rewriter_mode,
+            "failure_reasons": failure_reasons,
             "run_log": run_log,
         }
 

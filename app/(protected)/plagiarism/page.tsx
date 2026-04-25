@@ -129,6 +129,12 @@ export default function PlagiarismReportPage() {
   const { result } = state;
   const aiScorePercent = report?.ai_score != null ? Math.round(report.ai_score * 100) : null;
   const overlapPercent = report ? Math.round(report.plagiarism_score * 10) / 10 : null;
+  const initialAiPercent = report?.initial_ai_score != null ? Math.round(report.initial_ai_score * 100) : null;
+  const initialOverlapPercent =
+    report?.initial_plagiarism_score != null ? Math.round(report.initial_plagiarism_score * 10) / 10 : null;
+  const finalAiPercent = report?.final_ai_score != null ? Math.round(report.final_ai_score * 100) : null;
+  const finalOverlapPercent =
+    report?.final_plagiarism_score != null ? Math.round(report.final_plagiarism_score * 10) / 10 : null;
   const aiTone = scoreTone(report?.ai_score ?? 0, 0.1, 0.1);
   const overlapTone = scoreTone(report?.plagiarism_score ?? 0, 10, 10);
   const accepted =
@@ -144,7 +150,7 @@ export default function PlagiarismReportPage() {
             Validation Report
           </h1>
           <p className="mt-2 max-w-2xl text-slate-400">
-            Validation checked the 10% acceptance gate and applied targeted AI fixes when the draft stayed above threshold.
+            Desklib checked the AI score first, the humanizer handled flagged AI sections, and overlap review ran after the draft cleared the AI gate.
           </p>
         </div>
         <div className="flex flex-wrap gap-3">
@@ -188,7 +194,7 @@ export default function PlagiarismReportPage() {
                 <p className="text-sm text-slate-400">
                   {report?.routing_decision === "accepted"
                     ? "Within the 10% acceptance gate"
-                    : "Above the 10% AI threshold"}
+                    : "Above the 10% AI threshold or still pending review"}
                 </p>
               </div>
             </div>
@@ -244,7 +250,7 @@ export default function PlagiarismReportPage() {
             <div>
               <h2 className="text-xl font-semibold text-white">Workflow Summary</h2>
               <p className="mt-1 text-sm text-slate-400">
-                Fast validation scores the draft against the 10% acceptance threshold before the workflow finalizes.
+                The workflow runs Desklib AI detection first, applies targeted humanizer fixes when needed, and checks source overlap after the AI score reaches the acceptance gate.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -260,7 +266,7 @@ export default function PlagiarismReportPage() {
           <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-3">
             <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
               <p className="text-xs uppercase tracking-wide text-slate-500">Acceptance Gate</p>
-              <p className="mt-2 text-lg font-semibold text-white">AI ≤ 10% and overlap ≤ 10%</p>
+              <p className="mt-2 text-lg font-semibold text-white">AI &lt;= 10% before overlap &lt;= 10%</p>
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
               <p className="text-xs uppercase tracking-wide text-slate-500">Fix Loop</p>
@@ -280,6 +286,23 @@ export default function PlagiarismReportPage() {
               </p>
             </div>
           </div>
+
+          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Initial Scores</p>
+              <p className="mt-2 text-sm text-slate-300">
+                AI {initialAiPercent == null ? "--" : `${initialAiPercent}%`} and overlap{" "}
+                {initialOverlapPercent == null ? "--" : `${initialOverlapPercent}%`}
+              </p>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Final Scores</p>
+              <p className="mt-2 text-sm text-slate-300">
+                AI {finalAiPercent == null ? "--" : `${finalAiPercent}%`} and overlap{" "}
+                {finalOverlapPercent == null ? "--" : `${finalOverlapPercent}%`}
+              </p>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
@@ -295,7 +318,7 @@ export default function PlagiarismReportPage() {
                   <div>
                     <h2 className="text-xl font-semibold text-white">AI Fix Loop</h2>
                     <p className="mt-1 text-sm text-slate-400">
-                      The workflow attempted an automatic rewrite on medium-risk AI sections before finalizing this job.
+                      The workflow attempted an automatic rewrite on Desklib-flagged AI sections before the final overlap review.
                     </p>
                   </div>
                 </div>

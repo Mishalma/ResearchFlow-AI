@@ -8,7 +8,7 @@ import httpx
 from core.config import Settings, get_settings
 from core.exceptions import ValidationError, WorkflowConfigurationError
 from models.validation import ValidationServiceRequest, ValidationServiceResponse
-from validation.runtime import execute_fast_validation
+from validation.runtime import execute_validation
 
 
 class ValidationServiceClient(Protocol):
@@ -24,7 +24,7 @@ async def execute_validation_request(
     settings: Settings | None = None,
 ) -> ValidationServiceResponse:
     resolved_settings = settings or get_settings()
-    return await execute_fast_validation(request, settings=resolved_settings)
+    return await execute_validation(request, settings=resolved_settings)
 
 
 class LocalValidationServiceClient:

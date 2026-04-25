@@ -7,7 +7,7 @@ from typing import Literal
 
 from core.config import Settings, get_settings
 
-DetectorBackend = Literal["heuristic", "desklib"]
+DetectorBackend = Literal["desklib"]
 
 
 def _get_float(name: str, default: float) -> float:
@@ -31,10 +31,10 @@ def _get_int(name: str, default: int) -> int:
 
 
 def _get_detector_backend() -> DetectorBackend:
-    value = os.getenv("AI_DETECTOR_BACKEND", "heuristic").strip().lower() or "heuristic"
-    if value in {"heuristic", "desklib"}:
-        return value
-    return "heuristic"
+    value = os.getenv("AI_DETECTOR_BACKEND", "desklib").strip().lower() or "desklib"
+    if value == "desklib":
+        return "desklib"
+    return "desklib"
 
 
 def _get_path(name: str, default: str) -> Path:
@@ -44,7 +44,7 @@ def _get_path(name: str, default: str) -> Path:
 
 @dataclass(frozen=True)
 class ValidationConfig:
-    provider_name: str = "internal_fast_validation"
+    provider_name: str = "desklib_ai_check"
     ai_accept_threshold: float = 0.10
     plagiarism_accept_threshold: float = 10.0
     ai_severe_threshold: float = 0.35
@@ -53,11 +53,7 @@ class ValidationConfig:
     overlap_sentence_min_tokens: int = 8
     overlap_ratio_threshold: float = 0.30
     sequence_ratio_threshold: float = 0.82
-    perplexity_weight: float = 0.20
-    stylometry_weight: float = 0.15
-    detector_weight: float = 0.65
-    perplexity_model_name: str = "distilgpt2"
-    ai_detector_backend: DetectorBackend = "heuristic"
+    ai_detector_backend: DetectorBackend = "desklib"
     ai_detector_model_id: str = "desklib/ai-text-detector-academic-v1.01"
     ai_detector_model_gcs_uri: str = ""
     ai_detector_model_path: Path = Path("/tmp/papereasy-models/desklib-ai-text-detector-academic-v1.01")
@@ -71,8 +67,8 @@ class ValidationConfig:
     def from_settings(cls, settings: Settings | None = None) -> "ValidationConfig":
         resolved_settings = settings or get_settings()
         return cls(
-            provider_name=os.getenv("VALIDATION_PROVIDER_NAME", "internal_fast_validation").strip()
-            or "internal_fast_validation",
+            provider_name=os.getenv("VALIDATION_PROVIDER_NAME", "desklib_ai_check").strip()
+            or "desklib_ai_check",
             ai_accept_threshold=max(0.0, min(1.0, _get_float("VALIDATION_AI_ACCEPT_THRESHOLD", 0.10))),
             plagiarism_accept_threshold=max(
                 0.0,
@@ -87,11 +83,6 @@ class ValidationConfig:
             overlap_sentence_min_tokens=max(4, _get_int("VALIDATION_OVERLAP_MIN_TOKENS", 8)),
             overlap_ratio_threshold=max(0.05, min(1.0, _get_float("VALIDATION_OVERLAP_RATIO_THRESHOLD", 0.30))),
             sequence_ratio_threshold=max(0.50, min(1.0, _get_float("VALIDATION_SEQUENCE_RATIO_THRESHOLD", 0.82))),
-            perplexity_weight=max(0.0, min(1.0, _get_float("VALIDATION_PERPLEXITY_WEIGHT", 0.20))),
-            stylometry_weight=max(0.0, min(1.0, _get_float("VALIDATION_STYLOMETRY_WEIGHT", 0.15))),
-            detector_weight=max(0.0, min(1.0, _get_float("VALIDATION_DETECTOR_WEIGHT", 0.65))),
-            perplexity_model_name=os.getenv("VALIDATION_PERPLEXITY_MODEL_NAME", "distilgpt2").strip()
-            or "distilgpt2",
             ai_detector_backend=_get_detector_backend(),
             ai_detector_model_id=os.getenv(
                 "AI_DETECTOR_MODEL_ID",

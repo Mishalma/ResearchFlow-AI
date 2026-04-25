@@ -16,6 +16,8 @@ from core.config import Settings, get_settings
 logger = logging.getLogger(__name__)
 
 _VALID_MODES = {"full", "fast", "lite"}
+_VALID_REWRITER_BACKENDS = {"huggingface", "vertex", "none"}
+_VALID_REWRITE_FAILURE_BEHAVIORS = {"no_change"}
 
 
 def _normalize_mode(value: str | None) -> str:
@@ -26,6 +28,28 @@ def _normalize_mode(value: str | None) -> str:
             raw_value,
         )
         return "full"
+    return raw_value
+
+
+def _normalize_rewriter_backend(value: str | None) -> str:
+    raw_value = (value or "none").strip().lower() or "none"
+    if raw_value not in _VALID_REWRITER_BACKENDS:
+        logger.warning(
+            "Unknown HUMANIZER_REWRITER_BACKEND '%s'; falling back to 'none'.",
+            raw_value,
+        )
+        return "none"
+    return raw_value
+
+
+def _normalize_rewrite_failure_behavior(value: str | None) -> str:
+    raw_value = (value or "no_change").strip().lower() or "no_change"
+    if raw_value not in _VALID_REWRITE_FAILURE_BEHAVIORS:
+        logger.warning(
+            "Unknown HUMANIZER_ON_REWRITE_FAILURE '%s'; falling back to 'no_change'.",
+            raw_value,
+        )
+        return "no_change"
     return raw_value
 
 
@@ -86,11 +110,22 @@ class HumanizerConfig:
     perplexity_min_human_score: float = PERPLEXITY_MIN_HUMAN_SCORE
     retry_on_drift: bool = RETRY_ON_DRIFT
     log_mode_on_every_run: bool = LOG_MODE_ON_EVERY_RUN
+    rewriter_backend: str = "none"
+    on_rewrite_failure: str = "no_change"
+    enable_deterministic_fallback: bool = False
     use_model_rewriter: bool | None = None
     enable_perplexity: bool | None = None
     google_project: str = ""
     google_location: str = "us-central1"
     vertex_model: str = ""
+    hf_model_id: str = "AventIQ-AI/t5-paraphrase-generation"
+    hf_device: str = "cpu"
+    hf_max_input_tokens: int = 384
+    hf_max_new_tokens: int = 160
+    hf_num_beams: int = 4
+    hf_do_sample: bool = False
+    hf_local_files_only: bool = False
+    model_timeout_seconds: int = 20
     debug_logging: bool = False
 
     @property
@@ -106,6 +141,15 @@ class HumanizerConfig:
         if self.use_model_rewriter is not None:
             return bool(self.use_model_rewriter)
         return self.resolved_mode in {"full", "fast"}
+
+    @property
+    def selected_rewriter_backend(self) -> str:
+        configured = _normalize_rewriter_backend(self.rewriter_backend)
+        if configured != "none":
+            return configured
+        if self.use_model_rewriter is not None:
+            return "vertex" if self.use_model_rewriter else "none"
+        return "none"
 
     @property
     def perplexity_enabled(self) -> bool:
@@ -176,6 +220,16 @@ class HumanizerConfig:
                 "HUMANIZER_LOG_MODE_ON_EVERY_RUN",
                 LOG_MODE_ON_EVERY_RUN,
             ),
+            rewriter_backend=_normalize_rewriter_backend(
+                os.getenv("HUMANIZER_REWRITER_BACKEND", "none"),
+            ),
+            on_rewrite_failure=_normalize_rewrite_failure_behavior(
+                os.getenv("HUMANIZER_ON_REWRITE_FAILURE", "no_change"),
+            ),
+            enable_deterministic_fallback=_get_bool(
+                "HUMANIZER_ENABLE_DETERMINISTIC_FALLBACK",
+                False,
+            ),
             use_model_rewriter=(
                 _get_bool("HUMANIZER_USE_MODEL_REWRITER", True)
                 if "HUMANIZER_USE_MODEL_REWRITER" in os.environ
@@ -193,6 +247,15 @@ class HumanizerConfig:
             vertex_model=os.getenv("HUMANIZER_MODEL_NAME", "").strip()
             or resolved_settings.vertex_model
             or "gemini-1.5-pro",
+            hf_model_id=os.getenv("HUMANIZER_HF_MODEL_ID", "AventIQ-AI/t5-paraphrase-generation").strip()
+            or "AventIQ-AI/t5-paraphrase-generation",
+            hf_device=os.getenv("HUMANIZER_HF_DEVICE", "cpu").strip().lower() or "cpu",
+            hf_max_input_tokens=max(32, _get_int("HUMANIZER_HF_MAX_INPUT_TOKENS", 384)),
+            hf_max_new_tokens=max(16, _get_int("HUMANIZER_HF_MAX_NEW_TOKENS", 160)),
+            hf_num_beams=max(1, _get_int("HUMANIZER_HF_NUM_BEAMS", 4)),
+            hf_do_sample=_get_bool("HUMANIZER_HF_DO_SAMPLE", False),
+            hf_local_files_only=_get_bool("HUMANIZER_HF_LOCAL_FILES_ONLY", False),
+            model_timeout_seconds=max(5, _get_int("HUMANIZER_MODEL_TIMEOUT_SECONDS", 20)),
             debug_logging=_get_bool("HUMANIZER_DEBUG_LOGGING", resolved_settings.debug),
         )
 

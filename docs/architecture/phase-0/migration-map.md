@@ -6,7 +6,7 @@ This document maps the current PaperEasy implementation to the target workflow a
 
 - keep the existing Next.js BFF
 - keep upload and project persistence behavior working during the cutover
-- extract generation before adding deep validation complexity
+- extract generation before adding AI-check and final-report workflow complexity
 - move humanizer out of the default pipeline and into the later fix loop
 - replace third-party originality scanning with internal validation in later phases
 
@@ -51,7 +51,7 @@ This document maps the current PaperEasy implementation to the target workflow a
 
 ### Phase 5+
 
-- add deep validation and later fan-out if needed
+- add richer detector fan-out if needed without changing the public job API
 - enrich report UI without changing the public job API
 
 ## Retired Behaviors

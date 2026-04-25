@@ -4,19 +4,15 @@ import logging
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from functools import lru_cache
 from statistics import mean
 
 from core.config import Settings, get_settings
-from humanizer.detectors import composite_ai_score
-from humanizer.perplexity import PerplexityScorer
 from jobs.artifacts import (
     load_extracted_text_artifact,
     load_generated_draft_artifact,
     load_validation_report_from_artifact,
     store_validation_report_artifact,
 )
-from models.generation import GeneratedPaper
 from models.validation import (
     ValidationReport,
     ValidationSectionFlag,
@@ -30,7 +26,7 @@ from originality.schemas import ProviderFinding, ProviderSectionScan
 from originality.utils import SECTION_ORDER, build_section_map, summarize_status_counts
 from validation.config import ValidationConfig
 from validation.desklib_detector import get_desklib_detector
-from validation.stylometry import iter_sentence_spans, stylometry_profile, tokenize_words
+from validation.stylometry import iter_sentence_spans, tokenize_words
 
 logger = logging.getLogger("papereasy.validation.runtime")
 
@@ -80,11 +76,20 @@ def _confidence_band(routing_decision: str) -> str:
     return "unknown"
 
 
-def _decision_summary(routing_decision: str) -> str:
+def _decision_summary(routing_decision: str, *, mode: str, failure_reasons: list[str] | None = None) -> str:
+    reasons = failure_reasons or []
+    if mode == "ai_check":
+        if routing_decision == "accepted":
+            return "The manuscript stayed within the 10% AI acceptance threshold and can proceed to overlap review."
+        return "The manuscript stayed above the 10% AI acceptance threshold and needs humanizer remediation."
     if routing_decision == "accepted":
         return "The manuscript stayed within the 10% acceptance thresholds for AI and source overlap."
-    if routing_decision == "flagged":
-        return "The manuscript stayed above the 10% acceptance threshold for AI or source overlap."
+    if "ai_threshold_exceeded" in reasons and "overlap_threshold_exceeded" in reasons:
+        return "The manuscript stayed above the AI and source-overlap acceptance thresholds."
+    if "ai_threshold_exceeded" in reasons:
+        return "The manuscript stayed above the 10% AI acceptance threshold."
+    if "overlap_threshold_exceeded" in reasons:
+        return "The manuscript stayed above the 10% source-overlap acceptance threshold."
     return "Validation is pending."
 
 
@@ -136,6 +141,24 @@ def _section_status(
     return ("accepted", "low", ["This section stayed within the 10% acceptance thresholds."])
 
 
+def _section_ai_status(*, ai_score: float | None, config: ValidationConfig) -> tuple[str, str, list[str]]:
+    if ai_score is None:
+        return ("accepted", "low", ["This section did not produce an AI score."])
+    if ai_score > config.ai_severe_threshold:
+        return (
+            "flagged",
+            "severe",
+            ["This section stayed above the severe AI threshold and needs remediation."],
+        )
+    if ai_score > config.ai_accept_threshold:
+        return (
+            "flagged",
+            "medium",
+            ["This section stayed above the 10% AI acceptance threshold and was flagged for remediation."],
+        )
+    return ("accepted", "low", ["This section stayed within the 10% AI acceptance threshold."])
+
+
 def _routing_decision_for_report(
     *,
     ai_score: float | None,
@@ -149,6 +172,18 @@ def _routing_decision_for_report(
         or plagiarism_score > config.plagiarism_accept_threshold
         or has_any_flag
     ):
+        return "flagged"
+    return "accepted"
+
+
+def _routing_decision_for_ai_check(
+    *,
+    ai_score: float | None,
+    section_flags: list[ValidationSectionFlag],
+    config: ValidationConfig,
+) -> str:
+    has_any_flag = any(flag.risk in {"medium", "severe"} for flag in section_flags)
+    if (ai_score is not None and ai_score > config.ai_accept_threshold) or has_any_flag:
         return "flagged"
     return "accepted"
 
@@ -317,24 +352,6 @@ def _build_section_flags_from_reports(
     return section_flags
 
 
-@lru_cache(maxsize=1)
-def _get_perplexity_scorer(model_name: str) -> PerplexityScorer:
-    return PerplexityScorer(model_name)
-
-
-def _perplexity_risk(text: str, *, config: ValidationConfig) -> tuple[float | None, float | None]:
-    scorer = _get_perplexity_scorer(config.perplexity_model_name)
-    value = scorer.score(text)
-    if value is None:
-        return None, None
-    if value >= 45.0:
-        return value, 0.05
-    if value <= 20.0:
-        return value, 0.95
-    normalized = 1.0 - ((value - 20.0) / 25.0)
-    return value, round(max(0.0, min(1.0, normalized)), 4)
-
-
 def _ai_score_for_section(
     text: str,
     *,
@@ -342,33 +359,12 @@ def _ai_score_for_section(
 ) -> tuple[float | None, dict[str, float | int | str]]:
     if not text.strip():
         return None, {}
-
-    if config.ai_detector_backend == "desklib":
-        detector = get_desklib_detector(
-            config,
-            project_id=get_settings().google_cloud_project,
-        )
-        prediction = detector.score_text(text)
-        return prediction.score, prediction.as_metadata()
-
-    detector_scores = composite_ai_score(text)
-    stylometry_scores = stylometry_profile(text)
-    _, perplexity_risk = _perplexity_risk(text, config=config)
-    perplexity_component = 0.0 if perplexity_risk is None else perplexity_risk
-    raw_score = (
-        (detector_scores.get("composite_score", 0.0) * config.detector_weight)
-        + (stylometry_scores.get("score", 0.0) * config.stylometry_weight)
-        + (perplexity_component * config.perplexity_weight)
+    detector = get_desklib_detector(
+        config,
+        project_id=get_settings().google_cloud_project,
     )
-    score = round(max(0.0, min(1.0, raw_score)), 4)
-    return score, {
-        **detector_scores,
-        "stylometry_score": stylometry_scores.get("score", 0.0),
-        "type_token_ratio": stylometry_scores.get("type_token_ratio", 0.0),
-        "sentence_length_variance": stylometry_scores.get("sentence_length_variance", 0.0),
-        "paragraph_monotony": stylometry_scores.get("paragraph_monotony", 0.0),
-        "perplexity_risk": perplexity_component,
-    }
+    prediction = detector.score_text(text)
+    return prediction.score, prediction.as_metadata()
 
 
 def _build_section_report(
@@ -441,31 +437,93 @@ def _build_section_report(
     )
 
 
-async def execute_fast_validation(
-    request: ValidationServiceRequest,
+def _build_ai_only_section_report(
     *,
-    settings: Settings | None = None,
-    validation_config: ValidationConfig | None = None,
-    originality_config: OriginalityConfig | None = None,
-) -> ValidationServiceResponse:
-    resolved_settings = settings or get_settings()
-    resolved_validation_config = validation_config or ValidationConfig.from_settings(resolved_settings)
-    resolved_originality_config = originality_config or OriginalityConfig.from_settings(resolved_settings)
-
-    draft = load_generated_draft_artifact(request.current_draft_uri)
-    extracted_text_uri = request.artifacts.extracted_text_uri
-    if not extracted_text_uri:
-        raise ValueError("Validation requests require artifacts.extracted_text_uri.")
-    source_text = load_extracted_text_artifact(extracted_text_uri)
-
-    section_texts = build_section_map(humanized_draft=None, paper_snapshot=draft)
-    source_sentences, source_index = _build_source_index(
-        source_text,
-        ngram_size=resolved_validation_config.overlap_ngram_size,
-        min_tokens=resolved_validation_config.overlap_sentence_min_tokens,
+    section_name: str,
+    section_text: str,
+    validation_config: ValidationConfig,
+) -> ValidationSectionReport:
+    section_ai_score, ai_metadata = _ai_score_for_section(
+        section_text,
+        config=validation_config,
+    )
+    status, risk, summary = _section_ai_status(
+        ai_score=section_ai_score,
+        config=validation_config,
+    )
+    if ai_metadata.get("desklib_probability") is not None:
+        summary = summary + [
+            "AI detector "
+            f"{ai_metadata.get('desklib_probability', 0.0):.2f} "
+            f"({ai_metadata.get('ai_detector_model_id', 'desklib')})"
+        ]
+    return ValidationSectionReport(
+        section_name=section_name,
+        ai_score=section_ai_score,
+        plagiarism_score=0.0,
+        status=status,
+        risk=risk,
+        summary=summary,
+        spans=[],
     )
 
-    reference_lines = list(draft.paper.references)
+
+def _document_ai_score(section_reports: list[ValidationSectionReport]) -> float | None:
+    document_ai_scores = [section.ai_score for section in section_reports if section.ai_score is not None]
+    return round(mean(document_ai_scores), 4) if document_ai_scores else None
+
+
+def _initial_scores_from_previous(previous_report: ValidationReport | None) -> tuple[float | None, float | None]:
+    if previous_report is None:
+        return None, None
+    initial_ai_score = (
+        previous_report.initial_ai_score
+        if previous_report.initial_ai_score is not None
+        else previous_report.ai_score
+    )
+    initial_plagiarism_score = (
+        previous_report.initial_plagiarism_score
+        if previous_report.initial_plagiarism_score is not None
+        else previous_report.plagiarism_score
+    )
+    return initial_ai_score, initial_plagiarism_score
+
+
+def _validation_sidecar_payload(
+    *,
+    request: ValidationServiceRequest,
+    config: ValidationConfig,
+    report: ValidationReport,
+    section_flags: list[ValidationSectionFlag],
+) -> dict[str, object]:
+    return {
+        "job_id": request.job_id,
+        "project_id": request.project_id,
+        "mode": request.config.mode,
+        "provider_name": config.provider_name,
+        "ai_detector": {
+            "backend": config.ai_detector_backend,
+            "model_id": config.ai_detector_model_id,
+            "max_length": config.ai_detector_max_length,
+            "batch_size": config.ai_detector_batch_size,
+        },
+        "report": report,
+        "section_flags": section_flags,
+        "section_status_counts": summarize_status_counts(section.status for section in report.sections),
+        "changed_section_ids": request.config.changed_section_ids,
+        "failure_reasons": report.failure_reasons,
+    }
+
+
+async def _execute_ai_check(
+    request: ValidationServiceRequest,
+    *,
+    settings: Settings,
+    validation_config: ValidationConfig,
+) -> ValidationServiceResponse:
+    draft = load_generated_draft_artifact(request.current_draft_uri)
+    section_texts = build_section_map(humanized_draft=None, paper_snapshot=draft)
+
     requested_changed_sections = set(request.config.changed_section_ids)
     if request.config.changed_sections_only and not requested_changed_sections:
         raise ValueError("changed_section_ids is required when changed_sections_only=true.")
@@ -474,16 +532,12 @@ async def execute_fast_validation(
     previous_report_uri = request.artifacts.previous_validation_report_uri
     if request.config.changed_sections_only:
         if not previous_report_uri:
-            raise ValueError(
-                "previous_validation_report_uri is required when changed_sections_only=true."
-            )
+            raise ValueError("previous_validation_report_uri is required when changed_sections_only=true.")
         previous_report = load_validation_report_from_artifact(previous_report_uri)
 
     section_reports_by_name: dict[str, ValidationSectionReport] = {}
     if previous_report is not None:
-        section_reports_by_name.update(
-            {section.section_name: section for section in previous_report.sections}
-        )
+        section_reports_by_name.update({section.section_name: section for section in previous_report.sections})
 
     sections_to_rescore = set(SECTION_ORDER)
     if request.config.changed_sections_only:
@@ -496,15 +550,10 @@ async def execute_fast_validation(
     for section_name in SECTION_ORDER:
         if section_name not in sections_to_rescore:
             continue
-        section_reports_by_name[section_name] = _build_section_report(
+        section_reports_by_name[section_name] = _build_ai_only_section_report(
             section_name=section_name,
             section_text=section_texts.get(section_name, "").strip(),
-            source_sentences=source_sentences,
-            source_index=source_index,
-            request=request,
-            validation_config=resolved_validation_config,
-            originality_config=resolved_originality_config,
-            reference_lines=reference_lines,
+            validation_config=validation_config,
         )
 
     section_reports = [
@@ -512,37 +561,141 @@ async def execute_fast_validation(
         for section_name in SECTION_ORDER
         if section_name in section_reports_by_name
     ]
-    section_flags = _build_section_flags_from_reports(
-        section_reports=section_reports,
-        config=resolved_validation_config,
+    section_flags = [
+        ValidationSectionFlag(
+            section_id=section.section_name,
+            flag_type="ai",
+            score=round(section.ai_score or 0.0, 4),
+            risk=section.risk,
+            summary=f"{section.section_name.replace('_', ' ').title()} stayed above the AI acceptance threshold.",
+        )
+        for section in section_reports
+        if section.ai_score is not None and section.ai_score > validation_config.ai_accept_threshold
+    ]
+    ai_score = _document_ai_score(section_reports)
+    routing_decision = _routing_decision_for_ai_check(
+        ai_score=ai_score,
+        section_flags=section_flags,
+        config=validation_config,
+    )
+    initial_ai_score, initial_plagiarism_score = _initial_scores_from_previous(previous_report)
+    if initial_ai_score is None:
+        initial_ai_score = ai_score
+
+    failure_reasons = ["ai_threshold_exceeded"] if routing_decision == "flagged" else []
+    report = ValidationReport(
+        ai_score=ai_score,
+        plagiarism_score=0.0,
+        confidence_band=_confidence_band(routing_decision),
+        routing_decision=routing_decision,
+        sections=section_reports,
+        decision_summary=_decision_summary(routing_decision, mode="ai_check", failure_reasons=failure_reasons),
+        initial_ai_score=initial_ai_score,
+        initial_plagiarism_score=initial_plagiarism_score,
+        final_ai_score=ai_score,
+        final_plagiarism_score=None,
+        failure_reasons=failure_reasons,
+    )
+    sidecar = store_validation_report_artifact(
+        request.project_id,
+        request.job_id,
+        _validation_sidecar_payload(
+            request=request,
+            config=validation_config,
+            report=report,
+            section_flags=section_flags,
+        ),
+        mode=request.config.mode,
+        revision=_draft_revision_from_uri(request.current_draft_uri),
+    )
+    return ValidationServiceResponse(
+        job_id=request.job_id,
+        output={
+            "mode": request.config.mode,
+            "ai_score": ai_score,
+            "plagiarism_score": 0.0,
+            "confidence_band": report.confidence_band,
+            "routing_decision": report.routing_decision,
+            "section_flags": section_flags,
+            "validation_report_uri": sidecar.uri,
+            "report": report,
+            "failure_reasons": failure_reasons,
+        },
     )
 
-    document_ai_scores = [
-        section.ai_score for section in section_reports if section.ai_score is not None
+
+async def _execute_final_report(
+    request: ValidationServiceRequest,
+    *,
+    settings: Settings,
+    validation_config: ValidationConfig,
+    originality_config: OriginalityConfig,
+) -> ValidationServiceResponse:
+    draft = load_generated_draft_artifact(request.current_draft_uri)
+    extracted_text_uri = request.artifacts.extracted_text_uri
+    if not extracted_text_uri:
+        raise ValueError("Validation requests require artifacts.extracted_text_uri.")
+    source_text = load_extracted_text_artifact(extracted_text_uri)
+    previous_report = None
+    if request.artifacts.previous_validation_report_uri:
+        previous_report = load_validation_report_from_artifact(request.artifacts.previous_validation_report_uri)
+
+    section_texts = build_section_map(humanized_draft=None, paper_snapshot=draft)
+    source_sentences, source_index = _build_source_index(
+        source_text,
+        ngram_size=validation_config.overlap_ngram_size,
+        min_tokens=validation_config.overlap_sentence_min_tokens,
+    )
+    reference_lines = list(draft.paper.references)
+    section_reports = [
+        _build_section_report(
+            section_name=section_name,
+            section_text=section_texts.get(section_name, "").strip(),
+            source_sentences=source_sentences,
+            source_index=source_index,
+            request=request,
+            validation_config=validation_config,
+            originality_config=originality_config,
+            reference_lines=reference_lines,
+        )
+        for section_name in SECTION_ORDER
     ]
+    section_flags = _build_section_flags_from_reports(
+        section_reports=section_reports,
+        config=validation_config,
+    )
+
+    ai_score = _document_ai_score(section_reports)
     document_flagged_spans: list[tuple[int, int]] = []
     document_length = sum(len(text.strip()) for text in section_texts.values() if text.strip()) or 1
     offset_cursor = 0
     for section_name in SECTION_ORDER:
         section_text = section_texts.get(section_name, "").strip()
-        section_report = section_reports_by_name.get(section_name)
+        section_report = next((section for section in section_reports if section.section_name == section_name), None)
         if section_report is not None:
             document_flagged_spans.extend(
-                [
-                    (start + offset_cursor, end + offset_cursor)
-                    for start, end in _suspicious_spans_for_section(section_report)
-                ]
+                [(start + offset_cursor, end + offset_cursor) for start, end in _suspicious_spans_for_section(section_report)]
             )
         offset_cursor += max(1, len(section_text)) + 1
 
-    ai_score = round(mean(document_ai_scores), 4) if document_ai_scores else None
     plagiarism_score = round((_merge_span_lengths(document_flagged_spans) / document_length) * 100, 2)
     routing_decision = _routing_decision_for_report(
         ai_score=ai_score,
         plagiarism_score=plagiarism_score,
         section_flags=section_flags,
-        config=resolved_validation_config,
+        config=validation_config,
     )
+    initial_ai_score, initial_plagiarism_score = _initial_scores_from_previous(previous_report)
+    if initial_ai_score is None:
+        initial_ai_score = ai_score
+    if initial_plagiarism_score is None:
+        initial_plagiarism_score = plagiarism_score
+
+    failure_reasons: list[str] = []
+    if ai_score is not None and ai_score > validation_config.ai_accept_threshold:
+        failure_reasons.append("ai_threshold_exceeded")
+    if plagiarism_score > validation_config.plagiarism_accept_threshold:
+        failure_reasons.append("overlap_threshold_exceeded")
 
     report = ValidationReport(
         ai_score=ai_score,
@@ -550,33 +703,24 @@ async def execute_fast_validation(
         confidence_band=_confidence_band(routing_decision),
         routing_decision=routing_decision,
         sections=section_reports,
-        decision_summary=_decision_summary(routing_decision),
+        decision_summary=_decision_summary(routing_decision, mode="final_report", failure_reasons=failure_reasons),
+        initial_ai_score=initial_ai_score,
+        initial_plagiarism_score=initial_plagiarism_score,
+        final_ai_score=ai_score,
+        final_plagiarism_score=plagiarism_score,
+        failure_reasons=failure_reasons,
     )
-    sidecar_payload = {
-        "job_id": request.job_id,
-        "project_id": request.project_id,
-        "mode": request.config.mode,
-        "provider_name": resolved_validation_config.provider_name,
-        "ai_detector": {
-            "backend": resolved_validation_config.ai_detector_backend,
-            "model_id": resolved_validation_config.ai_detector_model_id
-            if resolved_validation_config.ai_detector_backend == "desklib"
-            else "heuristic",
-            "max_length": resolved_validation_config.ai_detector_max_length,
-            "batch_size": resolved_validation_config.ai_detector_batch_size,
-        },
-        "report": report,
-        "section_flags": section_flags,
-        "section_status_counts": summarize_status_counts(section.status for section in section_reports),
-        "changed_section_ids": request.config.changed_section_ids,
-    }
-    report_revision = _draft_revision_from_uri(request.current_draft_uri)
     sidecar = store_validation_report_artifact(
         request.project_id,
         request.job_id,
-        sidecar_payload,
+        _validation_sidecar_payload(
+            request=request,
+            config=validation_config,
+            report=report,
+            section_flags=section_flags,
+        ),
         mode=request.config.mode,
-        revision=report_revision,
+        revision=_draft_revision_from_uri(request.current_draft_uri),
     )
     return ValidationServiceResponse(
         job_id=request.job_id,
@@ -589,5 +733,45 @@ async def execute_fast_validation(
             "section_flags": section_flags,
             "validation_report_uri": sidecar.uri,
             "report": report,
+            "failure_reasons": failure_reasons,
         },
+    )
+
+
+async def execute_validation(
+    request: ValidationServiceRequest,
+    *,
+    settings: Settings | None = None,
+    validation_config: ValidationConfig | None = None,
+    originality_config: OriginalityConfig | None = None,
+) -> ValidationServiceResponse:
+    resolved_settings = settings or get_settings()
+    resolved_validation_config = validation_config or ValidationConfig.from_settings(resolved_settings)
+    resolved_originality_config = originality_config or OriginalityConfig.from_settings(resolved_settings)
+    if request.config.mode == "ai_check":
+        return await _execute_ai_check(
+            request,
+            settings=resolved_settings,
+            validation_config=resolved_validation_config,
+        )
+    return await _execute_final_report(
+        request,
+        settings=resolved_settings,
+        validation_config=resolved_validation_config,
+        originality_config=resolved_originality_config,
+    )
+
+
+async def execute_fast_validation(
+    request: ValidationServiceRequest,
+    *,
+    settings: Settings | None = None,
+    validation_config: ValidationConfig | None = None,
+    originality_config: OriginalityConfig | None = None,
+) -> ValidationServiceResponse:
+    return await execute_validation(
+        request,
+        settings=settings,
+        validation_config=validation_config,
+        originality_config=originality_config,
     )

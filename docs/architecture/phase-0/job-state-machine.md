@@ -12,7 +12,6 @@ The top-level `status` field may only contain one of the following values:
 - `GENERATED`
 - `VALIDATION_REQUESTED`
 - `VALIDATING`
-- `DEEP_VALIDATION_REQUESTED`
 - `FIX_REQUESTED`
 - `FIXING`
 - `FINALIZING`
@@ -38,11 +37,10 @@ Only one component may move a job out of a given state.
 | `CREATED` | Orchestrator | Validate preconditions, persist job, and enqueue generation |
 | `GENERATION_REQUESTED` | Orchestrator | Cloud Tasks dispatch succeeds or exhausts dispatch retries |
 | `GENERATING` | Generation service | Write formatted draft or return terminal failure |
-| `GENERATED` | Orchestrator | Enqueue fast validation |
+| `GENERATED` | Orchestrator | Enqueue Desklib AI check |
 | `VALIDATION_REQUESTED` | Orchestrator | Cloud Tasks dispatch succeeds or exhausts dispatch retries |
-| `VALIDATING` | Validation service | Return `clean`, `borderline`, or `flagged` decision |
-| `DEEP_VALIDATION_REQUESTED` | Orchestrator | Enqueue validation in `mode=deep` |
-| `FIX_REQUESTED` | Orchestrator | Enqueue fix if iterations remain; otherwise finalize as `manual_review_required` |
+| `VALIDATING` | Validation service | Return `accepted` or `flagged` for `ai_check` or `final_report` |
+| `FIX_REQUESTED` | Orchestrator | Enqueue humanizer remediation if iterations remain; otherwise finalize as `manual_review_required` |
 | `FIXING` | Fix service | Write next draft version or return terminal failure |
 | `FINALIZING` | Finalize service | Write final report and accepted draft pointer |
 | `DONE` | None | Terminal |
@@ -57,18 +55,15 @@ Only one component may move a job out of a given state.
 | `GENERATION_REQUESTED` | `FAILED` | Dispatch retries exhausted before worker acceptance | Orchestrator |
 | `GENERATING` | `GENERATED` | Formatted draft artifact written successfully | Generation service |
 | `GENERATING` | `FAILED` | Worker retries exhausted or non-retryable generation failure | Generation service |
-| `GENERATED` | `VALIDATION_REQUESTED` | Orchestrator schedules fast validation | Orchestrator |
+| `GENERATED` | `VALIDATION_REQUESTED` | Orchestrator schedules Desklib AI check | Orchestrator |
 | `VALIDATION_REQUESTED` | `VALIDATING` | Validation task accepted | Orchestrator |
 | `VALIDATION_REQUESTED` | `FAILED` | Validation dispatch retries exhausted | Orchestrator |
-| `VALIDATING` | `FINALIZING` | Fast validation returns `clean` | Validation service |
-| `VALIDATING` | `DEEP_VALIDATION_REQUESTED` | Fast validation returns `borderline` and `validation_mode=fast` | Validation service |
-| `VALIDATING` | `FIX_REQUESTED` | Validation returns `flagged`, or deep validation returns `borderline` or `flagged` | Validation service |
+| `VALIDATING` | `FINALIZING` | Final report returns `accepted`, or AI check passes and orchestrator moves to final report | Validation service |
+| `VALIDATING` | `FIX_REQUESTED` | Desklib AI check returns `flagged` and fixable AI targets remain | Validation service |
 | `VALIDATING` | `FAILED` | Validation retries exhausted or non-retryable validation failure | Validation service |
-| `DEEP_VALIDATION_REQUESTED` | `VALIDATING` | Deep validation task accepted with `validation_mode=deep` | Orchestrator |
-| `DEEP_VALIDATION_REQUESTED` | `FAILED` | Deep-validation dispatch retries exhausted | Orchestrator |
 | `FIX_REQUESTED` | `FIXING` | Fix task accepted and `iteration < max_iterations` | Orchestrator |
-| `FIX_REQUESTED` | `FINALIZING` | `iteration >= max_iterations` or no fixable sections remain | Orchestrator |
-| `FIXING` | `VALIDATION_REQUESTED` | Revised draft written successfully; revalidate changed sections only | Fix service |
+| `FIX_REQUESTED` | `FINALIZING` | `iteration >= max_iterations` or no fixable AI sections remain after final report is prepared | Orchestrator |
+| `FIXING` | `VALIDATION_REQUESTED` | Revised draft written successfully; rerun Desklib AI check on changed sections | Fix service |
 | `FIXING` | `FAILED` | Worker retries exhausted or non-retryable fix failure | Fix service |
 | `FINALIZING` | `DONE` | Final report and accepted draft persisted | Finalize service |
 | `FINALIZING` | `FAILED` | Finalize retries exhausted or non-retryable finalize failure | Finalize service |
@@ -79,17 +74,19 @@ Only one component may move a job out of a given state.
 
 The decision engine applies these rules:
 
-- `clean` -> `FINALIZING`
-- `borderline` after fast validation -> `DEEP_VALIDATION_REQUESTED`
-- `borderline` after deep validation -> `FIX_REQUESTED`
-- `flagged` -> `FIX_REQUESTED`
+- `ai_check` with `ai_score <= 10%` -> run `final_report`
+- `ai_check` with `ai_score > 10%` and fixable AI targets -> `FIX_REQUESTED`
+- `ai_check` with `ai_score > 10%` and no remaining fix path -> run `final_report`, then finalize as `manual_review_required`
+- `final_report` accepted -> `FINALIZING`
+- `final_report` flagged -> `FINALIZING`
 
 ### Fix Loop
 
 - `max_iterations = 3`
 - `iteration` counts completed fix attempts, not validation attempts
-- revalidation after a fix must prefer changed sections only
-- if a job reaches `max_iterations` and still cannot be classified as `clean`, finalization must mark the report disposition as `manual_review_required`
+- revalidation after a fix must prefer changed sections only for the Desklib AI recheck
+- overlap review runs after AI passes, plus once on the final flagged draft so the report includes final overlap metrics
+- if a job reaches `max_iterations` and still stays above the 10% AI threshold, finalization must mark the report disposition as `manual_review_required`
 
 ### Terminal Outcomes
 

@@ -70,19 +70,18 @@ Status: `200 OK`
   "project_id": "project_123",
   "status": "VALIDATING",
   "stage": "validation",
-  "validation_mode": "fast",
+  "validation_mode": "ai_check",
   "iteration": 1,
   "progress": {
-    "current_step": "fast_validation",
+    "current_step": "validation",
     "percent": 60
   },
   "current_draft_uri": "gs://papereasy-workflows/projects/project_123/jobs/job_123/drafts/draft_v1.json",
   "scores": {
     "ai_score": 0.42,
-    "plagiarism_score": 7.5,
+    "plagiarism_score": 0.0,
     "confidence_band": "medium",
-    "routing_decision": "borderline",
-    "deep_validation_used": false
+    "routing_decision": "flagged"
   },
   "error": null
 }
@@ -182,14 +181,14 @@ Runs structuring, writing, citation, and IEEE formatting.
 
 ## `POST /internal/validation/run`
 
-Runs validation in either `fast` or `deep` mode.
+Runs validation in either `ai_check` or `final_report` mode.
 
 ### Request Additions
 
 ```json
 {
   "config": {
-    "mode": "fast",
+    "mode": "ai_check",
     "changed_sections_only": false
   },
   "current_draft_uri": "gs://.../draft_v1.json"
@@ -204,11 +203,11 @@ Runs validation in either `fast` or `deep` mode.
   "status": "VALIDATING",
   "stage": "validation",
   "output": {
-    "mode": "fast",
+    "mode": "ai_check",
     "ai_score": 0.42,
-    "plagiarism_score": 7.5,
+    "plagiarism_score": 0.0,
     "confidence_band": "medium",
-    "routing_decision": "borderline",
+    "routing_decision": "flagged",
     "section_flags": [
       {
         "section_id": "introduction",
@@ -222,8 +221,8 @@ Runs validation in either `fast` or `deep` mode.
 
 ### Timeout / Retry / Idempotency
 
-- fast mode timeout budget: `2 minutes`
-- deep mode timeout budget: `10 minutes`
+- `ai_check` timeout budget: `2 minutes`
+- `final_report` timeout budget: `10 minutes`
 - transport retries: `2`
 - repeated validation for the same `(job_id, task_id, attempt)` must return the same result summary
 
@@ -232,6 +231,13 @@ Runs validation in either `fast` or `deep` mode.
 - may write validation result sidecars
 - must not write draft versions
 - must not write `final_report`
+
+### Validation Semantics
+
+- `ai_check` runs Desklib AI detection on the current draft and decides whether the workflow should enter the humanizer loop.
+- `final_report` runs overlap/plagiarism scoring and assembles the final validation report using the latest accepted or flagged draft.
+- the primary acceptance gate for entering or skipping the humanizer loop is `ai_score <= 10%`
+- overlap is evaluated after AI passes, and once on the final flagged draft so the report includes both initial and final scores
 
 ## `POST /internal/fix/run`
 

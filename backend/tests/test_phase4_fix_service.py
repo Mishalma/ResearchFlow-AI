@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.services.fix_service import HttpFixServiceClient, LocalFixServiceClient
 from core.config import get_settings
@@ -62,7 +68,29 @@ def _artifact_pointer(version: str, uri: str) -> WorkflowArtifactPointer:
 async def test_execute_fix_request_rewrites_only_targeted_sections_and_preserves_protected_tokens(monkeypatch):
     generated_paper = _generated_paper()
     stored: dict[str, GeneratedPaper] = {}
-    monkeypatch.setenv("HUMANIZER_SEMANTIC_DRIFT_THRESHOLD", "1.0")
+    monkeypatch.setattr(
+        "humanizer.agent.HumanizerRuntimeAgent.run",
+        lambda self, section_map, iteration=0, target_sections=None: {
+            "updated_sections": {
+                **section_map,
+                "introduction": (
+                    "The benchmark posted a 12% accuracy gain [1] across evaluation, and "
+                    "\\cite{smith2024} reports the same trend in a comparable setting."
+                ),
+            },
+            "graph_action": "accept",
+            "scores_before": {"sections": {}, "composite_score": 0.7},
+            "scores_after": {"sections": {}, "composite_score": 0.3},
+            "perplexity_before": None,
+            "perplexity_after": None,
+            "iteration": iteration,
+            "sections_skipped": 0,
+            "sections_rewritten": 1,
+            "rewriter_mode": "huggingface",
+            "failure_reasons": [],
+            "run_log": [],
+        },
+    )
 
     monkeypatch.setattr("fix.runtime.load_generated_draft_artifact", lambda uri: generated_paper)
     monkeypatch.setattr(
@@ -100,8 +128,9 @@ async def test_execute_fix_request_rewrites_only_targeted_sections_and_preserves
 
     assert response.output.fix_status == "applied"
     assert response.output.changed_sections == ["introduction"]
+    assert response.output.changed is True
     assert response.output.updated_draft_uri.endswith("draft_v2.json")
-    assert response.output.rewriter_mode == "deterministic"
+    assert response.output.rewriter_mode == "huggingface"
 
     updated_draft = stored["draft"]
     updated_intro = updated_draft.paper.sections.introduction
@@ -145,8 +174,67 @@ async def test_execute_fix_request_without_targets_returns_not_needed(monkeypatc
 
     assert response.output.fix_status == "not_needed"
     assert response.output.changed_sections == []
+    assert response.output.changed is False
     assert response.output.draft_artifact is None
     assert response.output.updated_draft_uri.endswith("draft_v1.json")
+
+
+@pytest.mark.anyio
+async def test_execute_fix_request_no_accepted_changes_returns_no_change_without_new_draft(monkeypatch):
+    generated_paper = _generated_paper()
+
+    monkeypatch.setattr("fix.runtime.load_generated_draft_artifact", lambda uri: generated_paper)
+    monkeypatch.setattr(
+        "fix.runtime.store_generated_draft_artifact",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("draft should not be stored")),
+    )
+    monkeypatch.setattr(
+        "humanizer.agent.HumanizerRuntimeAgent.run",
+        lambda self, section_map, iteration=0, target_sections=None: {
+            "updated_sections": dict(section_map),
+            "graph_action": "retry_humanizer",
+            "scores_before": {"sections": {}, "composite_score": 0.7},
+            "scores_after": {"sections": {}, "composite_score": 0.7},
+            "perplexity_before": None,
+            "perplexity_after": None,
+            "iteration": iteration,
+            "sections_skipped": 0,
+            "sections_rewritten": 0,
+            "rewriter_mode": "none",
+            "failure_reasons": ["semantic_drift"],
+            "run_log": [],
+        },
+    )
+
+    response = await execute_fix_request(
+        FixServiceRequest(
+            task_id="fix-task-999",
+            job_id="job-999",
+            project_id="project-999",
+            user_id="user-999",
+            idempotency_key="phase4-fix-999",
+            current_draft_uri="gs://bucket/projects/project-999/jobs/job-999/drafts/draft_v1.json",
+            validation_report_uri="gs://bucket/projects/project-999/jobs/job-999/metadata/validation_fast_v1.json",
+            iteration=1,
+            mode="ai_style",
+            targets=[
+                FixSectionTarget(
+                    section_id="introduction",
+                    score=0.31,
+                    risk="medium",
+                    summary="Introduction still looks formulaic.",
+                )
+            ],
+        )
+    )
+
+    assert response.output.fix_status == "no_change"
+    assert response.output.changed is False
+    assert response.output.changed_sections == []
+    assert response.output.draft_artifact is None
+    assert response.output.updated_draft_uri.endswith("draft_v1.json")
+    assert response.output.rewriter_mode == "none"
+    assert response.output.fallback_reason == "semantic_drift"
 
 
 @pytest.mark.anyio
@@ -167,14 +255,17 @@ async def test_local_fix_service_client_runs_without_http(monkeypatch):
                 "checksum_sha256": None,
             },
             "changed_sections": ["introduction"],
-            "rewriter_mode": "deterministic",
+            "changed": True,
+            "rewriter_mode": "huggingface",
             "fix_status": "applied",
+            "fallback_reason": None,
             "fix_summary": {
                 "attempted": True,
                 "status": "applied",
                 "iterations": 1,
                 "changed_sections": ["introduction"],
-                "rewriter_mode": "deterministic",
+                "rewriter_mode": "huggingface",
+                "fallback_reason": None,
             },
         },
     }
@@ -238,17 +329,20 @@ async def test_http_fix_service_client_serializes_and_deserializes():
                         "version": "draft_v2",
                         "content_type": "application/json",
                         "created_at": datetime.now(UTC).isoformat(),
-                        "checksum_sha256": None,
+                    "checksum_sha256": None,
                     },
                     "changed_sections": ["discussion"],
-                    "rewriter_mode": "deterministic",
+                    "changed": True,
+                    "rewriter_mode": "huggingface",
                     "fix_status": "applied",
+                    "fallback_reason": None,
                     "fix_summary": {
                         "attempted": True,
                         "status": "applied",
                         "iterations": 2,
                         "changed_sections": ["discussion"],
-                        "rewriter_mode": "deterministic",
+                        "rewriter_mode": "huggingface",
+                        "fallback_reason": None,
                     },
                 },
             },

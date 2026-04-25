@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from originality.schemas import OriginalitySpan
 
-ValidationMode = Literal["fast"]
+ValidationMode = Literal["ai_check", "final_report"]
 ValidationConfidenceBand = Literal["unknown", "low", "medium", "high"]
 ValidationRoutingDecision = Literal["pending", "accepted", "flagged"]
 ValidationSectionRisk = Literal["low", "medium", "severe"]
@@ -61,6 +61,11 @@ class ValidationReport(BaseModel):
     routing_decision: ValidationRoutingDecision = "pending"
     sections: list[ValidationSectionReport] = Field(default_factory=list)
     decision_summary: str = Field(min_length=1)
+    initial_ai_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    initial_plagiarism_score: float | None = Field(default=None, ge=0.0, le=100.0)
+    final_ai_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    final_plagiarism_score: float | None = Field(default=None, ge=0.0, le=100.0)
+    failure_reasons: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def normalize(self) -> "ValidationReport":
@@ -74,7 +79,7 @@ class ValidationServiceArtifacts(BaseModel):
 
 
 class ValidationServiceConfig(BaseModel):
-    mode: ValidationMode = "fast"
+    mode: ValidationMode = "ai_check"
     changed_sections_only: bool = False
     changed_section_ids: list[str] = Field(default_factory=list)
 
@@ -116,7 +121,7 @@ class ValidationServiceRequest(BaseModel):
 
 
 class ValidationServiceOutput(BaseModel):
-    mode: ValidationMode = "fast"
+    mode: ValidationMode = "ai_check"
     ai_score: float | None = Field(default=None, ge=0.0, le=1.0)
     plagiarism_score: float = Field(default=0.0, ge=0.0, le=100.0)
     confidence_band: ValidationConfidenceBand = "unknown"
@@ -124,6 +129,7 @@ class ValidationServiceOutput(BaseModel):
     section_flags: list[ValidationSectionFlag] = Field(default_factory=list)
     validation_report_uri: str = Field(min_length=1)
     report: ValidationReport
+    failure_reasons: list[str] = Field(default_factory=list)
 
 
 class ValidationServiceResponse(BaseModel):

@@ -25,7 +25,7 @@ def _resolve_humanizer_config(settings: Settings) -> HumanizerConfig:
     use_model_rewriter = config.use_model_rewriter
     enable_perplexity = config.enable_perplexity
     if "HUMANIZER_USE_MODEL_REWRITER" not in os.environ:
-        use_model_rewriter = False
+        use_model_rewriter = None
     if "HUMANIZER_ENABLE_PERPLEXITY" not in os.environ:
         enable_perplexity = False
     return replace(
@@ -84,6 +84,7 @@ async def execute_fix_request(
             "iterations": request.iteration,
             "changed_sections": [],
             "rewriter_mode": None,
+            "fallback_reason": None,
         }
         return FixServiceResponse(
             job_id=request.job_id,
@@ -92,8 +93,10 @@ async def execute_fix_request(
                 "updated_draft_uri": request.current_draft_uri,
                 "draft_artifact": None,
                 "changed_sections": [],
+                "changed": False,
                 "rewriter_mode": None,
                 "fix_status": "not_needed",
+                "fallback_reason": None,
                 "fix_summary": fix_summary,
             },
         )
@@ -115,42 +118,56 @@ async def execute_fix_request(
         if runtime_result["updated_sections"].get(section_id, "").strip()
         != section_map.get(section_id, "").strip()
     ]
-    generated_paper = build_generated_paper(
-        source_paper=draft.paper,
-        section_texts=runtime_result["updated_sections"],
-    )
     rewriter_mode = runtime_result.get("rewriter_mode")
-    fix_status = "applied" if changed_sections else "failed"
-    draft_artifact = store_generated_draft_artifact(
-        request.project_id,
-        request.job_id,
-        version=_next_draft_version(request.current_draft_uri),
-        generated_paper=generated_paper,
-        owner_service="fix-service",
-    )
+    failure_reasons = list(runtime_result.get("failure_reasons", []))
+    fallback_reason = failure_reasons[0] if failure_reasons else None
+    if changed_sections:
+        generated_paper = build_generated_paper(
+            source_paper=draft.paper,
+            section_texts=runtime_result["updated_sections"],
+        )
+        draft_artifact = store_generated_draft_artifact(
+            request.project_id,
+            request.job_id,
+            version=_next_draft_version(request.current_draft_uri),
+            generated_paper=generated_paper,
+            owner_service="fix-service",
+        )
+        updated_draft_uri = draft_artifact.uri
+        fix_status = "applied"
+        changed = True
+    else:
+        draft_artifact = None
+        updated_draft_uri = request.current_draft_uri
+        fix_status = "no_change"
+        changed = False
     fix_summary = {
         "attempted": True,
         "status": fix_status,
         "iterations": request.iteration,
         "changed_sections": changed_sections,
         "rewriter_mode": rewriter_mode,
+        "fallback_reason": fallback_reason,
     }
     logger.info(
-        "Fix request %s completed with status=%s changed_sections=%s mode=%s",
+        "Fix request %s completed with status=%s changed_sections=%s mode=%s fallback_reason=%s",
         request.job_id,
         fix_status,
         changed_sections,
         rewriter_mode,
+        fallback_reason,
     )
     return FixServiceResponse(
         job_id=request.job_id,
         output={
             "mode": request.mode,
-            "updated_draft_uri": draft_artifact.uri,
+            "updated_draft_uri": updated_draft_uri,
             "draft_artifact": draft_artifact,
             "changed_sections": changed_sections,
+            "changed": changed,
             "rewriter_mode": rewriter_mode,
             "fix_status": fix_status,
+            "fallback_reason": fallback_reason,
             "fix_summary": fix_summary,
         },
     )

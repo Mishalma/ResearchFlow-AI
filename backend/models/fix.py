@@ -8,7 +8,7 @@ from models.job import FixSummary, WorkflowArtifactPointer
 
 FixMode = Literal["ai_style"]
 FixRisk = Literal["medium", "severe"]
-FixStatus = Literal["not_needed", "applied", "failed"]
+FixStatus = Literal["not_needed", "applied", "failed", "no_change"]
 
 
 class FixSectionTarget(BaseModel):
@@ -52,8 +52,10 @@ class FixServiceOutput(BaseModel):
     updated_draft_uri: str = Field(min_length=1)
     draft_artifact: WorkflowArtifactPointer | None = None
     changed_sections: list[str] = Field(default_factory=list)
+    changed: bool = False
     rewriter_mode: str | None = None
     fix_status: FixStatus = "not_needed"
+    fallback_reason: str | None = None
     fix_summary: FixSummary
 
     @field_validator("changed_sections", mode="before")

@@ -13,8 +13,15 @@ if str(BACKEND_ROOT) not in sys.path:
 from agents.humanizer_agent import HumanizerAgent as PipelineHumanizerAgent
 from humanizer.agent import run_humanizer_pipeline
 from humanizer.config import HumanizerConfig
-from humanizer.detectors import PassiveVoiceAnalyzer, analyze_section
-from humanizer.rewriter import HybridSectionRewriter
+from humanizer.detectors import PassiveVoiceAnalyzer, analyze_section, composite_ai_score
+from humanizer.rewriter import (
+    DeterministicRewriter,
+    HuggingFaceRewriter,
+    HybridSectionRewriter,
+    HumanizerRewriter,
+    NoChangeRewriter,
+    RewriteAttemptResult,
+)
 from humanizer.perplexity import PerplexityScorer
 from models.a2a import A2AMessage
 from models.agent_runtime import AgentSpec
@@ -173,8 +180,22 @@ def test_detector_flags_stock_ai_phrases_and_em_dash_patterns():
     assert "em_dash_overuse" in pattern_types
 
 
-def test_rewrite_loop_improves_style_score():
-    config = HumanizerConfig(use_model_rewriter=False, enable_perplexity=False, max_iterations=2)
+def test_rewrite_loop_improves_style_score(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        HuggingFaceRewriter,
+        "rewrite_paragraph",
+        lambda self, **kwargs: RewriteAttemptResult(
+            text="The discussion points to stronger trust in the workflow, while adoption also appears more plausible.",
+            rewriter_used="huggingface",
+            changed=True,
+        ),
+    )
+    config = HumanizerConfig(
+        rewriter_backend="huggingface",
+        use_model_rewriter=True,
+        enable_perplexity=False,
+        max_iterations=2,
+    )
     rewriter = HybridSectionRewriter(
         config=config,
         vertex_client=None,
@@ -195,6 +216,139 @@ def test_rewrite_loop_improves_style_score():
 
     assert outcome.applied_changes
     assert outcome.analysis_after.ai_pattern_score <= outcome.analysis_before.ai_pattern_score
+
+
+def test_backend_selection_prefers_huggingface():
+    rewriter = HumanizerRewriter(HumanizerConfig(rewriter_backend="huggingface"))
+    assert isinstance(rewriter.backend, HuggingFaceRewriter)
+
+
+def test_backend_selection_supports_none():
+    rewriter = HumanizerRewriter(HumanizerConfig(rewriter_backend="none"))
+    assert isinstance(rewriter.backend, NoChangeRewriter)
+
+
+def test_hf_failure_returns_unchanged_and_never_calls_deterministic(monkeypatch: pytest.MonkeyPatch):
+    def fail_hf(self, **kwargs):
+        return RewriteAttemptResult(
+            text=kwargs["target_para"],
+            rewriter_used="none",
+            changed=False,
+            failure_reason="model_load_failed",
+        )
+
+    def fail_deterministic(self, text):
+        raise AssertionError("Deterministic fallback must not be used")
+
+    monkeypatch.setattr(HuggingFaceRewriter, "rewrite_paragraph", fail_hf)
+    monkeypatch.setattr(DeterministicRewriter, "apply_all", fail_deterministic)
+
+    rewriter = HumanizerRewriter(HumanizerConfig(rewriter_backend="huggingface"))
+    original = (
+        "Furthermore, the model improved accuracy by 12% on PubMedBERT [1]. "
+        "Furthermore, the model retained 95% citation fidelity with \\cite{pubmedbert}."
+    )
+    result = rewriter.rewrite_section(original, composite_ai_score(original), section_name="results")
+
+    assert result["rewritten_text"] == original
+    assert result["changed"] is False
+    assert result["rewriter_used"] == "none"
+    assert "model_load_failed" in result["failure_reasons"]
+
+
+@pytest.mark.parametrize(
+    ("candidate", "reason"),
+    [
+        (
+            "The workflow improved accuracy by 12% on PubMedBERT and retained citation fidelity.",
+            "protected_span_changed",
+        ),
+        (
+            "The workflow improved accuracy by 18% on PubMedBERT [1] and retained 95% citation fidelity with \\cite{pubmedbert}.",
+            "protected_span_changed",
+        ),
+    ],
+)
+def test_hf_rejected_output_returns_unchanged(monkeypatch: pytest.MonkeyPatch, candidate: str, reason: str):
+    monkeypatch.setattr(
+        HuggingFaceRewriter,
+        "rewrite_paragraph",
+        lambda self, **kwargs: RewriteAttemptResult(
+            text=candidate,
+            rewriter_used="huggingface",
+            changed=True,
+        ),
+    )
+    monkeypatch.setattr(
+        DeterministicRewriter,
+        "apply_all",
+        lambda self, text: (_ for _ in ()).throw(AssertionError("Deterministic fallback must not run")),
+    )
+
+    rewriter = HumanizerRewriter(HumanizerConfig(rewriter_backend="huggingface"))
+    original = (
+        "Furthermore, the model improved accuracy by 12% on PubMedBERT [1]. "
+        "Furthermore, the model retained 95% citation fidelity with \\cite{pubmedbert}."
+    )
+    result = rewriter.rewrite_section(original, composite_ai_score(original), section_name="results")
+
+    assert result["rewritten_text"] == original
+    assert result["changed"] is False
+    assert result["rewriter_used"] == "none"
+    assert reason in result["failure_reasons"]
+
+
+def test_hf_semantic_drift_failure_returns_unchanged(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        HuggingFaceRewriter,
+        "rewrite_paragraph",
+        lambda self, **kwargs: RewriteAttemptResult(
+            text="Climate change is accelerating due to greenhouse gas emissions.",
+            rewriter_used="huggingface",
+            changed=True,
+        ),
+    )
+
+    rewriter = HumanizerRewriter(
+        HumanizerConfig(rewriter_backend="huggingface", semantic_drift_threshold=0.0),
+    )
+    original = "Furthermore, the model improved accuracy by 12% on the benchmark dataset [1]."
+    result = rewriter.rewrite_section(original, composite_ai_score(original), section_name="results")
+
+    assert result["rewritten_text"] == original
+    assert result["changed"] is False
+    assert result["rewriter_used"] == "none"
+    assert "semantic_drift" in result["failure_reasons"]
+
+
+def test_valid_hf_output_is_accepted(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "humanizer.rewriter.verify_rewrite_safety",
+        lambda **kwargs: type("SafetyResult", (), {"passed": True, "reasons": []})(),
+    )
+    monkeypatch.setattr(
+        HuggingFaceRewriter,
+        "rewrite_paragraph",
+        lambda self, **kwargs: RewriteAttemptResult(
+            text=(
+                "The model improved accuracy by 12% on PubMedBERT [1], while preserving 95% "
+                "citation fidelity with \\cite{pubmedbert} across evaluation."
+            ),
+            rewriter_used="huggingface",
+            changed=True,
+        ),
+    )
+
+    rewriter = HumanizerRewriter(HumanizerConfig(rewriter_backend="huggingface"))
+    original = (
+        "Furthermore, the model improved accuracy by 12% on PubMedBERT [1]. "
+        "Furthermore, the model retained 95% citation fidelity with \\cite{pubmedbert}."
+    )
+    result = rewriter.rewrite_section(original, composite_ai_score(original), section_name="results")
+
+    assert result["rewriter_used"] == "huggingface"
+    assert result["changed"] is True
+    assert result["rewritten_text"] != original
 
 
 def test_limitations_are_not_softened():

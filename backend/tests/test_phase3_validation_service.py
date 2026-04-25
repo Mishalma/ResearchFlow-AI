@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
 import pytest
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.services.validation_service import (
     HttpValidationServiceClient,
@@ -115,16 +120,10 @@ def test_ai_score_for_section_uses_desklib_backend(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_execute_fast_validation_returns_report_and_flags_overlap(monkeypatch):
+async def test_execute_ai_check_flags_ai_without_overlap(monkeypatch):
     generated_paper = _generated_paper()
-    source_text = (
-        "Adaptive tutoring improved assessment outcomes across multiple districts using standardized "
-        "pre-test and post-test comparisons. The original source also discussed instructional "
-        "interventions and consistent scoring criteria."
-    )
 
     monkeypatch.setattr("validation.runtime.load_generated_draft_artifact", lambda uri: generated_paper)
-    monkeypatch.setattr("validation.runtime.load_extracted_text_artifact", lambda uri: source_text)
     monkeypatch.setattr(
         "validation.runtime.store_validation_report_artifact",
         lambda project_id, job_id, report, mode, revision="v1": _artifact_pointer(
@@ -132,12 +131,10 @@ async def test_execute_fast_validation_returns_report_and_flags_overlap(monkeypa
             f"gs://bucket/projects/{project_id}/jobs/{job_id}/metadata/validation_{mode}_{revision}.json",
         ),
     )
-
-    class _PerplexityStub:
-        def score(self, text: str):
-            return None
-
-    monkeypatch.setattr("validation.runtime._get_perplexity_scorer", lambda model_name: _PerplexityStub())
+    monkeypatch.setattr(
+        "validation.runtime._ai_score_for_section",
+        lambda text, config: (0.22, {"desklib_probability": 0.22, "ai_detector_model_id": config.ai_detector_model_id}),
+    )
 
     response = await execute_fast_validation(
         ValidationServiceRequest(
@@ -147,16 +144,16 @@ async def test_execute_fast_validation_returns_report_and_flags_overlap(monkeypa
             user_id="user-123",
             idempotency_key="phase3-validation-123",
             current_draft_uri="gs://bucket/projects/project-123/jobs/job-123/drafts/draft_v1.json",
-            artifacts={"extracted_text_uri": "gs://bucket/projects/project-123/jobs/job-123/sources/extracted_text.json"},
-            config={"mode": "fast", "changed_sections_only": False},
+            artifacts={},
+            config={"mode": "ai_check", "changed_sections_only": False},
         )
     )
 
-    assert response.output.mode == "fast"
-    assert response.output.validation_report_uri.endswith("validation_fast_v1.json")
+    assert response.output.mode == "ai_check"
+    assert response.output.validation_report_uri.endswith("validation_ai_check_v1.json")
     assert response.output.report.routing_decision == "flagged"
-    assert response.output.report.plagiarism_score > 0
-    assert any(flag.flag_type == "plagiarism" for flag in response.output.section_flags)
+    assert response.output.report.plagiarism_score == 0
+    assert all(flag.flag_type == "ai" for flag in response.output.section_flags)
 
 
 @pytest.mark.anyio
@@ -166,13 +163,13 @@ async def test_local_validation_service_client_runs_without_http(monkeypatch):
         "status": "VALIDATING",
         "stage": "validation",
         "output": {
-            "mode": "fast",
+            "mode": "ai_check",
             "ai_score": 0.1,
             "plagiarism_score": 2.0,
             "confidence_band": "low",
             "routing_decision": "accepted",
             "section_flags": [],
-            "validation_report_uri": "gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v1.json",
+            "validation_report_uri": "gs://bucket/projects/project-123/jobs/job-123/metadata/validation_ai_check_v1.json",
             "report": {
                 "ai_score": 0.1,
                 "plagiarism_score": 2.0,
@@ -180,7 +177,13 @@ async def test_local_validation_service_client_runs_without_http(monkeypatch):
                 "routing_decision": "accepted",
                 "sections": [],
                 "decision_summary": "Accepted.",
+                "initial_ai_score": 0.1,
+                "initial_plagiarism_score": 2.0,
+                "final_ai_score": 0.1,
+                "final_plagiarism_score": 2.0,
+                "failure_reasons": [],
             },
+            "failure_reasons": [],
         },
     }
 
@@ -234,7 +237,7 @@ async def test_http_validation_service_client_serializes_and_deserializes():
                 "status": "VALIDATING",
                 "stage": "validation",
                 "output": {
-                    "mode": "fast",
+                    "mode": "ai_check",
                     "ai_score": 0.27,
                     "plagiarism_score": 6.4,
                     "confidence_band": "high",
@@ -248,7 +251,7 @@ async def test_http_validation_service_client_serializes_and_deserializes():
                             "summary": "Introduction shows elevated AI-style signals.",
                         }
                     ],
-                    "validation_report_uri": "gs://bucket/projects/project-456/jobs/job-456/metadata/validation_fast_v1.json",
+                    "validation_report_uri": "gs://bucket/projects/project-456/jobs/job-456/metadata/validation_ai_check_v1.json",
                     "report": {
                         "ai_score": 0.27,
                         "plagiarism_score": 6.4,
@@ -256,7 +259,13 @@ async def test_http_validation_service_client_serializes_and_deserializes():
                         "routing_decision": "flagged",
                         "sections": [],
                         "decision_summary": "Flagged.",
+                        "initial_ai_score": 0.27,
+                        "initial_plagiarism_score": 6.4,
+                        "final_ai_score": 0.27,
+                        "final_plagiarism_score": 6.4,
+                        "failure_reasons": ["ai_threshold_exceeded"],
                     },
+                    "failure_reasons": ["ai_threshold_exceeded"],
                 },
             },
         )
@@ -280,16 +289,15 @@ async def test_http_validation_service_client_serializes_and_deserializes():
     )
 
     assert response.output.routing_decision == "flagged"
-    assert response.output.validation_report_uri.endswith("validation_fast_v1.json")
+    assert response.output.validation_report_uri.endswith("validation_ai_check_v1.json")
 
 
 @pytest.mark.anyio
-async def test_execute_fast_validation_only_rescores_changed_sections(monkeypatch):
+async def test_execute_ai_check_only_rescores_changed_sections(monkeypatch):
     generated_paper = _generated_paper()
-    source_text = "This source text is only needed so validation can build its lexical index."
     previous_report = ValidationReport(
         ai_score=0.28,
-        plagiarism_score=6.1,
+        plagiarism_score=0.0,
         confidence_band="medium",
         routing_decision="flagged",
         sections=[
@@ -367,21 +375,16 @@ async def test_execute_fast_validation_only_rescores_changed_sections(monkeypatc
             ),
         ],
         decision_summary="Previous validation flagged the draft.",
+        initial_ai_score=0.28,
+        initial_plagiarism_score=0.0,
+        final_ai_score=0.28,
+        final_plagiarism_score=0.0,
+        failure_reasons=["ai_threshold_exceeded"],
     )
 
     rescored_sections: list[str] = []
 
-    def fake_build_section_report(
-        *,
-        section_name: str,
-        section_text: str,
-        source_sentences,
-        source_index,
-        request: ValidationServiceRequest,
-        validation_config,
-        originality_config,
-        reference_lines,
-    ) -> ValidationSectionReport:
+    def fake_build_section_report(*, section_name: str, section_text: str, validation_config) -> ValidationSectionReport:
         rescored_sections.append(section_name)
         return ValidationSectionReport(
             section_name=section_name,
@@ -394,9 +397,8 @@ async def test_execute_fast_validation_only_rescores_changed_sections(monkeypatc
         )
 
     monkeypatch.setattr("validation.runtime.load_generated_draft_artifact", lambda uri: generated_paper)
-    monkeypatch.setattr("validation.runtime.load_extracted_text_artifact", lambda uri: source_text)
     monkeypatch.setattr("validation.runtime.load_validation_report_from_artifact", lambda uri: previous_report)
-    monkeypatch.setattr("validation.runtime._build_section_report", fake_build_section_report)
+    monkeypatch.setattr("validation.runtime._build_ai_only_section_report", fake_build_section_report)
     monkeypatch.setattr(
         "validation.runtime.store_validation_report_artifact",
         lambda project_id, job_id, report, mode, revision="v1": _artifact_pointer(
@@ -404,12 +406,6 @@ async def test_execute_fast_validation_only_rescores_changed_sections(monkeypatc
             f"gs://bucket/projects/{project_id}/jobs/{job_id}/metadata/validation_{mode}_{revision}.json",
         ),
     )
-
-    class _PerplexityStub:
-        def score(self, text: str):
-            return None
-
-    monkeypatch.setattr("validation.runtime._get_perplexity_scorer", lambda model_name: _PerplexityStub())
 
     response = await execute_fast_validation(
         ValidationServiceRequest(
@@ -420,11 +416,10 @@ async def test_execute_fast_validation_only_rescores_changed_sections(monkeypatc
             idempotency_key="phase4-validation-456",
             current_draft_uri="gs://bucket/projects/project-456/jobs/job-456/drafts/draft_v2.json",
             artifacts={
-                "extracted_text_uri": "gs://bucket/projects/project-456/jobs/job-456/sources/extracted_text.json",
-                "previous_validation_report_uri": "gs://bucket/projects/project-456/jobs/job-456/metadata/validation_fast_v1.json",
+                "previous_validation_report_uri": "gs://bucket/projects/project-456/jobs/job-456/metadata/validation_ai_check_v1.json",
             },
             config={
-                "mode": "fast",
+                "mode": "ai_check",
                 "changed_sections_only": True,
                 "changed_section_ids": ["introduction"],
             },
@@ -432,7 +427,7 @@ async def test_execute_fast_validation_only_rescores_changed_sections(monkeypatc
     )
 
     assert rescored_sections == ["introduction"]
-    assert response.output.validation_report_uri.endswith("validation_fast_v2.json")
+    assert response.output.validation_report_uri.endswith("validation_ai_check_v2.json")
     assert len(response.output.report.sections) == 8
     results_section = next(
         section for section in response.output.report.sections if section.section_name == "results"

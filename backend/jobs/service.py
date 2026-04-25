@@ -391,19 +391,57 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
         )
         final_disposition: WorkflowFinalDisposition = "flagged"
 
+        async def run_final_report_validation() -> ValidationServiceOutput:
+            nonlocal previous_validation_report_uri
+            job_for_final_report = _save_job(
+                job,
+                status="VALIDATION_REQUESTED",
+                stage="validation",
+                validation_mode="final_report",
+                error=None,
+            )
+            job_for_final_report = _save_job(
+                job_for_final_report,
+                status="VALIDATING",
+                stage="validation",
+                validation_mode="final_report",
+            )
+            validation_result = await validation_client.run_validation(
+                ValidationServiceRequest(
+                    task_id=f"validation-final-{job.job_id}-v{job.iteration + 1}",
+                    job_id=job.job_id,
+                    project_id=job.project_id,
+                    user_id=job.user_id,
+                    idempotency_key=job.idempotency_key,
+                    expected_status="VALIDATING",
+                    current_draft_uri=current_draft_uri,
+                    artifacts={
+                        "extracted_text_uri": job.artifacts.extracted_text.uri if job.artifacts.extracted_text else None,
+                        "previous_validation_report_uri": previous_validation_report_uri,
+                    },
+                    config={
+                        "mode": "final_report",
+                        "changed_sections_only": False,
+                        "changed_section_ids": [],
+                    },
+                )
+            )
+            previous_validation_report_uri = validation_result.output.validation_report_uri
+            return validation_result.output
+
         while True:
             job = _save_job(
                 job,
                 status="VALIDATION_REQUESTED",
                 stage="validation",
-                validation_mode="fast",
+                validation_mode="ai_check",
                 error=None,
             )
             job = _save_job(
                 job,
                 status="VALIDATING",
                 stage="validation",
-                validation_mode="fast",
+                validation_mode="ai_check",
             )
 
             validation_result = await validation_client.run_validation(
@@ -420,7 +458,7 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
                         "previous_validation_report_uri": previous_validation_report_uri,
                     },
                     config={
-                        "mode": "fast",
+                        "mode": "ai_check",
                         "changed_sections_only": bool(previous_validation_report_uri and changed_section_ids),
                         "changed_section_ids": changed_section_ids,
                     },
@@ -432,35 +470,47 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
 
             routing_decision = latest_validation_output.routing_decision
             if routing_decision == "accepted":
-                final_disposition = "accepted_after_fix" if fix_summary.attempted else "accepted"
-                if fix_summary.attempted:
-                    current_generated_paper = load_generated_draft_artifact(current_draft_uri)
-                    updated_project = save_generated_paper(
-                        project_id=project.id,
-                        owner_uid=job.user_id,
-                        generated_paper=current_generated_paper,
-                        generation_metadata=generation_result.metadata,
-                        generated_figures=(
-                            [item.model_dump(mode="python") for item in generation_result.generated_figures]
-                            if generation_result.generated_figures is not None
-                            else None
-                        ),
-                        generated_tables=(
-                            [item.model_dump(mode="python") for item in generation_result.generated_tables]
-                            if generation_result.generated_tables is not None
-                            else None
-                        ),
-                        figure_table_status=generation_result.figure_table_status,
-                        figure_table_error=generation_result.figure_table_error,
-                    )
+                latest_validation_output = await run_final_report_validation()
+                final_disposition = (
+                    "accepted_after_fix"
+                    if latest_validation_output.routing_decision == "accepted" and fix_summary.attempted
+                    else "accepted"
+                    if latest_validation_output.routing_decision == "accepted"
+                    else "flagged"
+                )
+                current_generated_paper = (
+                    load_generated_draft_artifact(current_draft_uri)
+                    if fix_summary.attempted or current_draft_uri != draft_v1.uri
+                    else generation_result.generated_paper
+                )
+                updated_project = save_generated_paper(
+                    project_id=project.id,
+                    owner_uid=job.user_id,
+                    generated_paper=current_generated_paper,
+                    generation_metadata=generation_result.metadata,
+                    generated_figures=(
+                        [item.model_dump(mode="python") for item in generation_result.generated_figures]
+                        if generation_result.generated_figures is not None
+                        else None
+                    ),
+                    generated_tables=(
+                        [item.model_dump(mode="python") for item in generation_result.generated_tables]
+                        if generation_result.generated_tables is not None
+                        else None
+                    ),
+                    figure_table_status=generation_result.figure_table_status,
+                    figure_table_error=generation_result.figure_table_error,
+                )
                 break
 
             fix_targets = _build_fix_targets(latest_validation_output)
             if not fix_targets:
+                latest_validation_output = await run_final_report_validation()
                 final_disposition = "flagged"
                 break
 
             if not _fix_iteration_available(job):
+                latest_validation_output = await run_final_report_validation()
                 final_disposition = "flagged"
                 break
 
@@ -504,6 +554,7 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
                     changed_sections=[],
                     rewriter_mode=None,
                 )
+                latest_validation_output = await run_final_report_validation()
                 final_disposition = "flagged"
                 break
 
@@ -514,6 +565,7 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
                 or draft_artifact is None
                 or not fix_result.output.changed_sections
             ):
+                latest_validation_output = await run_final_report_validation()
                 final_disposition = "flagged"
                 break
 

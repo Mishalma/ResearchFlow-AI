@@ -189,14 +189,20 @@ export type ValidationReport = {
   routing_decision: "pending" | "accepted" | "flagged";
   sections: ValidationSectionReport[];
   decision_summary: string;
+  initial_ai_score: number | null;
+  initial_plagiarism_score: number | null;
+  final_ai_score: number | null;
+  final_plagiarism_score: number | null;
+  failure_reasons: string[];
 };
 
 export type FixSummary = {
   attempted: boolean;
-  status: "not_needed" | "applied" | "failed";
+  status: "not_needed" | "applied" | "failed" | "no_change";
   iterations: number;
   changed_sections: string[];
   rewriter_mode: string | null;
+  fallback_reason?: string | null;
 };
 
 export type CreateJobResponse = {
@@ -212,7 +218,7 @@ export type JobStatusResponse = {
   project_id: string;
   status: WorkflowJobStatus;
   stage: WorkflowJobStage;
-  validation_mode: "none" | "fast";
+  validation_mode: "none" | "ai_check" | "final_report";
   iteration: number;
   progress: WorkflowJobProgress;
   current_draft_uri: string | null;
@@ -237,7 +243,7 @@ export type JobResultResponse = {
   project_id: string;
   status: "DONE" | "FAILED";
   final_disposition: "accepted" | "accepted_after_fix" | "flagged" | "failed";
-  validation_mode: "none" | "fast";
+  validation_mode: "none" | "ai_check" | "final_report";
   boundary: "legacy_full_pipeline" | "formatting_complete" | null;
   editor_url: string | null;
   generated_paper: GeneratedPaper | null;

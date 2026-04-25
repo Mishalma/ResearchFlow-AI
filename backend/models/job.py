@@ -23,7 +23,7 @@ WorkflowJobStatus = Literal[
 ]
 
 WorkflowJobStage = Literal["job", "generation", "validation", "fix", "finalize", "done", "failed"]
-WorkflowValidationMode = Literal["none", "fast"]
+WorkflowValidationMode = Literal["none", "ai_check", "final_report"]
 WorkflowConfidenceBand = Literal["unknown", "low", "medium", "high"]
 WorkflowRoutingDecision = Literal["pending", "accepted", "flagged"]
 WorkflowFinalDisposition = Literal["accepted", "accepted_after_fix", "flagged", "failed"]
@@ -77,10 +77,11 @@ class WorkflowScores(BaseModel):
 
 class FixSummary(BaseModel):
     attempted: bool = False
-    status: Literal["not_needed", "applied", "failed"] = "not_needed"
+    status: Literal["not_needed", "applied", "failed", "no_change"] = "not_needed"
     iterations: int = Field(default=0, ge=0, le=3)
     changed_sections: list[str] = Field(default_factory=list)
     rewriter_mode: str | None = None
+    fallback_reason: str | None = None
 
 
 class WorkflowActiveTask(BaseModel):

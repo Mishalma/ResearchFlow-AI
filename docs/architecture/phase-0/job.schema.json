@@ -52,7 +52,6 @@
         "GENERATED",
         "VALIDATION_REQUESTED",
         "VALIDATING",
-        "DEEP_VALIDATION_REQUESTED",
         "FIX_REQUESTED",
         "FIXING",
         "FINALIZING",
@@ -76,8 +75,8 @@
       "type": "string",
       "enum": [
         "none",
-        "fast",
-        "deep"
+        "ai_check",
+        "final_report"
       ]
     },
     "iteration": {
@@ -268,8 +267,7 @@
         "ai_score",
         "plagiarism_score",
         "confidence_band",
-        "routing_decision",
-        "deep_validation_used"
+        "routing_decision"
       ],
       "properties": {
         "ai_score": {
@@ -301,14 +299,9 @@
           "type": "string",
           "enum": [
             "pending",
-            "clean",
-            "borderline",
-            "flagged",
-            "manual_review_required"
+            "accepted",
+            "flagged"
           ]
-        },
-        "deep_validation_used": {
-          "type": "boolean"
         }
       }
     },

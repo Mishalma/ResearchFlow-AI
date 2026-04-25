@@ -7,23 +7,23 @@ Phase 0 freezes Cloud Tasks as the first-stage dispatch mechanism between the or
 The v1 workflow uses 5 queues:
 
 - `papereasy-generation`
-- `papereasy-validation-fast`
-- `papereasy-validation-deep`
+- `papereasy-validation-ai-check`
+- `papereasy-validation-final-report`
 - `papereasy-fix`
 - `papereasy-finalize`
 
 Reason:
 
 - each stage gets its own retry and concurrency policy
-- deep validation can be throttled separately from fast validation
+- Desklib AI checks and final overlap-report runs can be throttled separately
 
 ## Target Endpoints
 
 | Queue | Target Endpoint |
 | --- | --- |
 | `papereasy-generation` | `POST /internal/generation/run` |
-| `papereasy-validation-fast` | `POST /internal/validation/run` with `config.mode=fast` |
-| `papereasy-validation-deep` | `POST /internal/validation/run` with `config.mode=deep` |
+| `papereasy-validation-ai-check` | `POST /internal/validation/run` with `config.mode=ai_check` |
+| `papereasy-validation-final-report` | `POST /internal/validation/run` with `config.mode=final_report` |
 | `papereasy-fix` | `POST /internal/fix/run` |
 | `papereasy-finalize` | `POST /internal/finalize/run` |
 
@@ -79,8 +79,8 @@ Retry responsibility is split into 2 layers:
 | Queue | Max Dispatch Attempts | Min Backoff | Max Backoff |
 | --- | --- | --- | --- |
 | `papereasy-generation` | 3 | 10s | 5m |
-| `papereasy-validation-fast` | 3 | 5s | 2m |
-| `papereasy-validation-deep` | 2 | 30s | 10m |
+| `papereasy-validation-ai-check` | 3 | 5s | 2m |
+| `papereasy-validation-final-report` | 2 | 30s | 10m |
 | `papereasy-fix` | 2 | 15s | 5m |
 | `papereasy-finalize` | 3 | 5s | 2m |
 

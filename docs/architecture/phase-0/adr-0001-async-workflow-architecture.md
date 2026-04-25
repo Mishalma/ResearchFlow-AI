@@ -24,7 +24,7 @@ The target product requires:
 
 - async generation
 - multi-stage validation
-- conditional deep validation
+- Desklib-first AI checks with a later final report pass
 - bounded fix/humanizer loops
 - immutable artifact history
 - reportable workflow state
@@ -102,12 +102,10 @@ The extracted generation path stops after IEEE formatting.
 
 The future `validation-service` will own:
 
+- Desklib AI checks as the primary remediation gate
 - lexical/originality overlap checks
 - citation-aware overlap checks
-- stylometry
-- perplexity
-- cheap AI-risk scoring
-- deep validation entrypoint with `mode=deep`
+- final overlap/report assembly after the AI gate clears or the fix loop ends
 
 ### Fix Boundary
 

@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+import sys
 
 import pytest
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.core.auth import AuthenticatedRequestUser
 from jobs.service import create_generation_job, get_job_status, run_generation_task
@@ -140,10 +145,11 @@ def _artifact_pointer(version: str, uri: str) -> WorkflowArtifactPointer:
 
 def _make_validation_response(
     *,
+    mode: str = "ai_check",
     routing_decision: str = "accepted",
     ai_score: float = 0.08,
     plagiarism_score: float = 2.4,
-    validation_report_uri: str = "gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v1.json",
+    validation_report_uri: str = "gs://bucket/projects/project-123/jobs/job-123/metadata/validation_ai_check_v1.json",
     section_flags: list[ValidationSectionFlag] | None = None,
 ):
     return ValidationServiceResponse(
@@ -151,7 +157,7 @@ def _make_validation_response(
         status="VALIDATING",
         stage="validation",
         output={
-            "mode": "fast",
+            "mode": mode,
             "ai_score": ai_score,
             "plagiarism_score": plagiarism_score,
             "confidence_band": "low" if routing_decision == "accepted" else "high",
@@ -175,7 +181,13 @@ def _make_validation_response(
                     )
                 ],
                 decision_summary="Validation complete.",
+                initial_ai_score=ai_score,
+                initial_plagiarism_score=plagiarism_score,
+                final_ai_score=ai_score,
+                final_plagiarism_score=plagiarism_score,
+                failure_reasons=[] if routing_decision == "accepted" else ["ai_threshold_exceeded"],
             ),
+            "failure_reasons": [] if routing_decision == "accepted" else ["ai_threshold_exceeded"],
         },
     )
 
@@ -273,8 +285,16 @@ async def test_run_generation_task_success_transitions_to_done(monkeypatch):
 
     monkeypatch.setattr("jobs.service.get_generation_service_client", lambda: FakeGenerationClient())
     class FakeValidationClient:
+        def __init__(self):
+            self.calls = 0
+
         async def run_validation(self, request):
-            return _make_validation_response()
+            self.calls += 1
+            if self.calls == 1:
+                assert request.config.mode == "ai_check"
+                return _make_validation_response(mode="ai_check", routing_decision="accepted", plagiarism_score=0.0)
+            assert request.config.mode == "final_report"
+            return _make_validation_response(mode="final_report")
 
     monkeypatch.setattr("jobs.service.get_validation_service_client", lambda: FakeValidationClient())
 
@@ -421,8 +441,22 @@ async def test_run_generation_task_flagged_result_does_not_write_final_accepted_
             )
 
     class FakeValidationClient:
+        def __init__(self):
+            self.calls = 0
+
         async def run_validation(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                assert request.config.mode == "ai_check"
+                return _make_validation_response(
+                    mode="ai_check",
+                    routing_decision="flagged",
+                    ai_score=0.51,
+                    plagiarism_score=0.0,
+                )
+            assert request.config.mode == "final_report"
             return _make_validation_response(
+                mode="final_report",
                 routing_decision="flagged",
                 ai_score=0.51,
                 plagiarism_score=12.2,
@@ -523,11 +557,13 @@ async def test_run_generation_task_fix_can_finish_as_accepted_after_fix(monkeypa
         async def run_validation(self, request):
             validation_calls["count"] += 1
             if validation_calls["count"] == 1:
+                assert request.config.mode == "ai_check"
                 return _make_validation_response(
+                    mode="ai_check",
                     routing_decision="flagged",
                     ai_score=0.18,
-                    plagiarism_score=6.2,
-                    validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v1.json",
+                    plagiarism_score=0.0,
+                    validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_ai_check_v1.json",
                     section_flags=[
                         ValidationSectionFlag(
                             section_id="introduction",
@@ -538,13 +574,24 @@ async def test_run_generation_task_fix_can_finish_as_accepted_after_fix(monkeypa
                         )
                     ],
                 )
-            assert request.config.changed_sections_only is True
-            assert request.config.changed_section_ids == ["introduction"]
+            if validation_calls["count"] == 2:
+                assert request.config.mode == "ai_check"
+                assert request.config.changed_sections_only is True
+                assert request.config.changed_section_ids == ["introduction"]
+                return _make_validation_response(
+                    mode="ai_check",
+                    routing_decision="accepted",
+                    ai_score=0.09,
+                    plagiarism_score=0.0,
+                    validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_ai_check_v2.json",
+                )
+            assert request.config.mode == "final_report"
             return _make_validation_response(
+                mode="final_report",
                 routing_decision="accepted",
                 ai_score=0.09,
                 plagiarism_score=2.1,
-                validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_fast_v2.json",
+                validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_final_report_v2.json",
             )
 
     class FakeFixClient:
