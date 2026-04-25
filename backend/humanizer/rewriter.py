@@ -159,10 +159,18 @@ class VertexRewriter:
 
     backend_name = "vertex"
 
-    def __init__(self, project: str, location: str, model: str = "gemini-1.5-pro"):
+    def __init__(
+        self,
+        project: str,
+        location: str,
+        model: str = "gemini-1.5-pro",
+        *,
+        timeout_seconds: int = _MODEL_TIMEOUT_SECONDS,
+    ):
         self.project = project
         self.location = location
         self.model = model
+        self.timeout_seconds = max(5, int(timeout_seconds))
         self.available = False
         self._client = None
 
@@ -225,7 +233,7 @@ class VertexRewriter:
             executor = ThreadPoolExecutor(max_workers=1)
             future = executor.submit(_call_vertex)
             try:
-                rewritten = future.result(timeout=_MODEL_TIMEOUT_SECONDS)
+                rewritten = future.result(timeout=self.timeout_seconds)
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
         except FuturesTimeoutError:
@@ -584,6 +592,7 @@ class HumanizerRewriter:
                 project=self.config.google_project,
                 location=self.config.google_location,
                 model=self.config.vertex_model or "gemini-1.5-pro",
+                timeout_seconds=self.config.model_timeout_seconds,
             )
         return NoChangeRewriter()
 
