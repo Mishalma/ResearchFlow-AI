@@ -22,6 +22,7 @@ from humanizer.rewriter import (
     HumanizerRewriter,
     NoChangeRewriter,
     RewriteAttemptResult,
+    VertexRewriter,
 )
 from humanizer.perplexity import PerplexityScorer
 from models.a2a import A2AMessage
@@ -460,6 +461,151 @@ def test_forced_rewrite_accepts_safe_candidate_without_local_quality_gain(
     assert result["rewriter_used"] == "huggingface"
     assert result["changed"] is True
     assert result["rewritten_text"] != original
+
+
+def test_vertex_candidate_generation_parses_multiple_options():
+    class FakeModels:
+        def generate_content(self, *, model, contents):
+            assert model == "gemini-test"
+            assert "strict JSON array" in contents
+            return type(
+                "Response",
+                (),
+                {
+                    "text": (
+                        "["
+                        "\"The study reports a 12% improvement [1] while preserving \\\\cite{trace}.\", "
+                        "\"Across the study, the 12% improvement [1] remains linked to \\\\cite{trace}.\""
+                        "]"
+                    )
+                },
+            )()
+
+    rewriter = VertexRewriter.__new__(VertexRewriter)
+    rewriter.available = True
+    rewriter._client = type("Client", (), {"models": FakeModels()})()
+    rewriter.model = "gemini-test"
+    rewriter.timeout_seconds = 5
+
+    results = rewriter.rewrite_paragraph_candidates(
+        target_para="The study reports a 12% improvement [1] with \\cite{trace}.",
+        section_context="The study reports a 12% improvement [1] with \\cite{trace}.",
+        style_persona="Academic but natural",
+        ai_scores={"burstiness": 0.3, "cadence_uniformity": 0.8, "transition_uniformity": 0.4},
+        candidate_count=2,
+        rewrite_mode="academic-natural",
+    )
+
+    assert len(results) == 2
+    assert all(result.changed for result in results)
+    assert all(result.rewriter_used == "vertex" for result in results)
+
+
+def test_multi_candidate_rewrite_selects_safe_lowest_score_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class CandidateBackend:
+        def rewrite_paragraph_candidates(self, **kwargs):
+            return [
+                RewriteAttemptResult(
+                    text="A different climate paragraph with 12% improvement [1] and \\cite{trace}.",
+                    rewriter_used="vertex",
+                    changed=True,
+                ),
+                RewriteAttemptResult(
+                    text=(
+                        "The study reports a 12% improvement [1], while preserving \\cite{trace} "
+                        "throughout the review."
+                    ),
+                    rewriter_used="vertex",
+                    changed=True,
+                ),
+            ]
+
+    def fake_score(text):
+        if "throughout the review" in text:
+            return {
+                "composite_score": 0.2,
+                "burstiness": 0.7,
+                "transition_uniformity": 0.1,
+                "cadence_uniformity": 0.1,
+            }
+        return {
+            "composite_score": 0.6,
+            "burstiness": 0.3,
+            "transition_uniformity": 0.5,
+            "cadence_uniformity": 0.5,
+        }
+
+    monkeypatch.setattr("humanizer.rewriter.composite_ai_score", fake_score)
+    monkeypatch.setattr(
+        "humanizer.rewriter.verify_rewrite_safety",
+        lambda **kwargs: type("SafetyResult", (), {"passed": True, "reasons": [], "similarity": 0.9})(),
+    )
+    monkeypatch.setattr(
+        "humanizer.rewriter.SemanticDriftChecker.drift",
+        lambda self, original, rewritten: 0.8 if "climate" in rewritten else 0.0,
+    )
+
+    rewriter = HumanizerRewriter(
+        HumanizerConfig(rewriter_backend="none", rewrite_candidate_count=2),
+    )
+    rewriter.backend = CandidateBackend()
+    original = "The study reports a 12% improvement [1] with \\cite{trace}."
+    result = rewriter.rewrite_section(
+        original,
+        composite_ai_score(original),
+        section_name="results",
+        force_rewrite=True,
+        require_quality_improvement=False,
+    )
+
+    assert result["changed"] is True
+    assert result["rewriter_used"] == "vertex"
+    assert "throughout the review" in result["rewritten_text"]
+    assert "semantic_drift" in result["failure_reasons"]
+
+
+def test_fallback_semantic_threshold_accepts_safe_candidate_when_embedding_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        HuggingFaceRewriter,
+        "rewrite_paragraph",
+        lambda self, **kwargs: RewriteAttemptResult(
+            text=(
+                "The study reports a 12% improvement [1], and \\cite{trace} remains "
+                "part of the review evidence."
+            ),
+            rewriter_used="huggingface",
+            changed=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "humanizer.rewriter.verify_rewrite_safety",
+        lambda **kwargs: type("SafetyResult", (), {"passed": True, "reasons": [], "similarity": 0.72})(),
+    )
+    monkeypatch.setattr(
+        "humanizer.rewriter.SemanticDriftChecker.drift",
+        lambda self, original, rewritten: 0.25,
+    )
+
+    rewriter = HumanizerRewriter(
+        HumanizerConfig(rewriter_backend="huggingface", semantic_drift_threshold=0.15),
+    )
+    rewriter.semantic_drift.available = False
+    original = "The study reports a 12% improvement [1] with \\cite{trace}."
+    result = rewriter.rewrite_section(
+        original,
+        composite_ai_score(original),
+        section_name="results",
+        force_rewrite=True,
+        require_quality_improvement=False,
+    )
+
+    assert result["changed"] is True
+    assert result["rewriter_used"] == "huggingface"
+    assert "semantic_drift" not in result["failure_reasons"]
 
 
 def test_limitations_are_not_softened():

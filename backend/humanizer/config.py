@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 _VALID_MODES = {"full", "fast", "lite"}
 _VALID_REWRITER_BACKENDS = {"huggingface", "vertex", "none"}
 _VALID_REWRITE_FAILURE_BEHAVIORS = {"no_change"}
+_VALID_REWRITE_MODES = {"conservative", "standard", "deep", "academic-natural"}
 
 
 def _normalize_mode(value: str | None) -> str:
@@ -50,6 +51,17 @@ def _normalize_rewrite_failure_behavior(value: str | None) -> str:
             raw_value,
         )
         return "no_change"
+    return raw_value
+
+
+def _normalize_rewrite_mode(value: str | None) -> str:
+    raw_value = (value or "standard").strip().lower() or "standard"
+    if raw_value not in _VALID_REWRITE_MODES:
+        logger.warning(
+            "Unknown HUMANIZER_REWRITE_MODE '%s'; falling back to 'standard'.",
+            raw_value,
+        )
+        return "standard"
     return raw_value
 
 
@@ -126,6 +138,8 @@ class HumanizerConfig:
     hf_do_sample: bool = False
     hf_local_files_only: bool = False
     model_timeout_seconds: int = 20
+    rewrite_candidate_count: int = 3
+    rewrite_mode: str = "standard"
     debug_logging: bool = False
 
     @property
@@ -256,6 +270,8 @@ class HumanizerConfig:
             hf_do_sample=_get_bool("HUMANIZER_HF_DO_SAMPLE", False),
             hf_local_files_only=_get_bool("HUMANIZER_HF_LOCAL_FILES_ONLY", False),
             model_timeout_seconds=max(5, _get_int("HUMANIZER_MODEL_TIMEOUT_SECONDS", 20)),
+            rewrite_candidate_count=max(1, min(5, _get_int("HUMANIZER_REWRITE_CANDIDATES", 3))),
+            rewrite_mode=_normalize_rewrite_mode(os.getenv("HUMANIZER_REWRITE_MODE", "standard")),
             debug_logging=_get_bool("HUMANIZER_DEBUG_LOGGING", resolved_settings.debug),
         )
 

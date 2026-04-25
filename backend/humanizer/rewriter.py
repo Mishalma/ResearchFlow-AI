@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import random
 import re
 import threading
@@ -153,6 +154,26 @@ class NoChangeRewriter:
             failure_reason="backend_disabled",
         )
 
+    def rewrite_paragraph_candidates(
+        self,
+        *,
+        target_para: str,
+        section_context: str,
+        style_persona: str,
+        ai_scores: dict[str, float],
+        candidate_count: int = 1,
+        rewrite_mode: str = "standard",
+    ) -> list[RewriteAttemptResult]:
+        del candidate_count, rewrite_mode
+        return [
+            self.rewrite_paragraph(
+                target_para=target_para,
+                section_context=section_context,
+                style_persona=style_persona,
+                ai_scores=ai_scores,
+            )
+        ]
+
 
 class VertexRewriter:
     """Vertex-backed paragraph rewriter."""
@@ -265,6 +286,96 @@ class VertexRewriter:
             rewriter_used="vertex",
             changed=True,
         )
+
+    def rewrite_paragraph_candidates(
+        self,
+        *,
+        target_para: str,
+        section_context: str,
+        style_persona: str,
+        ai_scores: dict[str, float],
+        candidate_count: int = 3,
+        rewrite_mode: str = "standard",
+    ) -> list[RewriteAttemptResult]:
+        if not self.available or self._client is None:
+            return [
+                RewriteAttemptResult(
+                    text=target_para,
+                    rewriter_used="none",
+                    changed=False,
+                    failure_reason="model_load_failed",
+                )
+            ]
+
+        count = max(1, min(5, int(candidate_count or 1)))
+        prompt = _build_vertex_candidate_prompt(
+            target_para=target_para,
+            section_context=section_context,
+            style_persona=style_persona,
+            ai_scores=ai_scores,
+            candidate_count=count,
+            rewrite_mode=rewrite_mode,
+        )
+
+        def _call_vertex() -> list[str]:
+            response = self._client.models.generate_content(  # type: ignore[union-attr]
+                model=self.model,
+                contents=prompt,
+            )
+            return _normalize_model_candidates(getattr(response, "text", "") or "")
+
+        try:
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(_call_vertex)
+            try:
+                candidates = future.result(timeout=self.timeout_seconds)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+        except FuturesTimeoutError:
+            return [
+                RewriteAttemptResult(
+                    text=target_para,
+                    rewriter_used="none",
+                    changed=False,
+                    failure_reason="generation_timeout",
+                )
+            ]
+        except Exception as exc:  # pragma: no cover - provider dependent
+            logger.warning("Vertex candidate generation failed: %s", exc)
+            return [
+                RewriteAttemptResult(
+                    text=target_para,
+                    rewriter_used="none",
+                    changed=False,
+                    failure_reason="generation_failed",
+                )
+            ]
+
+        results: list[RewriteAttemptResult] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            normalized = candidate.strip()
+            if not normalized or normalized == target_para.strip() or normalized in seen:
+                continue
+            seen.add(normalized)
+            results.append(
+                RewriteAttemptResult(
+                    text=normalized,
+                    rewriter_used="vertex",
+                    changed=True,
+                )
+            )
+
+        if not results:
+            return [
+                RewriteAttemptResult(
+                    text=target_para,
+                    rewriter_used="none",
+                    changed=False,
+                    failure_reason="generation_failed",
+                )
+            ]
+        return results[:count]
 
 
 class HuggingFaceRewriter:
@@ -453,6 +564,26 @@ class HuggingFaceRewriter:
             rewriter_used="huggingface",
             changed=True,
         )
+
+    def rewrite_paragraph_candidates(
+        self,
+        *,
+        target_para: str,
+        section_context: str,
+        style_persona: str,
+        ai_scores: dict[str, float],
+        candidate_count: int = 1,
+        rewrite_mode: str = "standard",
+    ) -> list[RewriteAttemptResult]:
+        del candidate_count, rewrite_mode
+        return [
+            self.rewrite_paragraph(
+                target_para=target_para,
+                section_context=section_context,
+                style_persona=style_persona,
+                ai_scores=ai_scores,
+            )
+        ]
 
 
 class DeterministicRewriter:
@@ -663,59 +794,89 @@ class HumanizerRewriter:
 
         for index, paragraph_scores, original_paragraph in targets:
             protected_text, spans = extract_protected_spans(original_paragraph)
-            attempt = self.backend.rewrite_paragraph(
+            attempts = _rewrite_paragraph_candidates(
+                self.backend,
                 target_para=protected_text,
                 section_context=section_text,
                 style_persona=persona,
                 ai_scores=paragraph_scores,
+                candidate_count=self.config.rewrite_candidate_count,
+                rewrite_mode=self.config.rewrite_mode,
             )
-            if not attempt.changed:
-                if attempt.failure_reason:
-                    failure_reasons.append(attempt.failure_reason)
-                continue
+            accepted_candidates: list[tuple[tuple[float, ...], str, str]] = []
+            for attempt in attempts:
+                if not attempt.changed:
+                    if attempt.failure_reason:
+                        _append_reason(failure_reasons, attempt.failure_reason)
+                    continue
 
-            rewritten = restore_protected_spans(attempt.text.strip(), spans)
-            rewritten_scores = composite_ai_score(rewritten)
-            quality_improved = _rewrite_improves_quality(
-                original_scores=paragraph_scores,
-                rewritten_scores=rewritten_scores,
-            )
-            if require_quality_improvement and not quality_improved:
-                failure_reasons.append("quality_not_improved")
-                continue
-
-            drift_value = self.semantic_drift.drift(original_paragraph, rewritten)
-            if drift_value is not None and drift_value > self.config.semantic_drift_threshold:
-                rejected_drift += 1
-                failure_reasons.append("semantic_drift")
-                logger.warning(
-                    "Rejected rewrite for paragraph %s because semantic drift %.3f exceeded threshold %.3f.",
-                    index,
-                    drift_value,
-                    self.config.semantic_drift_threshold,
+                rewritten = restore_protected_spans(attempt.text.strip(), spans)
+                rewritten_scores = composite_ai_score(rewritten)
+                quality_improved = _rewrite_improves_quality(
+                    original_scores=paragraph_scores,
+                    rewritten_scores=rewritten_scores,
                 )
-                continue
+                if require_quality_improvement and not quality_improved:
+                    _append_reason(failure_reasons, "quality_not_improved")
+                    continue
 
-            safety = verify_rewrite_safety(
-                original=original_paragraph,
-                rewritten=rewritten,
-                similarity_threshold=_rewrite_similarity_threshold(
-                    self.config.semantic_drift_threshold,
-                ),
-            )
-            if not safety.passed:
-                rejected_drift += 1
-                failure_reasons.append(_map_safety_failure_reason(safety.reasons))
-                logger.warning(
-                    "Rejected rewrite for paragraph %s because safety checks failed: %s",
-                    index,
-                    ",".join(safety.reasons),
+                drift_value = self.semantic_drift.drift(original_paragraph, rewritten)
+                drift_threshold = _effective_semantic_drift_threshold(
+                    semantic_checker=self.semantic_drift,
+                    configured_threshold=self.config.semantic_drift_threshold,
                 )
+                if drift_value is not None and drift_value > drift_threshold:
+                    rejected_drift += 1
+                    _append_reason(failure_reasons, "semantic_drift")
+                    logger.warning(
+                        "Rejected rewrite for paragraph %s because semantic drift %.3f exceeded threshold %.3f.",
+                        index,
+                        drift_value,
+                        drift_threshold,
+                    )
+                    continue
+
+                safety = verify_rewrite_safety(
+                    original=original_paragraph,
+                    rewritten=rewritten,
+                    similarity_threshold=_effective_similarity_threshold(
+                        semantic_checker=self.semantic_drift,
+                        configured_threshold=self.config.semantic_drift_threshold,
+                    ),
+                )
+                if not safety.passed:
+                    rejected_drift += 1
+                    _append_reason(failure_reasons, _map_safety_failure_reason(safety.reasons))
+                    logger.warning(
+                        "Rejected rewrite for paragraph %s because safety checks failed: %s",
+                        index,
+                        ",".join(safety.reasons),
+                    )
+                    continue
+
+                accepted_candidates.append(
+                    (
+                        _candidate_rank_key(
+                            original=original_paragraph,
+                            rewritten=rewritten,
+                            rewritten_scores=rewritten_scores,
+                            drift_value=drift_value,
+                            safety_similarity=float(getattr(safety, "similarity", 1.0)),
+                            quality_improved=quality_improved,
+                        ),
+                        rewritten,
+                        attempt.rewriter_used,
+                    )
+                )
+
+            if not accepted_candidates:
                 continue
 
-            updated[index] = rewritten
+            accepted_candidates.sort(key=lambda item: item[0])
+            _, best_rewrite, used_rewriter = accepted_candidates[0]
+            updated[index] = best_rewrite
             accepted += 1
-            rewriter_modes.add(attempt.rewriter_used)
+            rewriter_modes.add(used_rewriter)
 
         used = _resolve_used_rewriter(rewriter_modes)
         return {
@@ -811,6 +972,93 @@ def _word_count(text: str) -> int:
     return len(re.findall(r"\b[\w'-]+\b", text or ""))
 
 
+def _rewrite_paragraph_candidates(
+    backend: Any,
+    *,
+    target_para: str,
+    section_context: str,
+    style_persona: str,
+    ai_scores: dict[str, float],
+    candidate_count: int,
+    rewrite_mode: str,
+) -> list[RewriteAttemptResult]:
+    if hasattr(backend, "rewrite_paragraph_candidates"):
+        return list(
+            backend.rewrite_paragraph_candidates(
+                target_para=target_para,
+                section_context=section_context,
+                style_persona=style_persona,
+                ai_scores=ai_scores,
+                candidate_count=candidate_count,
+                rewrite_mode=rewrite_mode,
+            )
+        )
+    return [
+        backend.rewrite_paragraph(
+            target_para=target_para,
+            section_context=section_context,
+            style_persona=style_persona,
+            ai_scores=ai_scores,
+        )
+    ]
+
+
+def _effective_semantic_drift_threshold(
+    *,
+    semantic_checker: SemanticDriftChecker,
+    configured_threshold: float,
+) -> float:
+    threshold = max(0.0, min(1.0, float(configured_threshold)))
+    if getattr(semantic_checker, "available", False):
+        return threshold
+
+    # When the embedding model is unavailable, drift() falls back to token/sequence
+    # similarity. That heuristic is useful but harsher for valid paraphrases, so align
+    # it with the independent safety similarity gate instead of rejecting good rewrites.
+    fallback_threshold = 1.0 - _effective_similarity_threshold(
+        semantic_checker=semantic_checker,
+        configured_threshold=threshold,
+    )
+    return round(max(threshold, fallback_threshold), 4)
+
+
+def _effective_similarity_threshold(
+    *,
+    semantic_checker: SemanticDriftChecker,
+    configured_threshold: float,
+) -> float:
+    threshold = _rewrite_similarity_threshold(configured_threshold)
+    if getattr(semantic_checker, "available", False):
+        return threshold
+    return min(threshold, 0.5)
+
+
+def _candidate_rank_key(
+    *,
+    original: str,
+    rewritten: str,
+    rewritten_scores: dict[str, float],
+    drift_value: float | None,
+    safety_similarity: float,
+    quality_improved: bool,
+) -> tuple[float, ...]:
+    length_delta = abs(_word_count(original) - _word_count(rewritten)) / max(1, _word_count(original))
+    return (
+        float(rewritten_scores.get("composite_score", 0.0)),
+        1.0 - float(rewritten_scores.get("burstiness", 0.0)),
+        float(drift_value or 0.0),
+        1.0 - float(safety_similarity),
+        length_delta,
+        0.0 if quality_improved else 0.05,
+    )
+
+
+def _append_reason(reasons: list[str], reason: str) -> None:
+    cleaned = str(reason or "").strip()
+    if cleaned and cleaned not in reasons:
+        reasons.append(cleaned)
+
+
 def _rewrite_similarity_threshold(semantic_drift_threshold: float) -> float:
     return round(max(0.5, 0.68 - (max(0.0, min(1.0, semantic_drift_threshold)) * 0.2)), 4)
 
@@ -862,6 +1110,88 @@ def _build_hf_prompt(
         f"Context: {trimmed_context}\n"
         f"Paragraph: {target_para}"
     )
+
+
+def _build_vertex_candidate_prompt(
+    *,
+    target_para: str,
+    section_context: str,
+    style_persona: str,
+    ai_scores: dict[str, float],
+    candidate_count: int,
+    rewrite_mode: str,
+) -> str:
+    mode_instruction = {
+        "conservative": "Make light edits. Preserve most phrasing while adding natural rhythm.",
+        "standard": "Make moderate edits. Vary sentence rhythm, transitions, and word choice.",
+        "deep": "Make stronger structural edits while preserving every factual claim.",
+        "academic-natural": (
+            "Use natural academic prose. Keep the authorial voice scholarly, precise, and less templated."
+        ),
+    }.get((rewrite_mode or "standard").strip().lower(), "Make moderate naturalness edits.")
+    trimmed_context = section_context[:1600]
+    return (
+        "You are rewriting one academic manuscript paragraph for clarity and natural human cadence.\n"
+        "Do not add new claims. Do not remove, add, or change citations, numbers, percentages, equations, "
+        "LaTeX commands, dataset names, model names, or technical entities.\n"
+        f"Return exactly {candidate_count} alternatives as a strict JSON array of strings. "
+        "No markdown, no commentary, no keys.\n\n"
+        f"REWRITE MODE: {rewrite_mode}\n"
+        f"MODE GUIDANCE: {mode_instruction}\n"
+        f"STYLE TARGET: {style_persona}\n"
+        f"BURSTINESS SCORE: {ai_scores.get('burstiness', 0.0):.2f}\n"
+        f"CADENCE UNIFORMITY: {ai_scores.get('cadence_uniformity', 0.0):.2f}\n"
+        f"TRANSITION UNIFORMITY: {ai_scores.get('transition_uniformity', 0.0):.2f}\n\n"
+        "SECTION CONTEXT:\n"
+        f"{trimmed_context}\n\n"
+        "PARAGRAPH:\n"
+        f"{target_para}\n"
+    )
+
+
+def _normalize_model_candidates(text: str) -> list[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    raw = re.sub(r"^\s*```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s*```\s*$", "", raw).strip()
+
+    parsed: object | None = None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            parsed = literal_eval(raw)
+        except (SyntaxError, ValueError):
+            parsed = None
+
+    if isinstance(parsed, list):
+        values = [str(item).strip() for item in parsed if str(item).strip()]
+    elif isinstance(parsed, dict):
+        values = [
+            str(value).strip()
+            for key, value in parsed.items()
+            if str(key).lower().startswith(("candidate", "option", "rewrite"))
+            and str(value).strip()
+        ]
+    else:
+        values = []
+
+    if not values:
+        numbered = re.split(r"(?:^|\n)\s*(?:candidate|option)?\s*\d+[\).:-]\s*", raw, flags=re.IGNORECASE)
+        values = [part.strip() for part in numbered if part.strip()]
+
+    if not values:
+        values = [_normalize_model_output(raw)]
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_model_output(value)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            candidates.append(normalized)
+    return candidates
 
 
 def _normalize_model_output(text: str) -> str:

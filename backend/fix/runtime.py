@@ -136,6 +136,7 @@ async def execute_fix_request(
         updated_draft_uri = draft_artifact.uri
         fix_status = "applied"
         changed = True
+        fallback_reason = None
     else:
         draft_artifact = None
         updated_draft_uri = request.current_draft_uri
