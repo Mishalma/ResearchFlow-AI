@@ -19,12 +19,15 @@ FastAPI backend for uploading source documents, extracting clean text, generatin
 
 ### Agents
 
-The generation pipeline runs four specialized agents:
+The generation pipeline runs specialized agents in a section-gated order:
 
 1. `structuring_agent`
 2. `writing_agent`
-3. `citation_agent`
-4. `formatting_agent`
+3. Desklib AI candidate scoring through the validation service
+4. section-only humanizer remediation when a section is flagged
+5. `figure_table_agent`
+6. `citation_agent`
+7. `formatting_agent`
 
 Their runtime configuration lives in [agents/agent_specs.json](./agents/agent_specs.json). Each agent spec includes:
 
@@ -281,7 +284,7 @@ gcloud builds submit --config cloudbuild.yaml \
 
 ### Phase 2 generation-service deploy
 
-Phase 2 now runs the pipeline through IEEE formatting, writes a remediation context artifact, and can optionally score section candidates before `draft_v1` is stored. Deploy it with:
+Phase 2 now writes the paper section by section. Each text section is scored with Desklib AI-only candidate scoring before the next section starts. If a section cannot pass after writing candidates and section-only humanizer strategies, the service stores `partial_draft_v1.json` and `section_workflow_v1.json` and stops before figures, citations, references, and IEEE formatting. Deploy it with:
 
 ```bash
 gcloud builds submit --config cloudbuild-generation.yaml \
@@ -294,8 +297,9 @@ This deploys `papereasy-generation` with:
 - authenticated invocation only
 - a 30 minute request timeout
 - `uvicorn app.generation_main:app`
-- generation preflight scoring enabled (`GENERATION_PREFLIGHT_SCORING=true`)
-- Desklib candidate scoring delegated to the validation service
+- section-gated generation enabled (`GENERATION_SECTION_GATE_ENABLED=true`)
+- Desklib candidate scoring delegated to the validation service with overlap disabled during section gating
+- figures, citations, references, and IEEE formatting run only after all text sections pass the AI gate
 
 After the generation service is deployed, update the main backend service to call it by setting:
 
@@ -308,7 +312,7 @@ GENERATION_SERVICE_TIMEOUT_SECONDS=1500
 
 The backend service account must also have `roles/run.invoker` on the generation service.
 
-The generation service also needs access to validation scoring when preflight is enabled:
+The generation service also needs access to validation scoring when section gating is enabled:
 
 ```env
 WORKFLOW_VALIDATION_BACKEND=service
@@ -317,7 +321,7 @@ VALIDATION_SERVICE_AUDIENCE=https://YOUR-VALIDATION-SERVICE-URL
 VALIDATION_SERVICE_TIMEOUT_SECONDS=600
 ```
 
-If the validation URL is left empty, generation preflight safely skips scoring and keeps the original formatted draft.
+If the validation URL is left empty, section gating cannot run because Desklib scoring is the required acceptance gate.
 
 ### Phase 3 validation-service deploy
 
@@ -349,7 +353,7 @@ The backend service account must also have `roles/run.invoker` on the validation
 
 ### Phase 4 fix-service deploy
 
-Phase 4 adds a separate internal fix service for evidence-first full-section remediation and bounded revalidation loops. Deploy it with:
+Phase 4 adds a separate internal fix service for a one-pass backstop remediation after final formatted validation. Deploy it with:
 
 ```bash
 gcloud builds submit --config cloudbuild-fix.yaml \
@@ -364,7 +368,7 @@ This deploys `papereasy-fix` with:
 - Vertex-backed section rewriting enabled
 - deterministic fallback disabled
 - full-section candidate rewriting enabled (`FIX_FULL_SECTION_REWRITE=true`)
-- Desklib-guided acceptance and retry-aware no-change behavior
+- Desklib-guided acceptance and no-change behavior when no safe candidate improves the score
 
 After the fix service is deployed, update the main backend service to call it by setting:
 

@@ -45,6 +45,7 @@ async def execute_generation_request(
         job_id=request.job_id,
         user_id=request.user_id,
     )
+    generation_status = getattr(pipeline_result, "generation_status", "completed")
     return GenerationServiceResponse(
         job_id=request.job_id,
         project_id=request.project_id,
@@ -55,6 +56,14 @@ async def execute_generation_request(
         figure_table_status=pipeline_result.figure_table_status,
         figure_table_error=pipeline_result.figure_table_error,
         remediation_context=pipeline_result.remediation_context,
+        generation_status=generation_status,
+        section_workflow=getattr(pipeline_result, "section_workflow", None),
+        partial_draft=getattr(pipeline_result, "partial_draft", None),
+        boundary=(
+            "section_gate_partial"
+            if generation_status == "partial_manual_review"
+            else "formatting_complete"
+        ),
     )
 
 

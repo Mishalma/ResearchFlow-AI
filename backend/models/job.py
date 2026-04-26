@@ -27,7 +27,7 @@ WorkflowValidationMode = Literal["none", "ai_check", "final_report"]
 WorkflowConfidenceBand = Literal["unknown", "low", "medium", "high"]
 WorkflowRoutingDecision = Literal["pending", "accepted", "flagged"]
 WorkflowFinalDisposition = Literal["accepted", "accepted_after_fix", "flagged", "failed"]
-WorkflowBoundary = Literal["legacy_full_pipeline", "formatting_complete"]
+WorkflowBoundary = Literal["legacy_full_pipeline", "formatting_complete", "section_gate_partial"]
 
 
 def _timestamp() -> datetime:
@@ -60,6 +60,8 @@ class WorkflowArtifacts(BaseModel):
     raw_upload: WorkflowArtifactPointer | None = None
     extracted_text: WorkflowArtifactPointer | None = None
     remediation_context: WorkflowArtifactPointer | None = None
+    section_workflow: WorkflowArtifactPointer | None = None
+    partial_draft: WorkflowArtifactPointer | None = None
     draft_v1: WorkflowArtifactPointer | None = None
     draft_v2: WorkflowArtifactPointer | None = None
     draft_v3: WorkflowArtifactPointer | None = None
@@ -178,6 +180,8 @@ class JobResultArtifacts(BaseModel):
     raw_upload_uri: str | None = None
     extracted_text_uri: str | None = None
     remediation_context_uri: str | None = None
+    section_workflow_uri: str | None = None
+    partial_draft_uri: str | None = None
     draft_v1_uri: str | None = None
     draft_v2_uri: str | None = None
     draft_v3_uri: str | None = None

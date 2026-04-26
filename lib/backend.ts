@@ -212,6 +212,19 @@ export type FixSummary = {
   retry_recommended?: boolean;
 };
 
+export type GenerationMetadata = {
+  provider: string;
+  model: string;
+  generation_time_ms: number;
+  trace_id: string;
+  agent_timings: AgentTiming[];
+  generation_status?: "completed" | "partial_manual_review";
+  section_gate_enabled?: boolean;
+  section_gate_failed_section?: string | null;
+  section_gate_stop_reason?: string | null;
+  section_gate_accepted_sections?: string[];
+};
+
 export type CreateJobResponse = {
   job_id: string;
   status: WorkflowJobStatus;
@@ -237,6 +250,8 @@ export type JobResultArtifacts = {
   raw_upload_uri: string | null;
   extracted_text_uri: string | null;
   remediation_context_uri?: string | null;
+  section_workflow_uri?: string | null;
+  partial_draft_uri?: string | null;
   draft_v1_uri: string | null;
   draft_v2_uri: string | null;
   draft_v3_uri: string | null;
@@ -252,16 +267,10 @@ export type JobResultResponse = {
   status: "DONE" | "FAILED";
   final_disposition: "accepted" | "accepted_after_fix" | "flagged" | "failed";
   validation_mode: "none" | "ai_check" | "final_report";
-  boundary: "legacy_full_pipeline" | "formatting_complete" | null;
+  boundary: "legacy_full_pipeline" | "formatting_complete" | "section_gate_partial" | null;
   editor_url: string | null;
   generated_paper: GeneratedPaper | null;
-  metadata: {
-    provider: string;
-    model: string;
-    generation_time_ms: number;
-    trace_id: string;
-    agent_timings: AgentTiming[];
-  } | null;
+  metadata: GenerationMetadata | null;
   report: ValidationReport | null;
   fix_summary: FixSummary | null;
   artifacts: JobResultArtifacts;

@@ -34,7 +34,7 @@
       "enum": [
         "accepted",
         "accepted_after_fix",
-        "manual_review_required",
+        "flagged",
         "failed"
       ]
     },
@@ -98,7 +98,7 @@
         "plagiarism_score",
         "confidence_band",
         "routing_decision",
-        "deep_validation_used",
+        "section_gate_used",
         "iterations_used"
       ],
       "properties": {
@@ -125,11 +125,10 @@
           "enum": [
             "clean",
             "borderline",
-            "flagged",
-            "manual_review_required"
+            "flagged"
           ]
         },
-        "deep_validation_used": {
+        "section_gate_used": {
           "type": "boolean"
         },
         "iterations_used": {
@@ -260,7 +259,7 @@
             "accepted",
             "rewritten",
             "ignored",
-            "manual_review_required"
+            "flagged"
           ]
         }
       }
@@ -318,7 +317,7 @@
       "additionalProperties": false,
       "required": [
         "states_visited",
-        "deep_validation_used",
+        "section_gate_used",
         "iterations_used"
       ],
       "properties": {
@@ -328,7 +327,7 @@
             "type": "string"
           }
         },
-        "deep_validation_used": {
+        "section_gate_used": {
           "type": "boolean"
         },
         "iterations_used": {

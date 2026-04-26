@@ -9,7 +9,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any
 
 from core.config import get_settings
-from models.generation import GeneratedPaper
+from models.generation import GeneratedPaper, PartialDraftPayload, SectionWorkflowReport
 from models.job import JobResultResponse, WorkflowArtifactPointer
 from models.validation import ValidationReport
 from persistence import get_object_storage
@@ -25,6 +25,14 @@ def build_extracted_text_key(project_id: str, job_id: str) -> str:
 
 def build_remediation_context_key(project_id: str, job_id: str, *, revision: str = "v1") -> str:
     return f"{_job_prefix(project_id, job_id)}/metadata/remediation_context_{revision}.json"
+
+
+def build_section_workflow_key(project_id: str, job_id: str, *, revision: str = "v1") -> str:
+    return f"{_job_prefix(project_id, job_id)}/metadata/section_workflow_{revision}.json"
+
+
+def build_partial_draft_key(project_id: str, job_id: str, *, revision: str = "v1") -> str:
+    return f"{_job_prefix(project_id, job_id)}/drafts/partial_draft_{revision}.json"
 
 
 def build_draft_key(project_id: str, job_id: str, version: str) -> str:
@@ -119,6 +127,38 @@ def store_remediation_context_artifact(
         payload=context,
         owner_service=owner_service,
         version=f"remediation_context_{revision}",
+    )
+
+
+def store_section_workflow_artifact(
+    project_id: str,
+    job_id: str,
+    workflow: SectionWorkflowReport | dict[str, Any],
+    *,
+    revision: str = "v1",
+    owner_service: str = "generation-service",
+) -> WorkflowArtifactPointer:
+    return store_json_artifact(
+        key=build_section_workflow_key(project_id, job_id, revision=revision),
+        payload=workflow,
+        owner_service=owner_service,
+        version=f"section_workflow_{revision}",
+    )
+
+
+def store_partial_draft_artifact(
+    project_id: str,
+    job_id: str,
+    partial_draft: PartialDraftPayload | dict[str, Any],
+    *,
+    revision: str = "v1",
+    owner_service: str = "generation-service",
+) -> WorkflowArtifactPointer:
+    return store_json_artifact(
+        key=build_partial_draft_key(project_id, job_id, revision=revision),
+        payload=partial_draft,
+        owner_service=owner_service,
+        version=f"partial_draft_{revision}",
     )
 
 

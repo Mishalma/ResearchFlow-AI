@@ -8,6 +8,7 @@ from figure_table.models import FigureSpec, FigureTableOutput, RenderedFigure
 
 GenerationProvider = Literal["vertex_ai"]
 FigureTableStageStatus = Literal["succeeded", "partial", "failed", "skipped"]
+GenerationStatus = Literal["completed", "partial_manual_review"]
 IEEE_SECTION_KEYS = (
     "introduction",
     "related_work",
@@ -117,6 +118,11 @@ class GenerationMetadata(BaseModel):
     originality_section_status_counts: dict[str, int] = Field(default_factory=dict)
     originality_decision: str | None = None
     originality_flagged_span_count: int | None = Field(default=None, ge=0)
+    generation_status: GenerationStatus = "completed"
+    section_gate_enabled: bool = False
+    section_gate_failed_section: str | None = None
+    section_gate_stop_reason: str | None = None
+    section_gate_accepted_sections: list[str] = Field(default_factory=list)
 
     @field_validator("structuring_section_confidences")
     @classmethod
@@ -215,6 +221,136 @@ class GenerationMetadata(BaseModel):
                 raise ValueError(f"originality status count for '{key}' cannot be negative")
             normalized[str(key)] = normalized_count
         return normalized
+
+    @field_validator("section_gate_accepted_sections", mode="before")
+    @classmethod
+    def normalize_section_gate_accepted_sections(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            candidates = [value]
+        else:
+            candidates = list(value)
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            section_name = str(item).strip()
+            if not section_name:
+                continue
+            folded = section_name.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            normalized.append(section_name)
+        return normalized
+
+
+class SectionGateAttempt(BaseModel):
+    section_name: str = Field(min_length=1)
+    source: Literal["writing", "humanizer"] = "writing"
+    strategy: str | None = None
+    candidate_count: int = Field(default=0, ge=0)
+    accepted: bool = False
+    accepted_candidate_id: str | None = None
+    best_ai_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    rejection_reasons: list[str] = Field(default_factory=list)
+    duration_ms: float = Field(default=0.0, ge=0.0)
+
+    @model_validator(mode="after")
+    def normalize(self) -> "SectionGateAttempt":
+        self.section_name = self.section_name.strip()
+        if self.strategy is not None:
+            self.strategy = self.strategy.strip() or None
+        if self.accepted_candidate_id is not None:
+            self.accepted_candidate_id = self.accepted_candidate_id.strip() or None
+        self.rejection_reasons = [
+            str(reason).strip()
+            for reason in self.rejection_reasons
+            if str(reason).strip()
+        ]
+        return self
+
+
+class SectionGateResult(BaseModel):
+    section_name: str = Field(min_length=1)
+    status: Literal["accepted", "failed"] = "failed"
+    accepted_source: Literal["writing", "humanizer"] | None = None
+    accepted_strategy: str | None = None
+    accepted_candidate_id: str | None = None
+    final_ai_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    attempts: list[SectionGateAttempt] = Field(default_factory=list)
+    duration_ms: float = Field(default=0.0, ge=0.0)
+    failure_reasons: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def normalize(self) -> "SectionGateResult":
+        self.section_name = self.section_name.strip()
+        if self.accepted_strategy is not None:
+            self.accepted_strategy = self.accepted_strategy.strip() or None
+        if self.accepted_candidate_id is not None:
+            self.accepted_candidate_id = self.accepted_candidate_id.strip() or None
+        self.failure_reasons = [
+            str(reason).strip()
+            for reason in self.failure_reasons
+            if str(reason).strip()
+        ]
+        return self
+
+
+class SectionWorkflowReport(BaseModel):
+    schema_version: str = "1.0.0"
+    status: GenerationStatus
+    section_order: list[str] = Field(default_factory=list)
+    accepted_sections: list[str] = Field(default_factory=list)
+    failed_section: str | None = None
+    stop_reason: str | None = None
+    sections: list[SectionGateResult] = Field(default_factory=list)
+    total_duration_ms: float = Field(default=0.0, ge=0.0)
+
+    @model_validator(mode="after")
+    def normalize(self) -> "SectionWorkflowReport":
+        self.section_order = [
+            str(section_name).strip()
+            for section_name in self.section_order
+            if str(section_name).strip()
+        ]
+        self.accepted_sections = [
+            str(section_name).strip()
+            for section_name in self.accepted_sections
+            if str(section_name).strip()
+        ]
+        if self.failed_section is not None:
+            self.failed_section = self.failed_section.strip() or None
+        if self.stop_reason is not None:
+            self.stop_reason = self.stop_reason.strip() or None
+        return self
+
+
+class PartialDraftPayload(BaseModel):
+    schema_version: str = "1.0.0"
+    job_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    status: Literal["partial_manual_review"] = "partial_manual_review"
+    failed_section: str | None = None
+    stop_reason: str | None = None
+    accepted_sections: dict[str, str] = Field(default_factory=dict)
+    failed_section_candidate: str | None = None
+    section_workflow: SectionWorkflowReport | None = None
+
+    @model_validator(mode="after")
+    def normalize(self) -> "PartialDraftPayload":
+        if self.failed_section is not None:
+            self.failed_section = self.failed_section.strip() or None
+        if self.stop_reason is not None:
+            self.stop_reason = self.stop_reason.strip() or None
+        self.accepted_sections = {
+            str(key).strip(): str(value).strip()
+            for key, value in self.accepted_sections.items()
+            if str(key).strip() and str(value).strip()
+        }
+        if self.failed_section_candidate is not None:
+            self.failed_section_candidate = self.failed_section_candidate.strip() or None
+        return self
 
 
 class StructuringAgentOutput(ResearchPaperSchema):
@@ -398,13 +534,16 @@ class OriginalityAgentOutput(BaseModel):
 
 
 class PipelineResult(BaseModel):
-    generated_paper: GeneratedPaper
+    generated_paper: GeneratedPaper | None = None
     metadata: GenerationMetadata
     generated_figures: list[RenderedFigure] | None = None
     generated_tables: list[RenderedFigure] | None = None
     figure_table_status: FigureTableStageStatus | None = None
     figure_table_error: str | None = None
     remediation_context: dict[str, Any] = Field(default_factory=dict)
+    generation_status: GenerationStatus = "completed"
+    section_workflow: SectionWorkflowReport | None = None
+    partial_draft: PartialDraftPayload | None = None
 
 
 class GenerationServiceRequest(BaseModel):
@@ -420,14 +559,17 @@ class GenerationServiceRequest(BaseModel):
 class GenerationServiceResponse(BaseModel):
     job_id: str = Field(min_length=1)
     project_id: str = Field(min_length=1)
-    generated_paper: GeneratedPaper
+    generated_paper: GeneratedPaper | None = None
     metadata: GenerationMetadata
     generated_figures: list[RenderedFigure] | None = None
     generated_tables: list[RenderedFigure] | None = None
     figure_table_status: FigureTableStageStatus | None = None
     figure_table_error: str | None = None
     remediation_context: dict[str, Any] = Field(default_factory=dict)
-    boundary: Literal["formatting_complete"] = "formatting_complete"
+    generation_status: GenerationStatus = "completed"
+    section_workflow: SectionWorkflowReport | None = None
+    partial_draft: PartialDraftPayload | None = None
+    boundary: Literal["formatting_complete", "section_gate_partial"] = "formatting_complete"
 
 
 class GenerateRequest(BaseModel):

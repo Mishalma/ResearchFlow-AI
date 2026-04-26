@@ -31,7 +31,7 @@ const steps = [
   {
     id: 2,
     title: "Generating manuscript",
-    description: "Structuring sections, drafting content, adding citations, and formatting the paper.",
+    description: "Writing sections one at a time and checking each section with Desklib.",
     icon: Sparkles,
   },
   {
@@ -49,7 +49,7 @@ const steps = [
   {
     id: 5,
     title: "Finalizing result",
-    description: "Preparing the accepted draft or final flagged report.",
+    description: "Adding figures, references, IEEE formatting, then preparing the final report.",
     icon: FileText,
   },
 ];
@@ -326,7 +326,7 @@ export default function ProcessingClientPage({
       ? processingState.message
       : processingState.kind === "success"
         ? "Your final workflow result is ready. The next workspace will open automatically."
-        : "Structuring the paper, running validation, and applying targeted AI fixes when needed.\nThe next workspace will open automatically when ready.";
+        : "Writing and checking the paper section by section, then adding figures, references, and IEEE formatting.\nThe next workspace will open automatically when ready.";
 
   const statusLabel =
     processingState.kind === "error"

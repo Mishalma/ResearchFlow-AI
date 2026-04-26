@@ -158,6 +158,8 @@ class ValidationCandidate(BaseModel):
 
 
 class ValidationCandidateScoringConfig(BaseModel):
+    compute_overlap: bool = True
+    accept_mode: Literal["ai_and_overlap", "ai_only"] = "ai_and_overlap"
     ai_accept_threshold: float = Field(default=0.10, ge=0.0, le=1.0)
     overlap_accept_threshold: float = Field(default=10.0, ge=0.0, le=100.0)
     max_overlap_increase: float = Field(default=2.0, ge=0.0, le=100.0)

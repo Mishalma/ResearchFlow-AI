@@ -21,7 +21,9 @@ from models.generation import (
     GenerationServiceRequest,
     GenerationServiceResponse,
     IEEESectionMap,
+    PartialDraftPayload,
     ResearchPaperSchema,
+    SectionWorkflowReport,
     StructuringAgentOutput,
     WritingAgentOutput,
 )
@@ -184,6 +186,73 @@ async def test_execute_generation_request_passes_job_context_and_remediation_con
         "user_id": "user-123",
     }
     assert response.remediation_context["trace_id"] == "trace-123"
+
+
+@pytest.mark.anyio
+async def test_execute_generation_request_returns_partial_section_gate_result(monkeypatch):
+    workflow = SectionWorkflowReport(
+        status="partial_manual_review",
+        section_order=["abstract", "introduction"],
+        accepted_sections=["abstract"],
+        failed_section="introduction",
+        stop_reason="ai_not_improved",
+    )
+    partial = PartialDraftPayload(
+        job_id="job-123",
+        project_id="project-123",
+        failed_section="introduction",
+        stop_reason="ai_not_improved",
+        accepted_sections={"abstract": "Accepted abstract text."},
+        section_workflow=workflow,
+    )
+
+    async def fake_pipeline(text: str, settings=None, *, project_id: str = "", job_id: str = "", user_id: str = ""):
+        del settings, user_id
+        assert text == "source text"
+        assert project_id == "project-123"
+        assert job_id == "job-123"
+        return SimpleNamespace(
+            generated_paper=None,
+            metadata=GenerationMetadata(
+                model="gemini-test",
+                generation_time_ms=10,
+                source_text_length=10,
+                trace_id="trace-123",
+                generation_status="partial_manual_review",
+                section_gate_enabled=True,
+                section_gate_failed_section="introduction",
+                section_gate_stop_reason="ai_not_improved",
+                section_gate_accepted_sections=["abstract"],
+            ),
+            generated_figures=None,
+            generated_tables=None,
+            figure_table_status=None,
+            figure_table_error=None,
+            remediation_context={"trace_id": "trace-123"},
+            generation_status="partial_manual_review",
+            section_workflow=workflow,
+            partial_draft=partial,
+        )
+
+    monkeypatch.setattr("app.services.generation_service.run_generation_pipeline", fake_pipeline)
+
+    from app.services.generation_service import execute_generation_request
+
+    response = await execute_generation_request(
+        GenerationServiceRequest(
+            job_id="job-123",
+            project_id="project-123",
+            source_text="source text",
+            user_id="user-123",
+            idempotency_key="phase2-job-123",
+        )
+    )
+
+    assert response.generated_paper is None
+    assert response.generation_status == "partial_manual_review"
+    assert response.boundary == "section_gate_partial"
+    assert response.section_workflow.failed_section == "introduction"
+    assert response.partial_draft.accepted_sections == {"abstract": "Accepted abstract text."}
 
 
 @pytest.mark.anyio

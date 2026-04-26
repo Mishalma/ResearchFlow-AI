@@ -40,6 +40,10 @@ function formatOverlapPercent(value: number | null | undefined) {
   return value == null ? "--" : `${Math.round(value * 10) / 10}%`;
 }
 
+function formatLabel(value: string | null | undefined) {
+  return value?.replaceAll("_", " ") || "Unavailable";
+}
+
 export default function PlagiarismReportPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -135,6 +139,18 @@ export default function PlagiarismReportPage() {
   }
 
   const { result } = state;
+  const isSectionGatePartial = result.boundary === "section_gate_partial";
+  const sectionGateAccepted = result.metadata?.section_gate_accepted_sections ?? [];
+  const sectionGateFailedSection = result.metadata?.section_gate_failed_section ?? null;
+  const sectionGateStopReason = result.metadata?.section_gate_stop_reason ?? null;
+  const latestDraftUri =
+    result.artifacts.draft_v5_uri ??
+    result.artifacts.draft_v4_uri ??
+    result.artifacts.draft_v3_uri ??
+    result.artifacts.draft_v2_uri ??
+    result.artifacts.draft_v1_uri ??
+    result.artifacts.partial_draft_uri ??
+    "Unavailable";
   const aiScorePercent = report?.ai_score != null ? Math.round(report.ai_score * 100) : null;
   const overlapPercent = report ? Math.round(report.plagiarism_score * 10) / 10 : null;
   const initialAiPercent = report?.initial_ai_score != null ? Math.round(report.initial_ai_score * 100) : null;
@@ -143,8 +159,8 @@ export default function PlagiarismReportPage() {
   const finalAiPercent = report?.final_ai_score != null ? Math.round(report.final_ai_score * 100) : null;
   const finalOverlapPercent =
     report?.final_plagiarism_score != null ? Math.round(report.final_plagiarism_score * 10) / 10 : null;
-  const aiTone = scoreTone(report?.ai_score ?? 0, 0.1, 0.1);
-  const overlapTone = scoreTone(report?.plagiarism_score ?? 0, 10, 10);
+  const aiTone = isSectionGatePartial ? "amber" : scoreTone(report?.ai_score ?? 0, 0.1, 0.1);
+  const overlapTone = isSectionGatePartial ? "amber" : scoreTone(report?.plagiarism_score ?? 0, 10, 10);
   const accepted =
     result.final_disposition === "accepted" ||
     result.final_disposition === "accepted_after_fix";
@@ -166,7 +182,9 @@ export default function PlagiarismReportPage() {
             Validation Report
           </h1>
           <p className="mt-2 max-w-2xl text-slate-400">
-            Desklib checked the AI score first, the humanizer handled flagged AI sections, and overlap review ran after the draft cleared the AI gate.
+            {isSectionGatePartial
+              ? "Desklib checked each section during generation. The workflow stopped early when one section could not produce a safe AI-passing candidate."
+              : "Desklib checked the AI score first, the humanizer handled flagged AI sections, and overlap review ran after the draft cleared the AI gate."}
           </p>
         </div>
         <div className="flex flex-wrap gap-3">
@@ -189,7 +207,7 @@ export default function PlagiarismReportPage() {
               });
             }}
           >
-            {accepted ? "Open Editor" : "Open Latest Draft"}
+            {accepted ? "Open Editor" : isSectionGatePartial ? "Back to Workspace" : "Open Latest Draft"}
             <ArrowRight className="ml-2 h-4 w-4" />
           </Button>
         </div>
@@ -210,7 +228,9 @@ export default function PlagiarismReportPage() {
                 <p className="text-sm text-slate-400">
                   {report?.routing_decision === "accepted"
                     ? "Within the 10% acceptance gate"
-                    : "Above the 10% AI threshold or still pending review"}
+                    : isSectionGatePartial
+                      ? "Stopped during section AI gate"
+                      : "Above the 10% AI threshold or still pending review"}
                 </p>
               </div>
             </div>
@@ -229,7 +249,9 @@ export default function PlagiarismReportPage() {
                   {overlapPercent == null ? "--" : `${overlapPercent}%`}
                 </p>
                 <p className="text-sm text-slate-400">
-                  Final overlap score against the uploaded source.
+                  {isSectionGatePartial
+                    ? "Overlap is skipped until all text sections pass."
+                    : "Final overlap score against the uploaded source."}
                 </p>
               </div>
             </div>
@@ -252,7 +274,9 @@ export default function PlagiarismReportPage() {
                   {result.final_disposition.replaceAll("_", " ")}
                 </p>
                 <p className="text-sm text-slate-400">
-                  {report?.decision_summary ?? "Validation summary unavailable."}
+                  {isSectionGatePartial
+                    ? `Stopped at ${formatLabel(sectionGateFailedSection)} because ${formatLabel(sectionGateStopReason)}.`
+                    : report?.decision_summary ?? "Validation summary unavailable."}
                 </p>
               </div>
             </div>
@@ -266,7 +290,9 @@ export default function PlagiarismReportPage() {
             <div>
               <h2 className="text-xl font-semibold text-white">Workflow Summary</h2>
               <p className="mt-1 text-sm text-slate-400">
-                The workflow runs Desklib AI detection first, applies targeted humanizer fixes when needed, and checks source overlap after the AI score reaches the acceptance gate.
+                {isSectionGatePartial
+                  ? "The workflow writes and gates one section at a time. A partial draft and section diagnostics were stored for review."
+                  : "The workflow runs Desklib AI detection first, applies targeted humanizer fixes when needed, and checks source overlap after the AI score reaches the acceptance gate."}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -282,23 +308,24 @@ export default function PlagiarismReportPage() {
           <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-3">
             <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
               <p className="text-xs uppercase tracking-wide text-slate-500">Acceptance Gate</p>
-              <p className="mt-2 text-lg font-semibold text-white">AI &lt;= 10% before overlap &lt;= 10%</p>
+              <p className="mt-2 text-lg font-semibold text-white">
+                {isSectionGatePartial ? "Each section AI <= 10%" : "AI <= 10% before overlap <= 10%"}
+              </p>
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
               <p className="text-xs uppercase tracking-wide text-slate-500">Fix Loop</p>
               <p className="mt-2 text-lg font-semibold text-white">
-                {fixSummary?.attempted ? `${fixSummary.iterations} pass${fixSummary.iterations === 1 ? "" : "es"}` : "Not needed"}
+                {isSectionGatePartial
+                  ? "Section gate"
+                  : fixSummary?.attempted
+                    ? `${fixSummary.iterations} pass${fixSummary.iterations === 1 ? "" : "es"}`
+                    : "Not needed"}
               </p>
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
               <p className="text-xs uppercase tracking-wide text-slate-500">Latest Draft</p>
               <p className="mt-2 break-all text-sm font-semibold text-white">
-                {result.artifacts.draft_v5_uri ??
-                  result.artifacts.draft_v4_uri ??
-                  result.artifacts.draft_v3_uri ??
-                  result.artifacts.draft_v2_uri ??
-                  result.artifacts.draft_v1_uri ??
-                  "Unavailable"}
+                {latestDraftUri}
               </p>
             </div>
           </div>
@@ -321,6 +348,84 @@ export default function PlagiarismReportPage() {
           </div>
         </CardContent>
       </Card>
+
+      {isSectionGatePartial ? (
+        <Card className="border border-amber-300/20 bg-[#181816]">
+          <CardContent className="p-6">
+            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="flex items-center gap-3">
+                  <div className="rounded-full bg-amber-500/10 p-3 text-amber-200">
+                    <Wand2 className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-semibold text-white">Section Gate Stopped Early</h2>
+                    <p className="mt-1 text-sm text-slate-400">
+                      The workflow saved the accepted sections and stopped before figures, references, and IEEE formatting.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <Badge
+                variant="outline"
+                className="border-amber-300/20 bg-amber-500/10 text-amber-100"
+              >
+                partial manual review
+              </Badge>
+            </div>
+
+            <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Failed Section</p>
+                <p className="mt-2 text-lg font-semibold capitalize text-white">
+                  {formatLabel(sectionGateFailedSection)}
+                </p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Stop Reason</p>
+                <p className="mt-2 text-lg font-semibold capitalize text-white">
+                  {formatLabel(sectionGateStopReason)}
+                </p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Accepted Sections</p>
+                <p className="mt-2 text-lg font-semibold text-white">
+                  {sectionGateAccepted.length}
+                </p>
+              </div>
+            </div>
+
+            {sectionGateAccepted.length > 0 ? (
+              <div className="mt-4 flex flex-wrap gap-2">
+                {sectionGateAccepted.map((sectionId) => (
+                  <Badge
+                    key={sectionId}
+                    variant="outline"
+                    className="border-white/10 bg-white/[0.03] text-slate-200"
+                  >
+                    {sectionId.replaceAll("_", " ")}
+                  </Badge>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Partial Draft Artifact</p>
+                <p className="mt-2 break-all text-sm font-semibold text-white">
+                  {result.artifacts.partial_draft_uri ?? "Unavailable"}
+                </p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Section Workflow Artifact</p>
+                <p className="mt-2 break-all text-sm font-semibold text-white">
+                  {result.artifacts.section_workflow_uri ?? "Unavailable"}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
 
       {fixSummary?.attempted ? (
         <Card className="border border-white/10 bg-[#181816]">

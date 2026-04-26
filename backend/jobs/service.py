@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -23,7 +24,9 @@ from jobs.artifacts import (
     store_final_accepted_draft_artifact,
     store_generated_draft_artifact,
     store_job_result_report,
+    store_partial_draft_artifact,
     store_remediation_context_artifact,
+    store_section_workflow_artifact,
 )
 from jobs.dispatcher import get_job_dispatcher
 from jobs.repository import ACTIVE_JOB_STATUSES, get_job_repository
@@ -106,6 +109,10 @@ def _result_artifacts_from_job(job: JobRecord) -> JobResultArtifacts:
         remediation_context_uri=(
             job.artifacts.remediation_context.uri if job.artifacts.remediation_context else None
         ),
+        section_workflow_uri=(
+            job.artifacts.section_workflow.uri if job.artifacts.section_workflow else None
+        ),
+        partial_draft_uri=job.artifacts.partial_draft.uri if job.artifacts.partial_draft else None,
         draft_v1_uri=job.artifacts.draft_v1.uri if job.artifacts.draft_v1 else None,
         draft_v2_uri=job.artifacts.draft_v2.uri if job.artifacts.draft_v2 else None,
         draft_v3_uri=job.artifacts.draft_v3.uri if job.artifacts.draft_v3 else None,
@@ -195,7 +202,14 @@ def _build_fix_targets(validation_output: ValidationServiceOutput) -> list[FixSe
 
 
 def _fix_iteration_available(job: JobRecord) -> bool:
-    return job.enable_fix_loop and job.iteration < job.max_iterations
+    max_iterations = job.max_iterations
+    if os.getenv("FIX_BACKSTOP_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}:
+        try:
+            backstop_limit = int(os.getenv("FIX_BACKSTOP_MAX_ITERATIONS", "1"))
+        except ValueError:
+            backstop_limit = 1
+        max_iterations = min(max_iterations, max(1, backstop_limit))
+    return job.enable_fix_loop and job.iteration < max_iterations
 
 
 def create_generation_job(
@@ -332,6 +346,97 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
                 idempotency_key=job.idempotency_key,
             )
         )
+
+        if generation_result.generation_status == "partial_manual_review":
+            remediation_context_artifact = (
+                store_remediation_context_artifact(
+                    job.project_id,
+                    job.job_id,
+                    generation_result.remediation_context,
+                    revision="v1",
+                    owner_service="generation-service",
+                )
+                if generation_result.remediation_context
+                else None
+            )
+            section_workflow_artifact = (
+                store_section_workflow_artifact(
+                    job.project_id,
+                    job.job_id,
+                    generation_result.section_workflow,
+                    revision="v1",
+                    owner_service="generation-service",
+                )
+                if generation_result.section_workflow is not None
+                else None
+            )
+            partial_draft_artifact = (
+                store_partial_draft_artifact(
+                    job.project_id,
+                    job.job_id,
+                    generation_result.partial_draft,
+                    revision="v1",
+                    owner_service="generation-service",
+                )
+                if generation_result.partial_draft is not None
+                else None
+            )
+            score_update = WorkflowScores(
+                ai_score=None,
+                plagiarism_score=None,
+                confidence_band="high",
+                routing_decision="flagged",
+            )
+            job = _save_job(
+                job,
+                status="FINALIZING",
+                stage="finalize",
+                validation_mode="none",
+                current_draft_uri=partial_draft_artifact.uri if partial_draft_artifact else None,
+                artifacts=job.artifacts.model_copy(
+                    update={
+                        "remediation_context": remediation_context_artifact,
+                        "section_workflow": section_workflow_artifact,
+                        "partial_draft": partial_draft_artifact,
+                    }
+                ),
+                scores=score_update,
+                error=None,
+            )
+            predicted_final_report_uri = get_object_storage().get_uri(
+                build_final_report_key(job.project_id, job.job_id)
+            )
+            result = JobResultResponse(
+                job_id=job.job_id,
+                project_id=job.project_id,
+                status="DONE",
+                final_disposition="flagged",
+                validation_mode="none",
+                boundary="section_gate_partial",
+                editor_url=None,
+                generated_paper=None,
+                metadata=generation_result.metadata,
+                report=None,
+                fix_summary=None,
+                artifacts=_result_artifacts_from_job(job).model_copy(
+                    update={"final_report_uri": predicted_final_report_uri}
+                ),
+            )
+            final_report = store_job_result_report(job.project_id, job.job_id, result)
+            _save_job(
+                job,
+                status="DONE",
+                stage="done",
+                artifacts=job.artifacts.model_copy(update={"final_report": final_report}),
+                timestamps=job.timestamps.model_copy(
+                    update={"updated_at": _timestamp(), "completed_at": _timestamp()}
+                ),
+            )
+            return
+
+        if generation_result.generated_paper is None:
+            raise ValueError("Generation service returned no generated paper for a completed job.")
+
         updated_project = save_generated_paper(
             project_id=project.id,
             owner_uid=job.user_id,

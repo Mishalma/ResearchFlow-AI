@@ -536,11 +536,16 @@ async def score_validation_candidates(
     if not source_text and request.extracted_text_uri:
         source_text = load_extracted_text_artifact(request.extracted_text_uri)
 
-    source_sentences, source_index = _build_source_index(
-        source_text,
-        ngram_size=resolved_validation_config.overlap_ngram_size,
-        min_tokens=resolved_validation_config.overlap_sentence_min_tokens,
-    )
+    source_sentences: list[_SourceSentence] = []
+    source_index: dict[tuple[str, ...], set[int]] = {}
+    compute_overlap = bool(request.config.compute_overlap)
+    ai_only = request.config.accept_mode == "ai_only"
+    if compute_overlap:
+        source_sentences, source_index = _build_source_index(
+            source_text,
+            ngram_size=resolved_validation_config.overlap_ngram_size,
+            min_tokens=resolved_validation_config.overlap_sentence_min_tokens,
+        )
     results: list[ValidationCandidateScore] = []
 
     for candidate in request.candidates:
@@ -548,15 +553,17 @@ async def score_validation_candidates(
             candidate.text,
             config=resolved_validation_config,
         )
-        overlap_score = _overlap_score_for_text(
-            section_name=candidate.section_id,
-            section_text=candidate.text,
-            source_sentences=source_sentences,
-            source_index=source_index,
-            project_id=request.project_id,
-            validation_config=resolved_validation_config,
-            originality_config=resolved_originality_config,
-        )
+        overlap_score = 0.0
+        if compute_overlap:
+            overlap_score = _overlap_score_for_text(
+                section_name=candidate.section_id,
+                section_text=candidate.text,
+                source_sentences=source_sentences,
+                source_index=source_index,
+                project_id=request.project_id,
+                validation_config=resolved_validation_config,
+                originality_config=resolved_originality_config,
+            )
 
         original_ai_score = candidate.original_ai_score
         original_overlap_score = candidate.original_overlap_score
@@ -566,7 +573,7 @@ async def score_validation_candidates(
                     candidate.original_text,
                     config=resolved_validation_config,
                 )
-            if original_overlap_score is None:
+            if compute_overlap and original_overlap_score is None:
                 original_overlap_score = _overlap_score_for_text(
                     section_name=candidate.section_id,
                     section_text=candidate.original_text,
@@ -584,7 +591,7 @@ async def score_validation_candidates(
         )
         overlap_delta = (
             round(float(overlap_score) - float(original_overlap_score), 2)
-            if original_overlap_score is not None
+            if compute_overlap and original_overlap_score is not None
             else None
         )
 
@@ -604,19 +611,21 @@ async def score_validation_candidates(
         if not ai_accepted:
             rejection_reasons.append("ai_not_improved")
 
-        overlap_improved = bool(
-            original_overlap_score is not None
-            and overlap_score < float(original_overlap_score)
-        )
-        overlap_accepted = (
-            overlap_score <= request.config.overlap_accept_threshold
-            or overlap_improved
-        )
-        if overlap_delta is not None and overlap_delta > request.config.max_overlap_increase:
-            overlap_accepted = False
-            rejection_reasons.append("overlap_increased")
-        if not overlap_accepted and "overlap_increased" not in rejection_reasons:
-            rejection_reasons.append("overlap_above_threshold")
+        overlap_accepted = True
+        if compute_overlap and not ai_only:
+            overlap_improved = bool(
+                original_overlap_score is not None
+                and overlap_score < float(original_overlap_score)
+            )
+            overlap_accepted = (
+                overlap_score <= request.config.overlap_accept_threshold
+                or overlap_improved
+            )
+            if overlap_delta is not None and overlap_delta > request.config.max_overlap_increase:
+                overlap_accepted = False
+                rejection_reasons.append("overlap_increased")
+            if not overlap_accepted and "overlap_increased" not in rejection_reasons:
+                rejection_reasons.append("overlap_above_threshold")
 
         results.append(
             ValidationCandidateScore(

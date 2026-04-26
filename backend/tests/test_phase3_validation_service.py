@@ -639,3 +639,44 @@ async def test_score_validation_candidates_rejects_ai_and_overlap_regression(mon
     assert response.results[0].accepted is False
     assert "ai_not_improved" in response.results[0].rejection_reasons
     assert "overlap_increased" in response.results[0].rejection_reasons
+
+
+@pytest.mark.anyio
+async def test_score_validation_candidates_ai_only_skips_overlap(monkeypatch):
+    def fake_ai_score(text: str, *, config: ValidationConfig):
+        del text, config
+        return (0.07, {})
+
+    def fail_overlap(**kwargs):
+        del kwargs
+        raise AssertionError("overlap should be skipped for ai_only section gating")
+
+    monkeypatch.setattr("validation.runtime._ai_score_for_section", fake_ai_score)
+    monkeypatch.setattr("validation.runtime._overlap_score_for_text", fail_overlap)
+
+    response = await score_validation_candidates(
+        ValidationCandidateScoringRequest(
+            task_id="task-score-runtime-ai-only",
+            job_id="job-123",
+            project_id="project-123",
+            user_id="user-123",
+            idempotency_key="phase3-runtime-ai-only",
+            source_text="Uploaded source text",
+            candidates=[
+                ValidationCandidate(
+                    candidate_id="abstract-1",
+                    section_id="abstract",
+                    text="Candidate text",
+                )
+            ],
+            config={
+                "compute_overlap": False,
+                "accept_mode": "ai_only",
+            },
+        )
+    )
+
+    assert response.results[0].accepted is True
+    assert response.results[0].ai_score == 0.07
+    assert response.results[0].overlap_score == 0.0
+    assert response.results[0].overlap_delta is None
