@@ -7,8 +7,13 @@ import httpx
 
 from core.config import Settings, get_settings
 from core.exceptions import ValidationError, WorkflowConfigurationError
-from models.validation import ValidationServiceRequest, ValidationServiceResponse
-from validation.runtime import execute_validation
+from models.validation import (
+    ValidationCandidateScoringRequest,
+    ValidationCandidateScoringResponse,
+    ValidationServiceRequest,
+    ValidationServiceResponse,
+)
+from validation.runtime import execute_validation, score_validation_candidates
 
 
 class ValidationServiceClient(Protocol):
@@ -16,6 +21,11 @@ class ValidationServiceClient(Protocol):
         self,
         request: ValidationServiceRequest,
     ) -> ValidationServiceResponse: ...
+
+    async def score_candidates(
+        self,
+        request: ValidationCandidateScoringRequest,
+    ) -> ValidationCandidateScoringResponse: ...
 
 
 async def execute_validation_request(
@@ -27,6 +37,15 @@ async def execute_validation_request(
     return await execute_validation(request, settings=resolved_settings)
 
 
+async def execute_candidate_scoring_request(
+    request: ValidationCandidateScoringRequest,
+    *,
+    settings: Settings | None = None,
+) -> ValidationCandidateScoringResponse:
+    resolved_settings = settings or get_settings()
+    return await score_validation_candidates(request, settings=resolved_settings)
+
+
 class LocalValidationServiceClient:
     def __init__(self, *, settings: Settings | None = None):
         self._settings = settings
@@ -36,6 +55,12 @@ class LocalValidationServiceClient:
         request: ValidationServiceRequest,
     ) -> ValidationServiceResponse:
         return await execute_validation_request(request, settings=self._settings)
+
+    async def score_candidates(
+        self,
+        request: ValidationCandidateScoringRequest,
+    ) -> ValidationCandidateScoringResponse:
+        return await execute_candidate_scoring_request(request, settings=self._settings)
 
 
 async def _default_auth_token_provider(audience: str) -> str | None:
@@ -71,6 +96,7 @@ class HttpValidationServiceClient:
             )
 
         self._endpoint = f"{base_url}/internal/validation/run"
+        self._score_endpoint = f"{base_url}/internal/validation/score-candidates"
         self._audience = settings.validation_service_audience or base_url
         self._timeout_seconds = float(settings.validation_service_timeout_seconds)
         self._transport = transport
@@ -121,6 +147,52 @@ class HttpValidationServiceClient:
             ) from exc
 
         return ValidationServiceResponse.model_validate(payload)
+
+    async def score_candidates(
+        self,
+        request: ValidationCandidateScoringRequest,
+    ) -> ValidationCandidateScoringResponse:
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
+        token = await self._auth_token_provider(self._audience)
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        timeout = httpx.Timeout(self._timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
+            response = await client.post(
+                self._score_endpoint,
+                json=request.model_dump(mode="json"),
+                headers=headers,
+            )
+
+        if response.is_error:
+            message = "Validation candidate scoring request failed."
+            details: dict[str, object] = {"status_code": response.status_code}
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                details["response"] = payload
+                if isinstance(payload.get("error"), str) and payload["error"].strip():
+                    message = payload["error"].strip()
+            else:
+                details["response"] = response.text
+            raise ValidationError(message, details=details)
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ValidationError(
+                "Validation candidate scoring returned an invalid JSON response.",
+                details={"status_code": response.status_code},
+            ) from exc
+
+        return ValidationCandidateScoringResponse.model_validate(payload)
 
 
 def get_validation_service_client(

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
+import re
 from time import perf_counter
+from typing import Any
 from uuid import uuid4
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from agents.citation_agent import CitationAgent
 from agents.figure_table_agent import FigureTableAgent
@@ -24,8 +27,7 @@ from core.exceptions import (
     PaperValidationError,
 )
 from core.vertex_client import VertexGeminiClient
-from humanizer.config import MAX_ITERATIONS
-from humanizer.utils import build_section_text_map
+from humanizer.utils import SECTION_ORDER, build_generated_paper, build_section_text_map, verify_rewrite_safety
 from mcp.mcp_server import build_default_mcp_server
 from models.generation import (
     AgentTiming,
@@ -41,11 +43,10 @@ from models.generation import (
     StructuringAgentOutput,
     WritingAgentOutput,
 )
+from models.validation import ValidationCandidate, ValidationCandidateScoringRequest
 from orchestration.a2a_manager import A2AManager, InProcessTransport
 
 logger = logging.getLogger("papereasy.backend.pipeline")
-MAX_HUMANIZER_RETRIES = MAX_ITERATIONS
-
 
 @dataclass
 class _FormattingPhaseResult:
@@ -72,6 +73,10 @@ class _FormattingPhaseResult:
     figure_table_duration_ms: float
     citation_duration_ms: float
     formatting_duration_ms: float
+
+
+class _PreflightSectionCandidates(BaseModel):
+    candidates: list[str] = Field(default_factory=list)
 
 
 def _paper_summary(paper: ResearchPaperSchema) -> str:
@@ -382,13 +387,22 @@ def _execute_humanizer_loop(
     trace_id: str,
     pipeline_context: dict[str, object],
 ) -> HumanizerAgentOutput:
+    max_retries = int(
+            getattr(
+                getattr(humanizer_agent, "humanizer_config", None),
+                "max_iterations",
+                5,
+            )
+        or 5
+    )
+    max_retries = max(1, min(5, max_retries))
     result = humanizer_agent.run(
         build_section_text_map(paper),
         paper=paper,
         iteration=0,
     )
 
-    for attempt in range(1, MAX_HUMANIZER_RETRIES + 1):
+    for attempt in range(1, max_retries + 1):
         action = str(result.get("graph_action") or "accept")
         logger.info(
             "[Humanizer] attempt=%s action=%s composite_after=%s",
@@ -402,6 +416,11 @@ def _execute_humanizer_loop(
             break
 
         if action == "retry_humanizer":
+            if int(result.get("sections_rewritten") or 0) <= 0:
+                logger.warning(
+                    "[Humanizer] retry requested without changed sections; proceeding with best no-change result",
+                )
+                break
             result = humanizer_agent.run(
                 result["updated_sections"],
                 paper=paper,
@@ -420,7 +439,7 @@ def _execute_humanizer_loop(
     else:
         logger.warning(
             "[Humanizer] max retries (%s) reached, proceeding with best result",
-            MAX_HUMANIZER_RETRIES,
+            max_retries,
         )
 
     output = humanizer_agent.build_output(
@@ -471,6 +490,298 @@ def _build_common_metadata_fields(
         "formatting_retry_recommended": phase_result.formatting_result.retry_recommended,
         "formatting_diagnostic_summary": phase_result.formatting_result.diagnostic_summary,
     }
+
+
+def _as_string_list(value: object, *, limit: int = 8) -> list[str]:
+    if value is None:
+        return []
+    candidates = [value] if isinstance(value, str) else list(value) if isinstance(value, (list, tuple)) else []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        text = str(item).strip()
+        if not text:
+            continue
+        folded = text.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        cleaned.append(text[:500])
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _source_span_ids(value: object, *, limit: int = 12) -> list[str]:
+    spans = list(value) if isinstance(value, (list, tuple)) else []
+    identifiers: list[str] = []
+    for span in spans:
+        payload = span if isinstance(span, dict) else getattr(span, "model_dump", lambda **_: {})()
+        if not isinstance(payload, dict):
+            continue
+        chunk_id = str(payload.get("chunk_id") or "").strip()
+        start_char = payload.get("start_char")
+        end_char = payload.get("end_char")
+        if chunk_id and start_char is not None and end_char is not None:
+            identifiers.append(f"{chunk_id}:{start_char}:{end_char}")
+        if len(identifiers) >= limit:
+            break
+    return identifiers
+
+
+def _section_payload(payload: object, section_name: str) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        section = payload.get(section_name)
+        if isinstance(section, dict):
+            return section
+    return {}
+
+
+def _build_remediation_context(phase_result: _FormattingPhaseResult) -> dict[str, Any]:
+    structured_draft = (
+        phase_result.structuring_result.structured_draft
+        if isinstance(phase_result.structuring_result.structured_draft, dict)
+        else {}
+    )
+    structured_sections = structured_draft.get("sections") if isinstance(structured_draft, dict) else {}
+    evidence_notes = structured_draft.get("evidence_notes") if isinstance(structured_draft, dict) else {}
+    written_draft = (
+        phase_result.writing_result.written_draft
+        if isinstance(phase_result.writing_result.written_draft, dict)
+        else {}
+    )
+    written_sections = written_draft.get("sections") if isinstance(written_draft, dict) else {}
+    final_section_texts = build_section_text_map(phase_result.formatting_result.paper)
+
+    sections: dict[str, dict[str, Any]] = {}
+    for section_name in SECTION_ORDER:
+        skeleton = _section_payload(structured_sections, section_name)
+        notes = evidence_notes.get(section_name) if isinstance(evidence_notes, dict) else []
+        notes = list(notes) if isinstance(notes, (list, tuple)) else []
+        note_direct: list[str] = []
+        note_inferred: list[str] = []
+        note_missing: list[str] = []
+        note_span_ids: list[str] = []
+        for raw_note in notes[:8]:
+            note = raw_note if isinstance(raw_note, dict) else getattr(raw_note, "model_dump", lambda **_: {})()
+            if not isinstance(note, dict):
+                continue
+            note_direct.extend(_as_string_list(note.get("direct_evidence"), limit=4))
+            note_inferred.extend(_as_string_list(note.get("inferred_synthesis"), limit=4))
+            note_missing.extend(_as_string_list(note.get("missing_information"), limit=4))
+            note_span_ids.extend(_source_span_ids(note.get("source_spans"), limit=4))
+
+        section_text = final_section_texts.get(section_name, "")
+        sections[section_name] = {
+            "confidence": float(phase_result.structuring_result.section_confidences.get(section_name, 0.0)),
+            "draft": str(skeleton.get("draft") or "")[:1200],
+            "key_points": _as_string_list(skeleton.get("key_points"), limit=8),
+            "direct_evidence": _as_string_list(skeleton.get("direct_evidence"), limit=8)
+            + _as_string_list(note_direct, limit=8),
+            "inferred_synthesis": _as_string_list(skeleton.get("inferred_synthesis"), limit=8)
+            + _as_string_list(note_inferred, limit=8),
+            "missing_evidence": _as_string_list(skeleton.get("missing_evidence"), limit=6)
+            + _as_string_list(note_missing, limit=6),
+            "source_span_ids": _source_span_ids(skeleton.get("source_spans"), limit=12)
+            + _as_string_list(note_span_ids, limit=12),
+            "citation_map": re.findall(r"\[[0-9,\-\s]+\]|\\cite[t|p]?\{[^}]+\}", section_text),
+            "written_claims": _as_string_list(
+                (_section_payload(written_sections, section_name) or {}).get("claims"),
+                limit=8,
+            ),
+        }
+
+    return {
+        "schema_version": "1.0.0",
+        "trace_id": phase_result.trace_id,
+        "source_text_length": phase_result.source_text_length,
+        "sections": sections,
+        "references": list(phase_result.formatting_result.paper.references),
+    }
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int = 8) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _build_preflight_prompt(
+    *,
+    section_name: str,
+    section_text: str,
+    remediation_context: dict[str, Any],
+    candidate_count: int,
+) -> str:
+    context_payload = json_safe_section_context(remediation_context, section_name=section_name)
+    return (
+        "Create alternative versions of one academic manuscript section from evidence notes.\n"
+        "Do not copy source phrasing closely. Do not add unsupported claims. Preserve citations, numbers, "
+        "percentages, equations, LaTeX, dataset names, model names, and technical entities exactly.\n"
+        f"Return exactly {candidate_count} candidates as JSON matching this schema: "
+        '{"candidates":["full section text"]}.\n\n'
+        f"SECTION: {section_name}\n"
+        f"EVIDENCE CONTEXT:\n{context_payload}\n\n"
+        f"CURRENT SECTION:\n{section_text[:6500]}"
+    )
+
+
+def json_safe_section_context(remediation_context: dict[str, Any], *, section_name: str) -> str:
+    sections = remediation_context.get("sections") if isinstance(remediation_context, dict) else {}
+    section_payload = sections.get(section_name) if isinstance(sections, dict) else {}
+    if not isinstance(section_payload, dict):
+        return "{}"
+    compact = {
+        "key_points": section_payload.get("key_points") or [],
+        "direct_evidence": section_payload.get("direct_evidence") or [],
+        "inferred_synthesis": section_payload.get("inferred_synthesis") or [],
+        "missing_evidence": section_payload.get("missing_evidence") or [],
+        "source_span_ids": section_payload.get("source_span_ids") or [],
+        "citation_map": section_payload.get("citation_map") or [],
+    }
+    import json
+
+    return json.dumps(compact, ensure_ascii=True)
+
+
+async def _generate_preflight_candidates(
+    *,
+    phase_result: _FormattingPhaseResult,
+    section_name: str,
+    section_text: str,
+    remediation_context: dict[str, Any],
+    candidate_count: int,
+) -> list[str]:
+    prompt = _build_preflight_prompt(
+        section_name=section_name,
+        section_text=section_text,
+        remediation_context=remediation_context,
+        candidate_count=candidate_count,
+    )
+    result = await phase_result.vertex_client.generate_json(
+        prompt=prompt,
+        response_schema=_PreflightSectionCandidates,
+    )
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for candidate in result.candidates:
+        text = str(candidate or "").strip()
+        if not text or text == section_text.strip():
+            continue
+        safety = verify_rewrite_safety(
+            original=section_text,
+            rewritten=text,
+            similarity_threshold=0.45,
+        )
+        if not safety.passed:
+            continue
+        folded = text.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        candidates.append(text)
+    return candidates[:candidate_count]
+
+
+async def _run_generation_preflight(
+    *,
+    generated_paper: GeneratedPaper,
+    phase_result: _FormattingPhaseResult,
+    remediation_context: dict[str, Any],
+    source_text: str,
+    job_id: str,
+    project_id: str,
+    user_id: str,
+) -> GeneratedPaper:
+    if not _env_bool("GENERATION_PREFLIGHT_SCORING", False):
+        return generated_paper
+    if not job_id or not user_id:
+        logger.warning("Generation preflight skipped because job_id or user_id is missing.")
+        return generated_paper
+
+    candidate_count = _env_int("GENERATION_PREFLIGHT_CANDIDATES", 4, minimum=1, maximum=6)
+    try:
+        from app.services.validation_service import get_validation_service_client
+
+        validation_client = get_validation_service_client(settings=phase_result.resolved_settings)
+    except Exception as exc:
+        logger.warning("Generation preflight skipped because validation scoring is unavailable: %s", exc)
+        return generated_paper
+    section_texts = build_section_text_map(generated_paper.paper)
+    updated_sections = dict(section_texts)
+    changed_sections: list[str] = []
+
+    for section_name in SECTION_ORDER:
+        original_text = section_texts.get(section_name, "").strip()
+        if len(original_text.split()) < 35:
+            continue
+        try:
+            candidates = await _generate_preflight_candidates(
+                phase_result=phase_result,
+                section_name=section_name,
+                section_text=original_text,
+                remediation_context=remediation_context,
+                candidate_count=candidate_count,
+            )
+            if not candidates:
+                continue
+            scoring_response = await validation_client.score_candidates(
+                ValidationCandidateScoringRequest(
+                    task_id=f"generation-preflight-{job_id}-{section_name}",
+                    job_id=job_id,
+                    project_id=project_id or "unknown-project",
+                    user_id=user_id,
+                    idempotency_key=f"preflight-{phase_result.trace_id[:16]}",
+                    source_text=source_text,
+                    candidates=[
+                        ValidationCandidate(
+                            candidate_id=f"{section_name}-{index}",
+                            section_id=section_name,
+                            text=candidate,
+                            original_text=original_text,
+                        )
+                        for index, candidate in enumerate(candidates, start=1)
+                    ],
+                )
+            )
+            accepted = [
+                result for result in scoring_response.results if result.accepted and result.ai_score is not None
+            ]
+            if not accepted:
+                continue
+            accepted.sort(key=lambda item: (float(item.ai_score or 1.0), float(item.overlap_score)))
+            best_candidate_id = accepted[0].candidate_id
+            best_index = int(best_candidate_id.rsplit("-", 1)[-1]) - 1
+            if 0 <= best_index < len(candidates):
+                updated_sections[section_name] = candidates[best_index]
+                changed_sections.append(section_name)
+        except Exception as exc:
+            logger.warning("Generation preflight skipped section %s after scoring/generation failure: %s", section_name, exc)
+            continue
+
+    if not changed_sections:
+        return generated_paper
+
+    logger.info(
+        "Generation preflight accepted candidates for %s section(s).",
+        len(changed_sections),
+    )
+    return build_generated_paper(
+        source_paper=generated_paper.paper,
+        section_texts=updated_sections,
+    )
 
 
 async def _run_pipeline_until_formatting(
@@ -624,6 +935,8 @@ async def run_generation_pipeline(
     settings: Settings | None = None,
     *,
     project_id: str = "",
+    job_id: str = "",
+    user_id: str = "",
 ) -> PipelineResult:
     phase_result = await _run_pipeline_until_formatting(
         text,
@@ -662,7 +975,16 @@ async def run_generation_pipeline(
             ],
         )
     )
-    generated_paper = _build_generated_paper_from_formatting(phase_result.formatting_result)
+    remediation_context = _build_remediation_context(phase_result)
+    generated_paper = await _run_generation_preflight(
+        generated_paper=_build_generated_paper_from_formatting(phase_result.formatting_result),
+        phase_result=phase_result,
+        remediation_context=remediation_context,
+        source_text=text,
+        job_id=job_id,
+        project_id=project_id,
+        user_id=user_id,
+    )
 
     logger.info(
         "Generation pipeline trace %s reached formatting boundary in %.2f ms",
@@ -676,6 +998,7 @@ async def run_generation_pipeline(
         generated_tables=phase_result.pipeline_context.get("generated_tables"),
         figure_table_status=phase_result.pipeline_context.get("figure_table_status"),
         figure_table_error=phase_result.pipeline_context.get("figure_table_error"),
+        remediation_context=remediation_context,
     )
 
 
@@ -800,6 +1123,7 @@ async def run_pipeline(
         )
 
     generated_paper = originality_result.approved_snapshot
+    remediation_context = _build_remediation_context(phase_result)
 
     logger.info("Pipeline trace %s completed in %.2f ms", phase_result.trace_id, total_duration_ms)
     return PipelineResult(
@@ -809,4 +1133,5 @@ async def run_pipeline(
         generated_tables=phase_result.pipeline_context.get("generated_tables"),
         figure_table_status=phase_result.pipeline_context.get("figure_table_status"),
         figure_table_error=phase_result.pipeline_context.get("figure_table_error"),
+        remediation_context=remediation_context,
     )

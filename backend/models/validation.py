@@ -137,3 +137,66 @@ class ValidationServiceResponse(BaseModel):
     status: Literal["VALIDATING"] = "VALIDATING"
     stage: Literal["validation"] = "validation"
     output: ValidationServiceOutput
+
+
+class ValidationCandidate(BaseModel):
+    candidate_id: str = Field(min_length=1)
+    section_id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    original_text: str | None = None
+    original_ai_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    original_overlap_score: float | None = Field(default=None, ge=0.0, le=100.0)
+
+    @model_validator(mode="after")
+    def normalize(self) -> "ValidationCandidate":
+        self.candidate_id = self.candidate_id.strip()
+        self.section_id = self.section_id.strip()
+        self.text = self.text.strip()
+        if self.original_text is not None:
+            self.original_text = self.original_text.strip() or None
+        return self
+
+
+class ValidationCandidateScoringConfig(BaseModel):
+    ai_accept_threshold: float = Field(default=0.10, ge=0.0, le=1.0)
+    overlap_accept_threshold: float = Field(default=10.0, ge=0.0, le=100.0)
+    max_overlap_increase: float = Field(default=2.0, ge=0.0, le=100.0)
+    min_ai_drop_high: float = Field(default=0.05, ge=0.0, le=1.0)
+    min_ai_drop_medium: float = Field(default=0.03, ge=0.0, le=1.0)
+
+
+class ValidationCandidateScoringRequest(BaseModel):
+    schema_version: str = "1.0.0"
+    task_id: str = Field(min_length=1)
+    job_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=8)
+    extracted_text_uri: str | None = None
+    source_text: str | None = None
+    candidates: list[ValidationCandidate] = Field(default_factory=list)
+    config: ValidationCandidateScoringConfig = Field(default_factory=ValidationCandidateScoringConfig)
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "ValidationCandidateScoringRequest":
+        if not self.candidates:
+            raise ValueError("candidates is required for candidate scoring.")
+        if not (self.extracted_text_uri or (self.source_text or "").strip()):
+            raise ValueError("source_text or extracted_text_uri is required for candidate scoring.")
+        return self
+
+
+class ValidationCandidateScore(BaseModel):
+    candidate_id: str = Field(min_length=1)
+    section_id: str = Field(min_length=1)
+    ai_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    overlap_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    score_delta: float | None = None
+    overlap_delta: float | None = None
+    accepted: bool = False
+    rejection_reasons: list[str] = Field(default_factory=list)
+
+
+class ValidationCandidateScoringResponse(BaseModel):
+    job_id: str = Field(min_length=1)
+    results: list[ValidationCandidateScore] = Field(default_factory=list)

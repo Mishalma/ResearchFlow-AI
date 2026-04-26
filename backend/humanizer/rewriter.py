@@ -183,6 +183,26 @@ class NoChangeRewriter:
             )
         ]
 
+    def rewrite_section_candidates(
+        self,
+        *,
+        section_text: str,
+        section_name: str,
+        style_persona: str,
+        remediation_context: dict[str, Any] | None,
+        strategy: str,
+        candidate_count: int = 1,
+    ) -> list[RewriteAttemptResult]:
+        del section_name, style_persona, remediation_context, strategy, candidate_count
+        return [
+            RewriteAttemptResult(
+                text=section_text,
+                rewriter_used="none",
+                changed=False,
+                failure_reason="backend_disabled",
+            )
+        ]
+
 
 class VertexRewriter:
     """Vertex-backed paragraph rewriter."""
@@ -379,6 +399,96 @@ class VertexRewriter:
             return [
                 RewriteAttemptResult(
                     text=target_para,
+                    rewriter_used="none",
+                    changed=False,
+                    failure_reason="generation_failed",
+                )
+            ]
+        return results[:count]
+
+    def rewrite_section_candidates(
+        self,
+        *,
+        section_text: str,
+        section_name: str,
+        style_persona: str,
+        remediation_context: dict[str, Any] | None,
+        strategy: str,
+        candidate_count: int = 6,
+    ) -> list[RewriteAttemptResult]:
+        if not self.available or self._client is None:
+            return [
+                RewriteAttemptResult(
+                    text=section_text,
+                    rewriter_used="none",
+                    changed=False,
+                    failure_reason="model_load_failed",
+                )
+            ]
+
+        count = max(1, min(8, int(candidate_count or 1)))
+        prompt = _build_vertex_section_candidate_prompt(
+            section_text=section_text,
+            section_name=section_name,
+            style_persona=style_persona,
+            remediation_context=remediation_context,
+            strategy=strategy,
+            candidate_count=count,
+        )
+
+        def _call_vertex() -> list[str]:
+            response = self._client.models.generate_content(  # type: ignore[union-attr]
+                model=self.model,
+                contents=prompt,
+            )
+            return _normalize_model_candidates(getattr(response, "text", "") or "")
+
+        try:
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(_call_vertex)
+            try:
+                candidates = future.result(timeout=self.timeout_seconds)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+        except FuturesTimeoutError:
+            return [
+                RewriteAttemptResult(
+                    text=section_text,
+                    rewriter_used="none",
+                    changed=False,
+                    failure_reason="generation_timeout",
+                )
+            ]
+        except Exception as exc:  # pragma: no cover - provider dependent
+            logger.warning("Vertex section candidate generation failed: %s", exc)
+            return [
+                RewriteAttemptResult(
+                    text=section_text,
+                    rewriter_used="none",
+                    changed=False,
+                    failure_reason="generation_failed",
+                )
+            ]
+
+        results: list[RewriteAttemptResult] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            normalized = candidate.strip()
+            if not normalized or normalized == section_text.strip() or normalized in seen:
+                continue
+            seen.add(normalized)
+            results.append(
+                RewriteAttemptResult(
+                    text=normalized,
+                    rewriter_used="vertex",
+                    changed=True,
+                )
+            )
+
+        if not results:
+            return [
+                RewriteAttemptResult(
+                    text=section_text,
                     rewriter_used="none",
                     changed=False,
                     failure_reason="generation_failed",
@@ -688,6 +798,7 @@ class DeterministicRewriter:
         for pattern in GENERIC_POSITIVE_CONCLUSION_PATTERNS:
             rewritten = pattern.sub("", rewritten)
 
+        rewritten = rewritten.replace("\u2014", ", ")
         rewritten = TAILING_NEGATION_PATTERN.sub(r" without \1\2", rewritten)
         rewritten = rewritten.replace("â€”", ", ")
         rewritten = rewritten.replace("â€œ", '"').replace("â€", '"').replace("â€™", "'")
@@ -807,6 +918,173 @@ class HumanizerRewriter:
             return None
         return DesklibCandidateScorer(self.config)
 
+    def _rewrite_full_section(
+        self,
+        *,
+        section_text: str,
+        section_name: str,
+        ai_scores: dict[str, float],
+        style_persona: str,
+        remediation_context: dict[str, Any] | None,
+        strategy: str,
+    ) -> dict[str, Any]:
+        failure_reasons: list[str] = []
+        original_detection = _score_candidate_text(self.detector_scorer, section_text)
+        if self.detector_scorer is not None and original_detection.score is None:
+            _append_reason(
+                failure_reasons,
+                original_detection.failure_reason or "desklib_scorer_unavailable",
+            )
+            return _no_change_section_result(
+                section_text=section_text,
+                strategy=strategy,
+                failure_reasons=failure_reasons,
+                retry_recommended=True,
+            )
+
+        protected_section, spans = extract_protected_spans(section_text)
+        attempts = _rewrite_section_candidates(
+            self.backend,
+            section_text=protected_section,
+            section_name=section_name,
+            style_persona=style_persona,
+            remediation_context=remediation_context,
+            strategy=strategy,
+            candidate_count=self.config.section_rewrite_candidate_count,
+        )
+        candidate_count = len(attempts)
+        accepted_candidates: list[tuple[tuple[float, ...], str, str, float | None]] = []
+        best_candidate_ai_score: float | None = None
+
+        for attempt in attempts:
+            if not attempt.changed:
+                if attempt.failure_reason:
+                    _append_reason(failure_reasons, attempt.failure_reason)
+                continue
+
+            rewritten = restore_protected_spans(attempt.text.strip(), spans)
+            if not rewritten or rewritten.strip() == section_text.strip():
+                _append_reason(failure_reasons, "generation_failed")
+                continue
+
+            candidate_detection = _score_candidate_text(self.detector_scorer, rewritten)
+            if candidate_detection.score is not None:
+                best_candidate_ai_score = (
+                    candidate_detection.score
+                    if best_candidate_ai_score is None
+                    else min(best_candidate_ai_score, candidate_detection.score)
+                )
+
+            if self.detector_scorer is not None:
+                if candidate_detection.score is None:
+                    _append_reason(
+                        failure_reasons,
+                        candidate_detection.failure_reason or "desklib_scoring_failed",
+                    )
+                    continue
+                if self.config.require_desklib_candidate_improvement and not _desklib_score_improves(
+                    original_score=original_detection.score,
+                    candidate_score=candidate_detection.score,
+                    min_improvement=_required_desklib_drop(
+                        original_score=original_detection.score,
+                        config=self.config,
+                    ),
+                ):
+                    _append_reason(failure_reasons, "desklib_not_improved")
+                    continue
+
+            rewritten_scores = composite_ai_score(rewritten)
+            quality_improved = _rewrite_improves_quality(
+                original_scores=ai_scores,
+                rewritten_scores=rewritten_scores,
+            )
+            if self.detector_scorer is None and not quality_improved:
+                _append_reason(failure_reasons, "quality_not_improved")
+                continue
+
+            drift_value = self.semantic_drift.drift(section_text, rewritten)
+            drift_threshold = max(
+                0.35,
+                _effective_semantic_drift_threshold(
+                    semantic_checker=self.semantic_drift,
+                    configured_threshold=self.config.semantic_drift_threshold,
+                ),
+            )
+            if drift_value is not None and drift_value > drift_threshold:
+                _append_reason(failure_reasons, "semantic_drift")
+                logger.warning(
+                    "Rejected full-section rewrite for %s because semantic drift %.3f exceeded threshold %.3f.",
+                    section_name,
+                    drift_value,
+                    drift_threshold,
+                )
+                continue
+
+            safety = verify_rewrite_safety(
+                original=section_text,
+                rewritten=rewritten,
+                similarity_threshold=min(
+                    0.45,
+                    _effective_similarity_threshold(
+                        semantic_checker=self.semantic_drift,
+                        configured_threshold=self.config.semantic_drift_threshold,
+                    ),
+                ),
+            )
+            if not safety.passed:
+                _append_reason(failure_reasons, _map_safety_failure_reason(safety.reasons))
+                logger.warning(
+                    "Rejected full-section rewrite for %s because safety checks failed: %s",
+                    section_name,
+                    ",".join(safety.reasons),
+                )
+                continue
+
+            accepted_candidates.append(
+                (
+                    _candidate_rank_key(
+                        original=section_text,
+                        rewritten=rewritten,
+                        rewritten_scores=rewritten_scores,
+                        desklib_score=candidate_detection.score,
+                        drift_value=drift_value,
+                        safety_similarity=float(getattr(safety, "similarity", 1.0)),
+                        quality_improved=quality_improved,
+                    ),
+                    rewritten,
+                    attempt.rewriter_used,
+                    candidate_detection.score,
+                )
+            )
+
+        if not accepted_candidates:
+            return _no_change_section_result(
+                section_text=section_text,
+                strategy=strategy,
+                failure_reasons=failure_reasons or ["no_accepted_candidate"],
+                candidate_count=candidate_count,
+                best_candidate_ai_score=best_candidate_ai_score,
+                retry_recommended=True,
+            )
+
+        accepted_candidates.sort(key=lambda item: item[0])
+        _rank, best_rewrite, used_rewriter, accepted_ai_score = accepted_candidates[0]
+        return {
+            "rewritten_text": best_rewrite.strip(),
+            "paragraphs_targeted": len(_split_paragraphs(section_text)),
+            "paragraphs_accepted": len(_split_paragraphs(best_rewrite)) or 1,
+            "paragraphs_rejected_drift": 0,
+            "rewriter_used": used_rewriter,
+            "changed": best_rewrite.strip() != section_text.strip(),
+            "failure_reasons": failure_reasons,
+            "strategy": strategy,
+            "candidate_count": candidate_count,
+            "accepted_candidate_count": len(accepted_candidates),
+            "best_candidate_ai_score": accepted_ai_score,
+            "best_candidate_overlap_score": None,
+            "retry_recommended": False,
+        }
+
     def rewrite_section(
         self,
         section_text: str,
@@ -816,8 +1094,9 @@ class HumanizerRewriter:
         section_name: str | None = None,
         force_rewrite: bool = False,
         require_quality_improvement: bool = True,
+        remediation_context: dict[str, Any] | None = None,
+        strategy: str | None = None,
     ) -> dict[str, Any]:
-        del ai_scores
         paragraphs = _split_paragraphs(section_text)
         if not paragraphs:
             return {
@@ -828,7 +1107,24 @@ class HumanizerRewriter:
                 "rewriter_used": "none",
                 "changed": False,
                 "failure_reasons": [],
+                "strategy": strategy,
+                "candidate_count": 0,
+                "accepted_candidate_count": 0,
+                "best_candidate_ai_score": None,
+                "best_candidate_overlap_score": None,
+                "retry_recommended": False,
             }
+
+        persona = style_persona or SECTION_STYLE_PERSONAS.get(section_name or "", "Academic but conversational")
+        if force_rewrite and self.config.full_section_rewrite:
+            return self._rewrite_full_section(
+                section_text=section_text,
+                section_name=section_name or "section",
+                ai_scores=ai_scores,
+                style_persona=persona,
+                remediation_context=remediation_context,
+                strategy=strategy or _strategy_for_iteration(0, self.config.strategy_order),
+            )
 
         scored_paragraphs: list[tuple[int, dict[str, float], str]] = []
         all_scored_paragraphs: list[tuple[int, dict[str, float], str]] = []
@@ -868,6 +1164,12 @@ class HumanizerRewriter:
                 "rewriter_used": "none",
                 "changed": False,
                 "failure_reasons": [],
+                "strategy": strategy,
+                "candidate_count": 0,
+                "accepted_candidate_count": 0,
+                "best_candidate_ai_score": None,
+                "best_candidate_overlap_score": None,
+                "retry_recommended": False,
             }
 
         accepted = 0
@@ -875,8 +1177,6 @@ class HumanizerRewriter:
         rewriter_modes: set[str] = set()
         failure_reasons: list[str] = []
         updated = list(paragraphs)
-        persona = style_persona or SECTION_STYLE_PERSONAS.get(section_name or "", "Academic but conversational")
-
         for index, paragraph_scores, original_paragraph in targets:
             original_detection = _score_candidate_text(self.detector_scorer, original_paragraph)
             if self.detector_scorer is not None and original_detection.score is None:
@@ -918,7 +1218,10 @@ class HumanizerRewriter:
                         and not _desklib_score_improves(
                             original_score=original_detection.score,
                             candidate_score=candidate_detection.score,
-                            min_improvement=self.config.desklib_candidate_min_improvement,
+                            min_improvement=_required_desklib_drop(
+                                original_score=original_detection.score,
+                                config=self.config,
+                            ),
                         )
                     ):
                         _append_reason(failure_reasons, "desklib_not_improved")
@@ -1004,6 +1307,12 @@ class HumanizerRewriter:
             "rewriter_used": used,
             "changed": accepted > 0,
             "failure_reasons": failure_reasons,
+            "strategy": strategy,
+            "candidate_count": 0,
+            "accepted_candidate_count": accepted,
+            "best_candidate_ai_score": None,
+            "best_candidate_overlap_score": None,
+            "retry_recommended": False,
         }
 
 
@@ -1120,6 +1429,73 @@ def _rewrite_paragraph_candidates(
     ]
 
 
+def _rewrite_section_candidates(
+    backend: Any,
+    *,
+    section_text: str,
+    section_name: str,
+    style_persona: str,
+    remediation_context: dict[str, Any] | None,
+    strategy: str,
+    candidate_count: int,
+) -> list[RewriteAttemptResult]:
+    if hasattr(backend, "rewrite_section_candidates"):
+        return list(
+            backend.rewrite_section_candidates(
+                section_text=section_text,
+                section_name=section_name,
+                style_persona=style_persona,
+                remediation_context=remediation_context,
+                strategy=strategy,
+                candidate_count=candidate_count,
+            )
+        )
+    return [
+        RewriteAttemptResult(
+            text=section_text,
+            rewriter_used="none",
+            changed=False,
+            failure_reason="backend_disabled",
+        )
+    ]
+
+
+def _no_change_section_result(
+    *,
+    section_text: str,
+    strategy: str | None,
+    failure_reasons: list[str],
+    candidate_count: int = 0,
+    best_candidate_ai_score: float | None = None,
+    retry_recommended: bool = False,
+) -> dict[str, Any]:
+    return {
+        "rewritten_text": section_text,
+        "paragraphs_targeted": len(_split_paragraphs(section_text)),
+        "paragraphs_accepted": 0,
+        "paragraphs_rejected_drift": 0,
+        "rewriter_used": "none",
+        "changed": False,
+        "failure_reasons": failure_reasons,
+        "strategy": strategy,
+        "candidate_count": candidate_count,
+        "accepted_candidate_count": 0,
+        "best_candidate_ai_score": best_candidate_ai_score,
+        "best_candidate_overlap_score": None,
+        "retry_recommended": retry_recommended,
+    }
+
+
+def _strategy_for_iteration(iteration: int, strategy_order: tuple[str, ...]) -> str:
+    strategies = tuple(item.strip() for item in strategy_order if str(item).strip()) or (
+        "evidence_section",
+        "detector_feedback",
+        "overlap_reduction",
+    )
+    index = min(max(0, int(iteration or 0)), len(strategies) - 1)
+    return strategies[index]
+
+
 def _effective_semantic_drift_threshold(
     *,
     semantic_checker: SemanticDriftChecker,
@@ -1198,6 +1574,20 @@ def _desklib_score_improves(
     if candidate_score <= 0.10:
         return True
     return candidate_score <= original_score - max(0.0, float(min_improvement))
+
+
+def _required_desklib_drop(
+    *,
+    original_score: float | None,
+    config: HumanizerConfig,
+) -> float:
+    if original_score is None:
+        return config.desklib_candidate_min_improvement
+    if original_score > 0.90:
+        return config.accept_min_ai_drop_high
+    if original_score > 0.35:
+        return config.accept_min_ai_drop_medium
+    return config.desklib_candidate_min_improvement
 
 
 def _rewrite_similarity_threshold(semantic_drift_threshold: float) -> float:
@@ -1288,6 +1678,82 @@ def _build_vertex_candidate_prompt(
         "PARAGRAPH:\n"
         f"{target_para}\n"
     )
+
+
+def _build_vertex_section_candidate_prompt(
+    *,
+    section_text: str,
+    section_name: str,
+    style_persona: str,
+    remediation_context: dict[str, Any] | None,
+    strategy: str,
+    candidate_count: int,
+) -> str:
+    strategy_key = (strategy or "evidence_section").strip().lower()
+    strategy_guidance = {
+        "evidence_section": (
+            "Rebuild the section from the evidence notes and citation map, not by paraphrasing "
+            "the old prose sentence by sentence."
+        ),
+        "detector_feedback": (
+            "Reduce formulaic academic patterns: vary sentence openings, sentence lengths, "
+            "transition rhythm, and claim ordering while keeping the same evidence."
+        ),
+        "overlap_reduction": (
+            "Avoid close source phrasing. Express the same source-backed claims using fresh "
+            "sentence structures and synthesis."
+        ),
+    }.get(strategy_key, "Create a fresh, source-grounded academic rewrite with natural cadence.")
+    context_payload = _compact_remediation_context(remediation_context, section_name=section_name)
+    trimmed_section = section_text[:6500]
+    return (
+        "You are revising one section of an academic manuscript for an integrity-first SaaS workflow.\n"
+        "Goal: produce safer, more natural academic prose while preserving meaning and evidence.\n"
+        "Do not invent claims. Do not remove, add, or change citations, numbers, percentages, equations, "
+        "LaTeX commands, dataset names, model names, or technical entities. Keep section scope and tense.\n"
+        f"Return exactly {candidate_count} full-section alternatives as a strict JSON array of strings. "
+        "No markdown, no commentary, no keys.\n\n"
+        f"SECTION: {section_name}\n"
+        f"STYLE TARGET: {style_persona}\n"
+        f"STRATEGY: {strategy_key}\n"
+        f"STRATEGY GUIDANCE: {strategy_guidance}\n\n"
+        "EVIDENCE / REMEDIATION CONTEXT:\n"
+        f"{context_payload}\n\n"
+        "CURRENT SECTION:\n"
+        f"{trimmed_section}\n"
+    )
+
+
+def _compact_remediation_context(
+    remediation_context: dict[str, Any] | None,
+    *,
+    section_name: str,
+) -> str:
+    if not isinstance(remediation_context, dict):
+        return "No structured evidence context was provided; preserve the section's existing claims."
+
+    sections = remediation_context.get("sections")
+    section_payload = sections.get(section_name) if isinstance(sections, dict) else None
+    if not isinstance(section_payload, dict):
+        return "No section-specific evidence context was provided; preserve the section's existing claims."
+
+    def _items(key: str, limit: int = 5) -> list[str]:
+        raw = section_payload.get(key) or []
+        if isinstance(raw, str):
+            values = [raw]
+        else:
+            values = list(raw) if isinstance(raw, (list, tuple)) else []
+        return [str(item).strip()[:260] for item in values if str(item).strip()][:limit]
+
+    compact = {
+        "key_points": _items("key_points", 6),
+        "direct_evidence": _items("direct_evidence", 6),
+        "inferred_synthesis": _items("inferred_synthesis", 5),
+        "missing_evidence": _items("missing_evidence", 4),
+        "source_span_ids": _items("source_span_ids", 8),
+        "citation_map": _items("citation_map", 8),
+    }
+    return json.dumps(compact, ensure_ascii=True)
 
 
 def _normalize_model_candidates(text: str) -> list[str]:

@@ -132,6 +132,58 @@ async def test_run_generation_pipeline_returns_formatting_output_without_humaniz
     assert result.metadata.validation_events[-1] == (
         "pipeline: formatting boundary reached; humanizer/originality deferred"
     )
+    assert result.remediation_context["trace_id"] == "trace-formatting"
+
+
+@pytest.mark.anyio
+async def test_execute_generation_request_passes_job_context_and_remediation_context(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_pipeline(text: str, settings=None, *, project_id: str = "", job_id: str = "", user_id: str = ""):
+        captured["text"] = text
+        captured["project_id"] = project_id
+        captured["job_id"] = job_id
+        captured["user_id"] = user_id
+        return SimpleNamespace(
+            generated_paper=GeneratedPaper(
+                paper=_paper(),
+                formatted_text="Formatted output for the editor",
+                latex_ready="\\\\documentclass{IEEEtran}",
+            ),
+            metadata=GenerationMetadata(
+                model="gemini-test",
+                generation_time_ms=10,
+                source_text_length=10,
+                trace_id="trace-123",
+            ),
+            generated_figures=None,
+            generated_tables=None,
+            figure_table_status="skipped",
+            figure_table_error=None,
+            remediation_context={"trace_id": "trace-123", "sections": {"introduction": {"key_points": ["A"]}}},
+        )
+
+    monkeypatch.setattr("app.services.generation_service.run_generation_pipeline", fake_pipeline)
+
+    from app.services.generation_service import execute_generation_request
+
+    response = await execute_generation_request(
+        GenerationServiceRequest(
+            job_id="job-123",
+            project_id="project-123",
+            source_text="source text",
+            user_id="user-123",
+            idempotency_key="phase2-job-123",
+        )
+    )
+
+    assert captured == {
+        "text": "source text",
+        "project_id": "project-123",
+        "job_id": "job-123",
+        "user_id": "user-123",
+    }
+    assert response.remediation_context["trace_id"] == "trace-123"
 
 
 @pytest.mark.anyio

@@ -692,6 +692,246 @@ async def test_run_generation_task_fix_can_finish_as_accepted_after_fix(monkeypa
 
 
 @pytest.mark.anyio
+async def test_run_generation_task_retries_after_no_change_when_fix_recommends_retry(monkeypatch):
+    repository = InMemoryJobRepository()
+    project = _make_project()
+    job = JobRecord(
+        job_id="job-123",
+        project_id=project.id,
+        user_id=project.owner_uid,
+        idempotency_key="phase4-project-retry",
+        status="GENERATION_REQUESTED",
+    )
+    repository.save(job)
+
+    generated_paper = _make_generated_paper()
+    fixed_paper = generated_paper.model_copy(update={"formatted_text": "Fixed formatted text"})
+    metadata = _make_generation_metadata()
+
+    monkeypatch.setattr("jobs.service.get_job_repository", lambda: repository)
+    monkeypatch.setattr("jobs.service.get_project", lambda project_id, owner_uid: project)
+
+    class FakeGenerationClient:
+        async def run_generation(self, request):
+            return GenerationServiceResponse(
+                job_id=request.job_id,
+                project_id=request.project_id,
+                generated_paper=generated_paper,
+                metadata=metadata,
+                generated_figures=None,
+                generated_tables=None,
+                figure_table_status="skipped",
+                figure_table_error=None,
+                remediation_context={"trace_id": "trace-123", "sections": {"introduction": {"key_points": ["A"]}}},
+                boundary="formatting_complete",
+            )
+
+    validation_calls = {"count": 0}
+
+    class FakeValidationClient:
+        async def run_validation(self, request):
+            validation_calls["count"] += 1
+            if validation_calls["count"] == 1:
+                return _make_validation_response(
+                    mode="ai_check",
+                    routing_decision="flagged",
+                    ai_score=0.18,
+                    plagiarism_score=0.0,
+                    validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_ai_check_v1.json",
+                    section_flags=[
+                        ValidationSectionFlag(
+                            section_id="introduction",
+                            flag_type="ai",
+                            score=0.31,
+                            risk="medium",
+                            summary="Introduction shows elevated AI-style signals.",
+                        )
+                    ],
+                )
+            if validation_calls["count"] == 2:
+                assert request.config.changed_sections_only is False
+                return _make_validation_response(
+                    mode="ai_check",
+                    routing_decision="flagged",
+                    ai_score=0.16,
+                    plagiarism_score=0.0,
+                    validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_ai_check_v1_retry.json",
+                    section_flags=[
+                        ValidationSectionFlag(
+                            section_id="introduction",
+                            flag_type="ai",
+                            score=0.28,
+                            risk="medium",
+                            summary="Introduction still shows elevated AI-style signals.",
+                        )
+                    ],
+                )
+            if validation_calls["count"] == 3:
+                assert request.config.mode == "ai_check"
+                assert request.config.changed_sections_only is True
+                assert request.config.changed_section_ids == ["introduction"]
+                return _make_validation_response(
+                    mode="ai_check",
+                    routing_decision="accepted",
+                    ai_score=0.09,
+                    plagiarism_score=0.0,
+                    validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_ai_check_v2.json",
+                )
+            assert request.config.mode == "final_report"
+            return _make_validation_response(
+                mode="final_report",
+                routing_decision="accepted",
+                ai_score=0.09,
+                plagiarism_score=2.0,
+                validation_report_uri="gs://bucket/projects/project-123/jobs/job-123/metadata/validation_final_report_v2.json",
+            )
+
+    fix_calls = {"count": 0}
+
+    class FakeFixClient:
+        async def run_fix(self, request):
+            fix_calls["count"] += 1
+            if fix_calls["count"] == 1:
+                return FixServiceResponse(
+                    job_id=request.job_id,
+                    output={
+                        "mode": "ai_style",
+                        "updated_draft_uri": request.current_draft_uri,
+                        "draft_artifact": None,
+                        "changed_sections": [],
+                        "changed": False,
+                        "rewriter_mode": "none",
+                        "fix_status": "no_change",
+                        "fallback_reason": "desklib_not_improved",
+                        "fix_summary": {
+                            "attempted": True,
+                            "status": "no_change",
+                            "iterations": 1,
+                            "changed_sections": [],
+                            "rewriter_mode": "none",
+                            "fallback_reason": "desklib_not_improved",
+                            "strategy": "evidence_section",
+                            "candidate_count": 6,
+                            "accepted_candidate_count": 0,
+                            "best_candidate_ai_score": 0.14,
+                            "best_candidate_overlap_score": 6.1,
+                            "failure_reasons": ["desklib_not_improved"],
+                            "retry_recommended": True,
+                        },
+                    },
+                )
+            return FixServiceResponse(
+                job_id=request.job_id,
+                output={
+                    "mode": "ai_style",
+                    "updated_draft_uri": "gs://bucket/projects/project-123/jobs/job-123/drafts/draft_v2.json",
+                    "draft_artifact": _artifact_pointer(
+                        "draft_v2",
+                        "gs://bucket/projects/project-123/jobs/job-123/drafts/draft_v2.json",
+                    ),
+                    "changed_sections": ["introduction"],
+                    "changed": True,
+                    "rewriter_mode": "vertex",
+                    "fix_status": "applied",
+                    "fallback_reason": None,
+                    "fix_summary": {
+                        "attempted": True,
+                        "status": "applied",
+                        "iterations": 2,
+                        "changed_sections": ["introduction"],
+                        "rewriter_mode": "vertex",
+                        "fallback_reason": None,
+                        "strategy": "detector_feedback",
+                        "candidate_count": 6,
+                        "accepted_candidate_count": 1,
+                        "best_candidate_ai_score": 0.09,
+                        "best_candidate_overlap_score": 5.2,
+                        "failure_reasons": [],
+                        "retry_recommended": False,
+                    },
+                },
+            )
+
+    save_calls = {"count": 0}
+
+    def fake_save_generated_paper(**kwargs):
+        save_calls["count"] += 1
+        active_paper = kwargs["generated_paper"]
+        return project.model_copy(
+            update={
+                "generated_paper": active_paper,
+                "generation_metadata": kwargs["generation_metadata"],
+                "display_paper_text": active_paper.formatted_text,
+                "latex_ready": active_paper.latex_ready,
+            }
+        )
+
+    monkeypatch.setattr("jobs.service.get_generation_service_client", lambda: FakeGenerationClient())
+    monkeypatch.setattr("jobs.service.get_validation_service_client", lambda: FakeValidationClient())
+    monkeypatch.setattr("jobs.service.get_fix_service_client", lambda: FakeFixClient())
+    monkeypatch.setattr("jobs.service.save_generated_paper", fake_save_generated_paper)
+    monkeypatch.setattr(
+        "jobs.service.store_generated_draft_artifact",
+        lambda project_id, job_id, version, generated_paper, owner_service="generation-service": _artifact_pointer(
+            version,
+            f"gs://bucket/projects/{project_id}/jobs/{job_id}/drafts/{version}.json",
+        ),
+    )
+    monkeypatch.setattr(
+        "jobs.service.store_remediation_context_artifact",
+        lambda project_id, job_id, context, revision="v1", owner_service="generation-service": _artifact_pointer(
+            f"remediation_context_{revision}",
+            f"gs://bucket/projects/{project_id}/jobs/{job_id}/metadata/remediation_context_{revision}.json",
+        ),
+    )
+    monkeypatch.setattr(
+        "jobs.service.store_final_accepted_draft_artifact",
+        lambda project_id, job_id, generated_paper: _artifact_pointer(
+            "final_accepted_draft",
+            f"gs://bucket/projects/{project_id}/jobs/{job_id}/reports/final_accepted_draft.json",
+        ),
+    )
+    monkeypatch.setattr(
+        "jobs.service.store_job_result_report",
+        lambda project_id, job_id, result: _artifact_pointer(
+            "final_report",
+            f"gs://bucket/projects/{project_id}/jobs/{job_id}/reports/final_report.json",
+        ),
+    )
+    monkeypatch.setattr("jobs.service.load_generated_draft_artifact", lambda uri: fixed_paper)
+
+    class _Storage:
+        def get_uri(self, key: str) -> str:
+            return f"gs://bucket/{key}"
+
+    monkeypatch.setattr("jobs.service.get_object_storage", lambda: _Storage())
+
+    await run_generation_task(
+        GenerationTaskRequest(
+            task_id="task-123",
+            job_id=job.job_id,
+            project_id=project.id,
+            user_id=project.owner_uid,
+            idempotency_key=job.idempotency_key,
+        )
+    )
+
+    saved = repository.get(job.job_id)
+    assert saved is not None
+    assert saved.status == "DONE"
+    assert saved.iteration == 2
+    assert saved.current_draft_uri == "gs://bucket/projects/project-123/jobs/job-123/drafts/draft_v2.json"
+    assert saved.artifacts.remediation_context is not None
+    assert saved.artifacts.draft_v2 is not None
+    assert saved.scores.routing_decision == "accepted"
+    assert fix_calls["count"] == 2
+    assert validation_calls["count"] == 4
+    assert ("FIX_REQUESTED", "fix") in repository.save_history
+    assert ("FIXING", "fix") in repository.save_history
+    assert save_calls["count"] == 2
+
+
+@pytest.mark.anyio
 async def test_run_generation_task_fix_failure_finishes_flagged(monkeypatch):
     repository = InMemoryJobRepository()
     project = _make_project()

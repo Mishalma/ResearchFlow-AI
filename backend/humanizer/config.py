@@ -109,6 +109,14 @@ def _get_float(name: str, default: float) -> float:
         return default
 
 
+def _get_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = tuple(item.strip() for item in value.split(",") if item.strip())
+    return normalized or default
+
+
 @dataclass(frozen=True)
 class HumanizerConfig:
     """Compatibility wrapper for callers that still expect an object config."""
@@ -138,11 +146,22 @@ class HumanizerConfig:
     hf_do_sample: bool = False
     hf_local_files_only: bool = False
     model_timeout_seconds: int = 20
+    max_runtime_seconds: int = 90
     rewrite_candidate_count: int = 3
     rewrite_mode: str = "standard"
     use_desklib_candidate_scoring: bool = False
     require_desklib_candidate_improvement: bool = True
     desklib_candidate_min_improvement: float = 0.0005
+    full_section_rewrite: bool = False
+    section_rewrite_candidate_count: int = 6
+    strategy_order: tuple[str, ...] = (
+        "evidence_section",
+        "detector_feedback",
+        "overlap_reduction",
+    )
+    accept_min_ai_drop_high: float = 0.05
+    accept_min_ai_drop_medium: float = 0.03
+    candidate_max_overlap_increase: float = 2.0
     debug_logging: bool = False
 
     @property
@@ -273,6 +292,7 @@ class HumanizerConfig:
             hf_do_sample=_get_bool("HUMANIZER_HF_DO_SAMPLE", False),
             hf_local_files_only=_get_bool("HUMANIZER_HF_LOCAL_FILES_ONLY", False),
             model_timeout_seconds=max(5, _get_int("HUMANIZER_MODEL_TIMEOUT_SECONDS", 20)),
+            max_runtime_seconds=max(5, _get_int("HUMANIZER_MAX_RUNTIME_SECONDS", 90)),
             rewrite_candidate_count=max(1, min(5, _get_int("HUMANIZER_REWRITE_CANDIDATES", 3))),
             rewrite_mode=_normalize_rewrite_mode(os.getenv("HUMANIZER_REWRITE_MODE", "standard")),
             use_desklib_candidate_scoring=_get_bool("HUMANIZER_USE_DESKLIB_SCORING", False),
@@ -286,6 +306,30 @@ class HumanizerConfig:
                     1.0,
                     _get_float("HUMANIZER_DESKLIB_MIN_IMPROVEMENT", 0.0005),
                 ),
+            ),
+            full_section_rewrite=_get_bool(
+                "FIX_FULL_SECTION_REWRITE",
+                _get_bool("HUMANIZER_FULL_SECTION_REWRITE", False),
+            ),
+            section_rewrite_candidate_count=max(
+                1,
+                min(8, _get_int("FIX_SECTION_REWRITE_CANDIDATES", 6)),
+            ),
+            strategy_order=_get_csv(
+                "FIX_STRATEGY_ORDER",
+                ("evidence_section", "detector_feedback", "overlap_reduction"),
+            ),
+            accept_min_ai_drop_high=max(
+                0.0,
+                min(1.0, _get_float("FIX_ACCEPT_MIN_AI_DROP_HIGH", 0.05)),
+            ),
+            accept_min_ai_drop_medium=max(
+                0.0,
+                min(1.0, _get_float("FIX_ACCEPT_MIN_AI_DROP_MEDIUM", 0.03)),
+            ),
+            candidate_max_overlap_increase=max(
+                0.0,
+                min(100.0, _get_float("FIX_CANDIDATE_MAX_OVERLAP_INCREASE", 2.0)),
             ),
             debug_logging=_get_bool("HUMANIZER_DEBUG_LOGGING", resolved_settings.debug),
         )

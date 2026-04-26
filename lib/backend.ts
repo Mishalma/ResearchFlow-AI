@@ -203,6 +203,13 @@ export type FixSummary = {
   changed_sections: string[];
   rewriter_mode: string | null;
   fallback_reason?: string | null;
+  strategy?: string | null;
+  candidate_count?: number;
+  accepted_candidate_count?: number;
+  best_candidate_ai_score?: number | null;
+  best_candidate_overlap_score?: number | null;
+  failure_reasons?: string[];
+  retry_recommended?: boolean;
 };
 
 export type CreateJobResponse = {
@@ -229,6 +236,7 @@ export type JobStatusResponse = {
 export type JobResultArtifacts = {
   raw_upload_uri: string | null;
   extracted_text_uri: string | null;
+  remediation_context_uri?: string | null;
   draft_v1_uri: string | null;
   draft_v2_uri: string | null;
   draft_v3_uri: string | null;

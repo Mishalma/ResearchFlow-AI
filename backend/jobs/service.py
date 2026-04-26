@@ -23,6 +23,7 @@ from jobs.artifacts import (
     store_final_accepted_draft_artifact,
     store_generated_draft_artifact,
     store_job_result_report,
+    store_remediation_context_artifact,
 )
 from jobs.dispatcher import get_job_dispatcher
 from jobs.repository import ACTIVE_JOB_STATUSES, get_job_repository
@@ -102,6 +103,9 @@ def _result_artifacts_from_job(job: JobRecord) -> JobResultArtifacts:
     return JobResultArtifacts(
         raw_upload_uri=job.artifacts.raw_upload.uri if job.artifacts.raw_upload else None,
         extracted_text_uri=job.artifacts.extracted_text.uri if job.artifacts.extracted_text else None,
+        remediation_context_uri=(
+            job.artifacts.remediation_context.uri if job.artifacts.remediation_context else None
+        ),
         draft_v1_uri=job.artifacts.draft_v1.uri if job.artifacts.draft_v1 else None,
         draft_v2_uri=job.artifacts.draft_v2.uri if job.artifacts.draft_v2 else None,
         draft_v3_uri=job.artifacts.draft_v3.uri if job.artifacts.draft_v3 else None,
@@ -191,7 +195,7 @@ def _build_fix_targets(validation_output: ValidationServiceOutput) -> list[FixSe
 
 
 def _fix_iteration_available(job: JobRecord) -> bool:
-    return job.enable_fix_loop and job.iteration < max(0, job.max_iterations - 1)
+    return job.enable_fix_loop and job.iteration < job.max_iterations
 
 
 def create_generation_job(
@@ -353,6 +357,17 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
             version="draft_v1",
             generated_paper=generation_result.generated_paper,
         )
+        remediation_context_artifact = (
+            store_remediation_context_artifact(
+                job.project_id,
+                job.job_id,
+                generation_result.remediation_context,
+                revision="v1",
+                owner_service="generation-service",
+            )
+            if generation_result.remediation_context
+            else None
+        )
 
         score_update = WorkflowScores(
             ai_score=None,
@@ -369,6 +384,7 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
             artifacts=job.artifacts.model_copy(
                 update={
                     "draft_v1": draft_v1,
+                    "remediation_context": remediation_context_artifact,
                 }
             ),
             scores=score_update,
@@ -543,6 +559,14 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
                         iteration=next_iteration,
                         mode="ai_style",
                         targets=fix_targets,
+                        artifacts={
+                            "remediation_context_uri": job.artifacts.remediation_context.uri
+                            if job.artifacts.remediation_context
+                            else None,
+                            "extracted_text_uri": job.artifacts.extracted_text.uri
+                            if job.artifacts.extracted_text
+                            else None,
+                        },
                     )
                 )
             except Exception:
@@ -565,6 +589,13 @@ async def run_generation_task(task_request: GenerationTaskRequest) -> None:
                 or draft_artifact is None
                 or not fix_result.output.changed_sections
             ):
+                if (
+                    fix_result.output.fix_status == "no_change"
+                    and fix_summary.retry_recommended
+                    and _fix_iteration_available(job)
+                ):
+                    changed_section_ids = []
+                    continue
                 latest_validation_output = await run_final_report_validation()
                 final_disposition = "flagged"
                 break

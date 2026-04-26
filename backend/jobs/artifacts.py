@@ -23,6 +23,10 @@ def build_extracted_text_key(project_id: str, job_id: str) -> str:
     return f"{_job_prefix(project_id, job_id)}/sources/extracted_text.json"
 
 
+def build_remediation_context_key(project_id: str, job_id: str, *, revision: str = "v1") -> str:
+    return f"{_job_prefix(project_id, job_id)}/metadata/remediation_context_{revision}.json"
+
+
 def build_draft_key(project_id: str, job_id: str, version: str) -> str:
     return f"{_job_prefix(project_id, job_id)}/drafts/{version}.json"
 
@@ -99,6 +103,22 @@ def store_extracted_text_artifact(project_id: str, job_id: str, extracted_text: 
         payload={"project_id": project_id, "extracted_text": extracted_text},
         owner_service="upload",
         version="extracted_text",
+    )
+
+
+def store_remediation_context_artifact(
+    project_id: str,
+    job_id: str,
+    context: dict[str, Any],
+    *,
+    revision: str = "v1",
+    owner_service: str = "generation-service",
+) -> WorkflowArtifactPointer:
+    return store_json_artifact(
+        key=build_remediation_context_key(project_id, job_id, revision=revision),
+        payload=context,
+        owner_service=owner_service,
+        version=f"remediation_context_{revision}",
     )
 
 
@@ -208,6 +228,15 @@ def load_extracted_text_artifact(uri: str) -> str:
         if extracted_text:
             return extracted_text
     return str(payload or "").strip()
+
+
+def load_remediation_context_artifact(uri: str | None) -> dict[str, Any]:
+    if not uri:
+        return {}
+    payload = load_json_artifact_from_uri(uri)
+    if isinstance(payload, dict):
+        return payload
+    return {}
 
 
 def load_job_result_report(project_id: str, job_id: str) -> JobResultResponse:

@@ -36,12 +36,12 @@ Only one component may move a job out of a given state.
 | --- | --- | --- |
 | `CREATED` | Orchestrator | Validate preconditions, persist job, and enqueue generation |
 | `GENERATION_REQUESTED` | Orchestrator | Cloud Tasks dispatch succeeds or exhausts dispatch retries |
-| `GENERATING` | Generation service | Write formatted draft or return terminal failure |
+| `GENERATING` | Generation service | Write formatted draft plus remediation context, optionally after Desklib-guided preflight, or return terminal failure |
 | `GENERATED` | Orchestrator | Enqueue Desklib AI check |
 | `VALIDATION_REQUESTED` | Orchestrator | Cloud Tasks dispatch succeeds or exhausts dispatch retries |
 | `VALIDATING` | Validation service | Return `accepted` or `flagged` for `ai_check` or `final_report` |
 | `FIX_REQUESTED` | Orchestrator | Enqueue humanizer remediation if iterations remain; otherwise finalize as `manual_review_required` |
-| `FIXING` | Fix service | Write next draft version or return terminal failure |
+| `FIXING` | Fix service | Write next draft version, request another strategy retry with no draft change, or return terminal failure |
 | `FINALIZING` | Finalize service | Write final report and accepted draft pointer |
 | `DONE` | None | Terminal |
 | `FAILED` | None | Terminal |
@@ -53,7 +53,7 @@ Only one component may move a job out of a given state.
 | `CREATED` | `GENERATION_REQUESTED` | Job document created and generation preconditions satisfied | Orchestrator |
 | `GENERATION_REQUESTED` | `GENERATING` | Generation task accepted by Cloud Tasks target | Orchestrator |
 | `GENERATION_REQUESTED` | `FAILED` | Dispatch retries exhausted before worker acceptance | Orchestrator |
-| `GENERATING` | `GENERATED` | Formatted draft artifact written successfully | Generation service |
+| `GENERATING` | `GENERATED` | Formatted draft and remediation context artifacts written successfully | Generation service |
 | `GENERATING` | `FAILED` | Worker retries exhausted or non-retryable generation failure | Generation service |
 | `GENERATED` | `VALIDATION_REQUESTED` | Orchestrator schedules Desklib AI check | Orchestrator |
 | `VALIDATION_REQUESTED` | `VALIDATING` | Validation task accepted | Orchestrator |
@@ -63,7 +63,7 @@ Only one component may move a job out of a given state.
 | `VALIDATING` | `FAILED` | Validation retries exhausted or non-retryable validation failure | Validation service |
 | `FIX_REQUESTED` | `FIXING` | Fix task accepted and `iteration < max_iterations` | Orchestrator |
 | `FIX_REQUESTED` | `FINALIZING` | `iteration >= max_iterations` or no fixable AI sections remain after final report is prepared | Orchestrator |
-| `FIXING` | `VALIDATION_REQUESTED` | Revised draft written successfully; rerun Desklib AI check on changed sections | Fix service |
+| `FIXING` | `VALIDATION_REQUESTED` | Revised draft written successfully, or no safe candidate was accepted but another fix strategy remains | Fix service |
 | `FIXING` | `FAILED` | Worker retries exhausted or non-retryable fix failure | Fix service |
 | `FINALIZING` | `DONE` | Final report and accepted draft persisted | Finalize service |
 | `FINALIZING` | `FAILED` | Finalize retries exhausted or non-retryable finalize failure | Finalize service |
@@ -84,7 +84,10 @@ The decision engine applies these rules:
 
 - `max_iterations = 3`
 - `iteration` counts completed fix attempts, not validation attempts
-- revalidation after a fix must prefer changed sections only for the Desklib AI recheck
+- remediation uses the generation-time `remediation_context` artifact so flagged sections can be rebuilt from evidence notes instead of only paraphrased
+- full-section candidate rewrites are ranked by Desklib improvement and protected-span/semantic safety checks
+- if no candidate is accepted but another strategy remains, the orchestrator retries the fix loop without writing a new draft artifact
+- revalidation after an applied fix must prefer changed sections only for the Desklib AI recheck
 - overlap review runs after AI passes, plus once on the final flagged draft so the report includes final overlap metrics
 - if a job reaches `max_iterations` and still stays above the 10% AI threshold, finalization must mark the report disposition as `manual_review_required`
 

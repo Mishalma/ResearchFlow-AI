@@ -42,6 +42,8 @@ async def execute_generation_request(
         request.source_text,
         settings=resolved_settings,
         project_id=request.project_id,
+        job_id=request.job_id,
+        user_id=request.user_id,
     )
     return GenerationServiceResponse(
         job_id=request.job_id,
@@ -52,6 +54,7 @@ async def execute_generation_request(
         generated_tables=pipeline_result.generated_tables,
         figure_table_status=pipeline_result.figure_table_status,
         figure_table_error=pipeline_result.figure_table_error,
+        remediation_context=pipeline_result.remediation_context,
     )
 
 

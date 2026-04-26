@@ -21,6 +21,9 @@ from core.config import get_settings
 from models.generation import GeneratedPaper, IEEESectionMap, ResearchPaperSchema
 from models.job import WorkflowArtifactPointer
 from models.validation import (
+    ValidationCandidate,
+    ValidationCandidateScoringRequest,
+    ValidationCandidateScoringResponse,
     ValidationReport,
     ValidationSectionReport,
     ValidationServiceRequest,
@@ -32,7 +35,7 @@ from validation.desklib_detector import (
     DesklibPrediction,
     ensure_desklib_model_available,
 )
-from validation.runtime import _ai_score_for_section, execute_fast_validation
+from validation.runtime import _ai_score_for_section, execute_fast_validation, score_validation_candidates
 
 
 @pytest.fixture
@@ -211,6 +214,55 @@ async def test_local_validation_service_client_runs_without_http(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_local_validation_service_client_scores_candidates_without_http(monkeypatch):
+    expected = ValidationCandidateScoringResponse(
+        job_id="job-123",
+        results=[
+            {
+                "candidate_id": "intro-1",
+                "section_id": "introduction",
+                "ai_score": 0.07,
+                "overlap_score": 3.2,
+                "score_delta": 0.08,
+                "overlap_delta": -1.4,
+                "accepted": True,
+                "rejection_reasons": [],
+            }
+        ],
+    )
+
+    async def fake_execute(request, *, settings=None):
+        assert request.job_id == "job-123"
+        assert request.candidates[0].section_id == "introduction"
+        return expected
+
+    monkeypatch.setattr("app.services.validation_service.execute_candidate_scoring_request", fake_execute)
+
+    client = LocalValidationServiceClient(settings=get_settings())
+    response = await client.score_candidates(
+        ValidationCandidateScoringRequest(
+            task_id="task-score-123",
+            job_id="job-123",
+            project_id="project-123",
+            user_id="user-123",
+            idempotency_key="phase3-score-123",
+            source_text="Uploaded source text",
+            candidates=[
+                ValidationCandidate(
+                    candidate_id="intro-1",
+                    section_id="introduction",
+                    text="Candidate text",
+                    original_text="Original text",
+                )
+            ],
+        )
+    )
+
+    assert response.job_id == "job-123"
+    assert response.results[0].accepted is True
+
+
+@pytest.mark.anyio
 async def test_http_validation_service_client_serializes_and_deserializes():
     settings = replace(
         get_settings(),
@@ -290,6 +342,73 @@ async def test_http_validation_service_client_serializes_and_deserializes():
 
     assert response.output.routing_decision == "flagged"
     assert response.output.validation_report_uri.endswith("validation_ai_check_v1.json")
+
+
+@pytest.mark.anyio
+async def test_http_validation_service_client_scores_candidates():
+    settings = replace(
+        get_settings(),
+        workflow_validation_backend="service",
+        validation_service_base_url="https://validation.internal.run.app",
+        validation_service_audience="https://validation.internal.run.app",
+        validation_service_timeout_seconds=120,
+    )
+
+    async def fake_auth_provider(audience: str) -> str | None:
+        assert audience == "https://validation.internal.run.app"
+        return "test-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://validation.internal.run.app/internal/validation/score-candidates"
+        assert request.headers["Authorization"] == "Bearer test-token"
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["job_id"] == "job-456"
+        assert payload["candidates"][0]["section_id"] == "introduction"
+        return httpx.Response(
+            status_code=200,
+            json={
+                "job_id": "job-456",
+                "results": [
+                    {
+                        "candidate_id": "intro-1",
+                        "section_id": "introduction",
+                        "ai_score": 0.09,
+                        "overlap_score": 4.2,
+                        "score_delta": 0.12,
+                        "overlap_delta": -0.8,
+                        "accepted": True,
+                        "rejection_reasons": [],
+                    }
+                ],
+            },
+        )
+
+    client = HttpValidationServiceClient(
+        settings=settings,
+        transport=httpx.MockTransport(handler),
+        auth_token_provider=fake_auth_provider,
+    )
+
+    response = await client.score_candidates(
+        ValidationCandidateScoringRequest(
+            task_id="task-score-456",
+            job_id="job-456",
+            project_id="project-456",
+            user_id="user-456",
+            idempotency_key="phase3-score-456",
+            source_text="Uploaded source text",
+            candidates=[
+                ValidationCandidate(
+                    candidate_id="intro-1",
+                    section_id="introduction",
+                    text="Candidate text",
+                    original_text="Original text",
+                )
+            ],
+        )
+    )
+
+    assert response.results[0].accepted is True
 
 
 @pytest.mark.anyio
@@ -438,3 +557,85 @@ async def test_execute_ai_check_only_rescores_changed_sections(monkeypatch):
     assert results_section.summary == ["Results still carry moderate AI-style risk."]
     assert introduction_section.summary == ["Introduction was rescored after the fix."]
     assert response.output.routing_decision == "flagged"
+
+
+@pytest.mark.anyio
+async def test_score_validation_candidates_accepts_improved_candidate(monkeypatch):
+    def fake_ai_score(text: str, *, config: ValidationConfig):
+        del config
+        return (0.08, {}) if "candidate" in text.lower() else (0.19, {})
+
+    overlap_scores = {
+        "Candidate text": 5.0,
+        "Original text": 6.8,
+    }
+
+    monkeypatch.setattr("validation.runtime._ai_score_for_section", fake_ai_score)
+    monkeypatch.setattr(
+        "validation.runtime._overlap_score_for_text",
+        lambda *, section_name, section_text, source_sentences, source_index, project_id, validation_config, originality_config, reference_lines=None: overlap_scores[section_text],
+    )
+
+    response = await score_validation_candidates(
+        ValidationCandidateScoringRequest(
+            task_id="task-score-runtime-1",
+            job_id="job-123",
+            project_id="project-123",
+            user_id="user-123",
+            idempotency_key="phase3-runtime-123",
+            source_text="Uploaded source text",
+            candidates=[
+                ValidationCandidate(
+                    candidate_id="intro-1",
+                    section_id="introduction",
+                    text="Candidate text",
+                    original_text="Original text",
+                )
+            ],
+        )
+    )
+
+    assert response.results[0].accepted is True
+    assert response.results[0].score_delta == 0.11
+    assert response.results[0].overlap_delta == -1.8
+
+
+@pytest.mark.anyio
+async def test_score_validation_candidates_rejects_ai_and_overlap_regression(monkeypatch):
+    def fake_ai_score(text: str, *, config: ValidationConfig):
+        del config
+        return (0.23, {}) if "candidate" in text.lower() else (0.19, {})
+
+    overlap_scores = {
+        "Candidate text": 12.9,
+        "Original text": 6.8,
+    }
+
+    monkeypatch.setattr("validation.runtime._ai_score_for_section", fake_ai_score)
+    monkeypatch.setattr(
+        "validation.runtime._overlap_score_for_text",
+        lambda *, section_name, section_text, source_sentences, source_index, project_id, validation_config, originality_config, reference_lines=None: overlap_scores[section_text],
+    )
+
+    response = await score_validation_candidates(
+        ValidationCandidateScoringRequest(
+            task_id="task-score-runtime-2",
+            job_id="job-123",
+            project_id="project-123",
+            user_id="user-123",
+            idempotency_key="phase3-runtime-456",
+            source_text="Uploaded source text",
+            candidates=[
+                ValidationCandidate(
+                    candidate_id="intro-1",
+                    section_id="introduction",
+                    text="Candidate text",
+                    original_text="Original text",
+                )
+            ],
+        )
+    )
+
+    assert response.results[0].accepted is False
+    assert "ai_not_improved" in response.results[0].rejection_reasons
+    assert "overlap_increased" in response.results[0].rejection_reasons

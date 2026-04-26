@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from statistics import mean
+from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
@@ -79,6 +80,7 @@ class HumanizerRuntimeAgent:
         iteration: int = 0,
         *,
         target_sections: set[str] | None = None,
+        remediation_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Humanize a section map and return scores plus orchestration metadata."""
 
@@ -89,6 +91,7 @@ class HumanizerRuntimeAgent:
                 iteration,
             )
 
+        deadline = perf_counter() + max(5, int(self.config.max_runtime_seconds))
         updated_sections: dict[str, str] = {}
         scores_before_sections: dict[str, dict[str, float]] = {}
         scores_after_sections: dict[str, dict[str, float]] = {}
@@ -99,14 +102,33 @@ class HumanizerRuntimeAgent:
         sections_rewritten = 0
         actual_modes: set[str] = set()
         failure_reasons: list[str] = []
+        strategies_used: set[str] = set()
+        candidate_count = 0
+        accepted_candidate_count = 0
+        best_candidate_ai_score: float | None = None
+        best_candidate_overlap_score: float | None = None
+        retry_recommended = False
+        active_strategy = _strategy_for_iteration(iteration, self.config.strategy_order)
         targeted_sections = (
             {section_name.strip() for section_name in target_sections if str(section_name).strip()}
             if target_sections is not None
             else None
         )
+        runtime_budget_exceeded = False
 
         for section_name in SECTION_ORDER:
             original_text = str(section_map.get(section_name, "") or "").strip()
+            if perf_counter() >= deadline:
+                runtime_budget_exceeded = True
+                updated_sections[section_name] = original_text
+                original_scores = composite_ai_score(original_text)
+                scores_before_sections[section_name] = original_scores
+                scores_after_sections[section_name] = original_scores
+                sections_skipped += 1
+                _append_unique(failure_reasons, "humanizer_runtime_budget_exceeded")
+                run_log.append(f"{section_name}: skipped (humanizer runtime budget exceeded)")
+                continue
+
             before_scores = composite_ai_score(original_text)
             scores_before_sections[section_name] = before_scores
             run_log.append(
@@ -141,14 +163,28 @@ class HumanizerRuntimeAgent:
             if externally_targeted:
                 run_log.append(f"{section_name}: targeted by validation detector")
 
-            rewrite_result = self.rewriter.rewrite_section(
-                section_text=original_text,
-                ai_scores=before_scores,
-                style_persona=_style_persona(section_name),
-                section_name=section_name,
-                force_rewrite=externally_targeted,
-                require_quality_improvement=not externally_targeted,
-            )
+            try:
+                rewrite_result = self.rewriter.rewrite_section(
+                    section_text=original_text,
+                    ai_scores=before_scores,
+                    style_persona=_style_persona(section_name),
+                    section_name=section_name,
+                    force_rewrite=externally_targeted,
+                    require_quality_improvement=not externally_targeted,
+                    remediation_context=remediation_context,
+                    strategy=active_strategy if externally_targeted else None,
+                )
+            except TypeError as exc:
+                if "remediation_context" not in str(exc) and "strategy" not in str(exc):
+                    raise
+                rewrite_result = self.rewriter.rewrite_section(
+                    section_text=original_text,
+                    ai_scores=before_scores,
+                    style_persona=_style_persona(section_name),
+                    section_name=section_name,
+                    force_rewrite=externally_targeted,
+                    require_quality_improvement=not externally_targeted,
+                )
             rewritten_text = rewrite_result["rewritten_text"]
             after_scores = composite_ai_score(rewritten_text)
             scores_after_sections[section_name] = after_scores
@@ -157,6 +193,27 @@ class HumanizerRuntimeAgent:
                 sections_rewritten += 1
             actual_modes.add(str(rewrite_result["rewriter_used"]))
             failure_reasons.extend(list(rewrite_result.get("failure_reasons", [])))
+            if rewrite_result.get("strategy"):
+                strategies_used.add(str(rewrite_result["strategy"]))
+            candidate_count += int(rewrite_result.get("candidate_count") or 0)
+            accepted_candidate_count += int(rewrite_result.get("accepted_candidate_count") or 0)
+            candidate_ai_score = rewrite_result.get("best_candidate_ai_score")
+            if candidate_ai_score is not None:
+                candidate_score_value = float(candidate_ai_score)
+                best_candidate_ai_score = (
+                    candidate_score_value
+                    if best_candidate_ai_score is None
+                    else min(best_candidate_ai_score, candidate_score_value)
+                )
+            candidate_overlap_score = rewrite_result.get("best_candidate_overlap_score")
+            if candidate_overlap_score is not None:
+                candidate_overlap_value = float(candidate_overlap_score)
+                best_candidate_overlap_score = (
+                    candidate_overlap_value
+                    if best_candidate_overlap_score is None
+                    else min(best_candidate_overlap_score, candidate_overlap_value)
+                )
+            retry_recommended = retry_recommended or bool(rewrite_result.get("retry_recommended"))
 
             if self.config.perplexity_enabled:
                 after_perplexity = self.perplexity.score(rewritten_text)
@@ -168,7 +225,8 @@ class HumanizerRuntimeAgent:
                 f"targeted={rewrite_result['paragraphs_targeted']}, "
                 f"accepted={rewrite_result['paragraphs_accepted']}, "
                 f"rejected_drift={rewrite_result['paragraphs_rejected_drift']}, "
-                f"mode={rewrite_result['rewriter_used']}"
+                f"mode={rewrite_result['rewriter_used']}, "
+                f"strategy={rewrite_result.get('strategy') or 'paragraph'}"
             )
 
         overall_before = max(
@@ -182,6 +240,9 @@ class HumanizerRuntimeAgent:
         graph_action = _select_graph_action(
             composite_score=overall_after,
             iteration=iteration,
+            max_iterations=self.config.max_iterations,
+            runtime_budget_exceeded=runtime_budget_exceeded,
+            sections_rewritten=sections_rewritten,
         )
         rewriter_mode = _resolve_rewriter_mode(actual_modes, self.config.resolved_mode)
 
@@ -207,6 +268,12 @@ class HumanizerRuntimeAgent:
             "sections_rewritten": sections_rewritten,
             "rewriter_mode": rewriter_mode,
             "failure_reasons": failure_reasons,
+            "strategy": _resolve_strategy(strategies_used),
+            "candidate_count": candidate_count,
+            "accepted_candidate_count": accepted_candidate_count,
+            "best_candidate_ai_score": best_candidate_ai_score,
+            "best_candidate_overlap_score": best_candidate_overlap_score,
+            "retry_recommended": retry_recommended and sections_rewritten == 0,
             "run_log": run_log,
         }
 
@@ -431,10 +498,27 @@ def _style_persona(section_name: str) -> str:
     return personas.get(section_name, "Academic but conversational")
 
 
-def _select_graph_action(*, composite_score: float, iteration: int) -> str:
+def _append_unique(values: list[str], value: str) -> None:
+    cleaned = str(value or "").strip()
+    if cleaned and cleaned not in values:
+        values.append(cleaned)
+
+
+def _select_graph_action(
+    *,
+    composite_score: float,
+    iteration: int,
+    max_iterations: int = MAX_ITERATIONS,
+    runtime_budget_exceeded: bool = False,
+    sections_rewritten: int | None = None,
+) -> str:
+    if runtime_budget_exceeded:
+        return "accept"
+    if sections_rewritten == 0 and iteration > 0:
+        return "accept"
     if composite_score > 0.75:
         return "loopback_writing"
-    if composite_score > MAX_AI_PATTERN_SCORE_TO_PASS and iteration < MAX_ITERATIONS:
+    if composite_score > MAX_AI_PATTERN_SCORE_TO_PASS and iteration < max_iterations:
         return "retry_humanizer"
     return "accept"
 
@@ -445,6 +529,25 @@ def _resolve_rewriter_mode(actual_modes: set[str], configured_mode: str) -> str:
     normalized = {mode.strip().lower() for mode in actual_modes if str(mode).strip()}
     if not normalized:
         return configured_mode
+    if len(normalized) == 1:
+        return next(iter(normalized))
+    return "mixed"
+
+
+def _strategy_for_iteration(iteration: int, strategy_order: tuple[str, ...]) -> str:
+    strategies = tuple(item.strip() for item in strategy_order if str(item).strip()) or (
+        "evidence_section",
+        "detector_feedback",
+        "overlap_reduction",
+    )
+    index = min(max(0, int(iteration or 1) - 1), len(strategies) - 1)
+    return strategies[index]
+
+
+def _resolve_strategy(strategies_used: set[str]) -> str | None:
+    normalized = {strategy.strip() for strategy in strategies_used if str(strategy).strip()}
+    if not normalized:
+        return None
     if len(normalized) == 1:
         return next(iter(normalized))
     return "mixed"

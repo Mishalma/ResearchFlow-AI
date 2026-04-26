@@ -59,6 +59,7 @@ class WorkflowArtifactPointer(BaseModel):
 class WorkflowArtifacts(BaseModel):
     raw_upload: WorkflowArtifactPointer | None = None
     extracted_text: WorkflowArtifactPointer | None = None
+    remediation_context: WorkflowArtifactPointer | None = None
     draft_v1: WorkflowArtifactPointer | None = None
     draft_v2: WorkflowArtifactPointer | None = None
     draft_v3: WorkflowArtifactPointer | None = None
@@ -82,6 +83,13 @@ class FixSummary(BaseModel):
     changed_sections: list[str] = Field(default_factory=list)
     rewriter_mode: str | None = None
     fallback_reason: str | None = None
+    strategy: str | None = None
+    candidate_count: int = Field(default=0, ge=0)
+    accepted_candidate_count: int = Field(default=0, ge=0)
+    best_candidate_ai_score: float | None = Field(default=None, ge=0, le=1)
+    best_candidate_overlap_score: float | None = Field(default=None, ge=0, le=100)
+    failure_reasons: list[str] = Field(default_factory=list)
+    retry_recommended: bool = False
 
 
 class WorkflowActiveTask(BaseModel):
@@ -169,6 +177,7 @@ class JobStatusResponse(BaseModel):
 class JobResultArtifacts(BaseModel):
     raw_upload_uri: str | None = None
     extracted_text_uri: str | None = None
+    remediation_context_uri: str | None = None
     draft_v1_uri: str | None = None
     draft_v2_uri: str | None = None
     draft_v3_uri: str | None = None

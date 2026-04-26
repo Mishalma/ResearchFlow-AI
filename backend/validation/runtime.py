@@ -14,6 +14,9 @@ from jobs.artifacts import (
     store_validation_report_artifact,
 )
 from models.validation import (
+    ValidationCandidateScore,
+    ValidationCandidateScoringRequest,
+    ValidationCandidateScoringResponse,
     ValidationReport,
     ValidationSectionFlag,
     ValidationSectionReport,
@@ -437,6 +440,42 @@ def _build_section_report(
     )
 
 
+def _overlap_score_for_text(
+    *,
+    section_name: str,
+    section_text: str,
+    source_sentences: list[_SourceSentence],
+    source_index: dict[tuple[str, ...], set[int]],
+    project_id: str,
+    validation_config: ValidationConfig,
+    originality_config: OriginalityConfig,
+    reference_lines: list[str] | None = None,
+) -> float:
+    scan = _detect_section_overlap(
+        section_name=section_name,
+        section_text=section_text,
+        source_sentences=source_sentences,
+        source_index=source_index,
+        project_id=project_id,
+        config=validation_config,
+    )
+    classified_spans = classify_section_findings(
+        section_name=section_name,
+        section_text=section_text,
+        findings=scan.spans,
+        reference_lines=reference_lines or [],
+        author_metadata=None,
+        config=originality_config,
+    )
+    suspicious_spans = [
+        (span.start_char, span.end_char)
+        for span in classified_spans
+        if span.classification not in {"quoted_and_cited", "common_phrase", "boilerplate"}
+    ]
+    section_length = max(1, len(section_text.strip()))
+    return round((_merge_span_lengths(suspicious_spans) / section_length) * 100, 2)
+
+
 def _build_ai_only_section_report(
     *,
     section_name: str,
@@ -466,6 +505,133 @@ def _build_ai_only_section_report(
         summary=summary,
         spans=[],
     )
+
+
+def _candidate_min_ai_drop(
+    *,
+    original_ai_score: float | None,
+    request_config,
+    validation_config: ValidationConfig,
+) -> float:
+    if original_ai_score is None:
+        return 0.0
+    if original_ai_score > 0.90:
+        return float(request_config.min_ai_drop_high)
+    if original_ai_score > validation_config.ai_severe_threshold:
+        return float(request_config.min_ai_drop_medium)
+    return 0.0005
+
+
+async def score_validation_candidates(
+    request: ValidationCandidateScoringRequest,
+    *,
+    settings: Settings | None = None,
+    validation_config: ValidationConfig | None = None,
+    originality_config: OriginalityConfig | None = None,
+) -> ValidationCandidateScoringResponse:
+    resolved_settings = settings or get_settings()
+    resolved_validation_config = validation_config or ValidationConfig.from_settings(resolved_settings)
+    resolved_originality_config = originality_config or OriginalityConfig.from_settings(resolved_settings)
+    source_text = (request.source_text or "").strip()
+    if not source_text and request.extracted_text_uri:
+        source_text = load_extracted_text_artifact(request.extracted_text_uri)
+
+    source_sentences, source_index = _build_source_index(
+        source_text,
+        ngram_size=resolved_validation_config.overlap_ngram_size,
+        min_tokens=resolved_validation_config.overlap_sentence_min_tokens,
+    )
+    results: list[ValidationCandidateScore] = []
+
+    for candidate in request.candidates:
+        ai_score, _metadata = _ai_score_for_section(
+            candidate.text,
+            config=resolved_validation_config,
+        )
+        overlap_score = _overlap_score_for_text(
+            section_name=candidate.section_id,
+            section_text=candidate.text,
+            source_sentences=source_sentences,
+            source_index=source_index,
+            project_id=request.project_id,
+            validation_config=resolved_validation_config,
+            originality_config=resolved_originality_config,
+        )
+
+        original_ai_score = candidate.original_ai_score
+        original_overlap_score = candidate.original_overlap_score
+        if candidate.original_text:
+            if original_ai_score is None:
+                original_ai_score, _ = _ai_score_for_section(
+                    candidate.original_text,
+                    config=resolved_validation_config,
+                )
+            if original_overlap_score is None:
+                original_overlap_score = _overlap_score_for_text(
+                    section_name=candidate.section_id,
+                    section_text=candidate.original_text,
+                    source_sentences=source_sentences,
+                    source_index=source_index,
+                    project_id=request.project_id,
+                    validation_config=resolved_validation_config,
+                    originality_config=resolved_originality_config,
+                )
+
+        score_delta = (
+            round(float(original_ai_score) - float(ai_score), 4)
+            if original_ai_score is not None and ai_score is not None
+            else None
+        )
+        overlap_delta = (
+            round(float(overlap_score) - float(original_overlap_score), 2)
+            if original_overlap_score is not None
+            else None
+        )
+
+        rejection_reasons: list[str] = []
+        min_drop = _candidate_min_ai_drop(
+            original_ai_score=original_ai_score,
+            request_config=request.config,
+            validation_config=resolved_validation_config,
+        )
+        ai_accepted = bool(
+            ai_score is not None
+            and (
+                ai_score <= request.config.ai_accept_threshold
+                or (score_delta is not None and score_delta >= min_drop)
+            )
+        )
+        if not ai_accepted:
+            rejection_reasons.append("ai_not_improved")
+
+        overlap_improved = bool(
+            original_overlap_score is not None
+            and overlap_score < float(original_overlap_score)
+        )
+        overlap_accepted = (
+            overlap_score <= request.config.overlap_accept_threshold
+            or overlap_improved
+        )
+        if overlap_delta is not None and overlap_delta > request.config.max_overlap_increase:
+            overlap_accepted = False
+            rejection_reasons.append("overlap_increased")
+        if not overlap_accepted and "overlap_increased" not in rejection_reasons:
+            rejection_reasons.append("overlap_above_threshold")
+
+        results.append(
+            ValidationCandidateScore(
+                candidate_id=candidate.candidate_id,
+                section_id=candidate.section_id,
+                ai_score=ai_score,
+                overlap_score=overlap_score,
+                score_delta=score_delta,
+                overlap_delta=overlap_delta,
+                accepted=ai_accepted and overlap_accepted,
+                rejection_reasons=rejection_reasons,
+            )
+        )
+
+    return ValidationCandidateScoringResponse(job_id=request.job_id, results=results)
 
 
 def _document_ai_score(section_reports: list[ValidationSectionReport]) -> float | None:

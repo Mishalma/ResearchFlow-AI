@@ -32,6 +32,14 @@ function scoreTone(value: number, acceptCutoff: number, severeCutoff: number) {
   return "emerald";
 }
 
+function formatAiPercent(value: number | null | undefined) {
+  return value == null ? "--" : `${Math.round(value * 100)}%`;
+}
+
+function formatOverlapPercent(value: number | null | undefined) {
+  return value == null ? "--" : `${Math.round(value * 10) / 10}%`;
+}
+
 export default function PlagiarismReportPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -141,6 +149,14 @@ export default function PlagiarismReportPage() {
     result.final_disposition === "accepted" ||
     result.final_disposition === "accepted_after_fix";
   const fixSummary = result.fix_summary;
+  const fixDiagnostic =
+    fixSummary?.status === "no_change"
+      ? "Model candidates were attempted, but no Desklib-improving safe rewrite was accepted."
+      : fixSummary?.status === "applied"
+        ? "The model accepted at least one safe section rewrite and validation rechecked the changed draft."
+        : fixSummary?.fallback_reason
+          ? `Fix stopped because ${fixSummary.fallback_reason.replaceAll("_", " ")}.`
+          : "The fix loop did not apply a rewrite.";
 
   return (
     <div className="mx-auto max-w-5xl space-y-8 px-4 py-10 pb-12">
@@ -318,7 +334,7 @@ export default function PlagiarismReportPage() {
                   <div>
                     <h2 className="text-xl font-semibold text-white">AI Fix Loop</h2>
                     <p className="mt-1 text-sm text-slate-400">
-                      The workflow attempted an automatic rewrite on Desklib-flagged AI sections before the final overlap review.
+                      {fixDiagnostic}
                     </p>
                   </div>
                 </div>
@@ -352,6 +368,25 @@ export default function PlagiarismReportPage() {
                   {fixSummary.changed_sections.length}
                 </p>
               </div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Strategy</p>
+                <p className="mt-2 text-lg font-semibold capitalize text-white">
+                  {fixSummary.strategy?.replaceAll("_", " ") ?? "Unavailable"}
+                </p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Candidates</p>
+                <p className="mt-2 text-lg font-semibold text-white">
+                  {fixSummary.accepted_candidate_count ?? 0}/{fixSummary.candidate_count ?? 0} accepted
+                </p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Best Attempted Scores</p>
+                <p className="mt-2 text-lg font-semibold text-white">
+                  AI {formatAiPercent(fixSummary.best_candidate_ai_score)} and overlap{" "}
+                  {formatOverlapPercent(fixSummary.best_candidate_overlap_score)}
+                </p>
+              </div>
             </div>
 
             {fixSummary.changed_sections.length > 0 ? (
@@ -365,6 +400,23 @@ export default function PlagiarismReportPage() {
                     {sectionId.replaceAll("_", " ")}
                   </Badge>
                 ))}
+              </div>
+            ) : null}
+
+            {fixSummary.failure_reasons?.length ? (
+              <div className="mt-4 rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Failure Signals</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {fixSummary.failure_reasons.slice(0, 6).map((reason) => (
+                    <Badge
+                      key={reason}
+                      variant="outline"
+                      className="border-white/10 bg-white/[0.03] text-slate-200"
+                    >
+                      {reason.replaceAll("_", " ")}
+                    </Badge>
+                  ))}
+                </div>
               </div>
             ) : null}
           </CardContent>

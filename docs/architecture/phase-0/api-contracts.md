@@ -239,15 +239,28 @@ Runs validation in either `ai_check` or `final_report` mode.
 - the primary acceptance gate for entering or skipping the humanizer loop is `ai_score <= 10%`
 - overlap is evaluated after AI passes, and once on the final flagged draft so the report includes both initial and final scores
 
+### Candidate Scoring
+
+`POST /internal/validation/score-candidates` is an internal scoring endpoint used by generation preflight and fix remediation.
+
+- request includes `source_text` or `extracted_text_uri`, plus section candidates and optional original section scores
+- response returns per-candidate `ai_score`, `overlap_score`, score deltas, `accepted`, and compact rejection reasons
+- acceptance uses the same Desklib detector and overlap thresholds as validation
+- raw manuscript text must not be logged by this endpoint
+
 ## `POST /internal/fix/run`
 
-Rewrites only flagged sections and produces the next immutable draft version.
+Rewrites flagged sections and produces the next immutable draft version only when a safe candidate is accepted.
 
 ### Request Additions
 
 ```json
 {
   "current_draft_uri": "gs://.../draft_v1.json",
+  "artifacts": {
+    "remediation_context_uri": "gs://.../metadata/remediation_context_v1.json",
+    "extracted_text_uri": "gs://.../sources/extracted_text.json"
+  },
   "config": {
     "target_draft_key": "draft_v2",
     "max_iterations": 3
@@ -274,7 +287,14 @@ Rewrites only flagged sections and produces the next immutable draft version.
     "updated_draft_uri": "gs://.../draft_v2.json",
     "changed_sections": [
       "introduction"
-    ]
+    ],
+    "fix_summary": {
+      "strategy": "evidence_section",
+      "candidate_count": 6,
+      "accepted_candidate_count": 1,
+      "best_candidate_ai_score": 0.34,
+      "failure_reasons": []
+    }
   }
 }
 ```
@@ -289,6 +309,7 @@ Rewrites only flagged sections and produces the next immutable draft version.
 ### Artifact Ownership
 
 - writes only the next immutable draft version
+- writes no new draft when no safe candidate is accepted
 - may write change logs and before/after sidecars
 - must not overwrite prior draft artifacts
 

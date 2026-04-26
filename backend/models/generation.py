@@ -404,6 +404,7 @@ class PipelineResult(BaseModel):
     generated_tables: list[RenderedFigure] | None = None
     figure_table_status: FigureTableStageStatus | None = None
     figure_table_error: str | None = None
+    remediation_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class GenerationServiceRequest(BaseModel):
@@ -425,6 +426,7 @@ class GenerationServiceResponse(BaseModel):
     generated_tables: list[RenderedFigure] | None = None
     figure_table_status: FigureTableStageStatus | None = None
     figure_table_error: str | None = None
+    remediation_context: dict[str, Any] = Field(default_factory=dict)
     boundary: Literal["formatting_complete"] = "formatting_complete"
 
 

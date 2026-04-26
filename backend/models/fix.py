@@ -38,6 +38,7 @@ class FixServiceRequest(BaseModel):
     iteration: int = Field(default=1, ge=1, le=5)
     mode: FixMode = "ai_style"
     targets: list[FixSectionTarget] = Field(default_factory=list)
+    artifacts: "FixServiceArtifacts" = Field(default_factory=lambda: FixServiceArtifacts())
 
     @field_validator("targets", mode="before")
     @classmethod
@@ -86,3 +87,8 @@ class FixServiceResponse(BaseModel):
     status: Literal["FIXING"] = "FIXING"
     stage: Literal["fix"] = "fix"
     output: FixServiceOutput
+
+
+class FixServiceArtifacts(BaseModel):
+    remediation_context_uri: str | None = None
+    extracted_text_uri: str | None = None

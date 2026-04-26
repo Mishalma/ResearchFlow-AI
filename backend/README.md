@@ -281,7 +281,7 @@ gcloud builds submit --config cloudbuild.yaml \
 
 ### Phase 2 generation-service deploy
 
-Phase 2 adds a separate internal generation service that runs the pipeline only through IEEE formatting. Deploy it with:
+Phase 2 now runs the pipeline through IEEE formatting, writes a remediation context artifact, and can optionally score section candidates before `draft_v1` is stored. Deploy it with:
 
 ```bash
 gcloud builds submit --config cloudbuild-generation.yaml \
@@ -294,6 +294,8 @@ This deploys `papereasy-generation` with:
 - authenticated invocation only
 - a 30 minute request timeout
 - `uvicorn app.generation_main:app`
+- generation preflight scoring enabled (`GENERATION_PREFLIGHT_SCORING=true`)
+- Desklib candidate scoring delegated to the validation service
 
 After the generation service is deployed, update the main backend service to call it by setting:
 
@@ -306,9 +308,20 @@ GENERATION_SERVICE_TIMEOUT_SECONDS=1500
 
 The backend service account must also have `roles/run.invoker` on the generation service.
 
+The generation service also needs access to validation scoring when preflight is enabled:
+
+```env
+WORKFLOW_VALIDATION_BACKEND=service
+VALIDATION_SERVICE_BASE_URL=https://YOUR-VALIDATION-SERVICE-URL
+VALIDATION_SERVICE_AUDIENCE=https://YOUR-VALIDATION-SERVICE-URL
+VALIDATION_SERVICE_TIMEOUT_SECONDS=600
+```
+
+If the validation URL is left empty, generation preflight safely skips scoring and keeps the original formatted draft.
+
 ### Phase 3 validation-service deploy
 
-Phase 3 adds a separate internal validation service for fast AI-risk and overlap scoring. Deploy it with:
+Phase 3 adds a separate internal validation service for Desklib AI checks, final overlap reporting, and internal candidate scoring. Deploy it with:
 
 ```bash
 gcloud builds submit --config cloudbuild-validation.yaml \
@@ -320,6 +333,8 @@ This deploys `papereasy-validation` with:
 - public ingress with authenticated invocation only
 - a 3 minute request timeout
 - `uvicorn app.validation_main:app`
+- `ai_check` and `final_report` execution
+- `POST /internal/validation/score-candidates` for generation preflight and fix-service ranking
 
 After the validation service is deployed, update the main backend service to call it by setting:
 
@@ -334,7 +349,7 @@ The backend service account must also have `roles/run.invoker` on the validation
 
 ### Phase 4 fix-service deploy
 
-Phase 4 adds a separate internal fix service for targeted AI-style rewrites and bounded revalidation loops. Deploy it with:
+Phase 4 adds a separate internal fix service for evidence-first full-section remediation and bounded revalidation loops. Deploy it with:
 
 ```bash
 gcloud builds submit --config cloudbuild-fix.yaml \
@@ -344,9 +359,12 @@ gcloud builds submit --config cloudbuild-fix.yaml \
 This deploys `papereasy-fix` with:
 
 - public ingress with authenticated invocation only
-- a 4 minute request timeout
+- a 20 minute request timeout
 - `uvicorn app.fix_main:app`
-- deterministic humanizer mode by default (`HUMANIZER_USE_MODEL_REWRITER=false`, `HUMANIZER_ENABLE_PERPLEXITY=false`)
+- Vertex-backed section rewriting enabled
+- deterministic fallback disabled
+- full-section candidate rewriting enabled (`FIX_FULL_SECTION_REWRITE=true`)
+- Desklib-guided acceptance and retry-aware no-change behavior
 
 After the fix service is deployed, update the main backend service to call it by setting:
 
@@ -354,7 +372,7 @@ After the fix service is deployed, update the main backend service to call it by
 WORKFLOW_FIX_BACKEND=service
 FIX_SERVICE_BASE_URL=https://YOUR-FIX-SERVICE-URL
 FIX_SERVICE_AUDIENCE=https://YOUR-FIX-SERVICE-URL
-FIX_SERVICE_TIMEOUT_SECONDS=180
+FIX_SERVICE_TIMEOUT_SECONDS=1200
 ```
 
 The backend service account must also have `roles/run.invoker` on the fix service.
