@@ -720,8 +720,57 @@ def _env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return values or default
 
 
+def _section_gate_order() -> tuple[str, ...]:
+    default_order = (*BODY_WRITING_SECTIONS, "abstract")
+    configured_order = _env_csv("SECTION_GATE_ORDER", default_order)
+    allowed = set(SECTION_ORDER)
+    ordered: list[str] = []
+    for section_name in configured_order:
+        normalized = section_name.strip().lower()
+        if normalized in allowed and normalized not in ordered:
+            ordered.append(normalized)
+    for section_name in default_order:
+        if section_name not in ordered:
+            ordered.append(section_name)
+    return tuple(ordered)
+
+
 def _section_gate_timeout_seconds() -> int:
     return _env_int("SECTION_GATE_MODEL_TIMEOUT_SECONDS", 45, minimum=5, maximum=180)
+
+
+def _section_gate_timeout_for_section(section_name: str, default_timeout: int) -> int:
+    if section_name == "abstract":
+        return _env_int(
+            "SECTION_GATE_ABSTRACT_TIMEOUT_SECONDS",
+            max(default_timeout, 75),
+            minimum=5,
+            maximum=180,
+        )
+    return default_timeout
+
+
+def _section_gate_writing_candidate_count(section_name: str, default_count: int) -> int:
+    if section_name == "abstract":
+        return _env_int(
+            "SECTION_GATE_ABSTRACT_WRITING_CANDIDATES",
+            max(default_count, 4),
+            minimum=1,
+            maximum=6,
+        )
+    return default_count
+
+
+def _section_gate_humanizer_candidate_count(section_name: str) -> int:
+    default_count = _env_int("SECTION_GATE_HUMANIZER_CANDIDATES", 2, minimum=1, maximum=6)
+    if section_name == "abstract":
+        return _env_int(
+            "SECTION_GATE_ABSTRACT_HUMANIZER_CANDIDATES",
+            max(default_count, 4),
+            minimum=1,
+            maximum=6,
+        )
+    return default_count
 
 
 def _compact_previous_section_context(accepted_sections: dict[str, str]) -> str:
@@ -898,16 +947,12 @@ async def _humanize_section_candidate_for_gate(
     strategy_index: int,
     settings: Settings,
     timeout_seconds: int,
+    candidate_count: int,
 ) -> tuple[str | None, dict[str, Any]]:
     humanizer_config = replace(
         HumanizerConfig.from_settings(settings),
         full_section_rewrite=True,
-        section_rewrite_candidate_count=_env_int(
-            "SECTION_GATE_HUMANIZER_CANDIDATES",
-            2,
-            minimum=1,
-            maximum=4,
-        ),
+        section_rewrite_candidate_count=max(1, min(6, int(candidate_count or 1))),
         strategy_order=(strategy,),
         max_iterations=1,
         max_runtime_seconds=timeout_seconds,
@@ -1141,6 +1186,7 @@ async def _run_section_gated_generation_pipeline(
     start_time = perf_counter()
     validation_events: list[str] = []
     pipeline_context: dict[str, object] = {"section_gate_enabled": True}
+    section_gate_order = _section_gate_order()
 
     vertex_client = VertexGeminiClient(resolved_settings)
     mcp_server = build_default_mcp_server()
@@ -1193,13 +1239,13 @@ async def _run_section_gated_generation_pipeline(
         logger.warning("Section-gated pipeline cannot parse structured draft: %s", exc)
         workflow = SectionWorkflowReport(
             status="partial_manual_review",
-            section_order=list(SECTION_ORDER),
+            section_order=list(section_gate_order),
             accepted_sections=[],
-            failed_section="abstract",
+            failed_section=section_gate_order[0],
             stop_reason="invalid_structured_draft",
             sections=[
                 SectionGateResult(
-                    section_name="abstract",
+                    section_name=section_gate_order[0],
                     status="failed",
                     failure_reasons=["invalid_structured_draft"],
                 )
@@ -1209,7 +1255,7 @@ async def _run_section_gated_generation_pipeline(
         partial = PartialDraftPayload(
             job_id=job_id or f"local-{trace_id[:12]}",
             project_id=project_id or "unknown-project",
-            failed_section="abstract",
+            failed_section=section_gate_order[0],
             stop_reason="invalid_structured_draft",
             accepted_sections={},
             section_workflow=workflow,
@@ -1232,7 +1278,7 @@ async def _run_section_gated_generation_pipeline(
             structuring_evidence_summary=structuring_result.evidence_summary,
             generation_status="partial_manual_review",
             section_gate_enabled=True,
-            section_gate_failed_section="abstract",
+            section_gate_failed_section=section_gate_order[0],
             section_gate_stop_reason="invalid_structured_draft",
             section_gate_accepted_sections=[],
         )
@@ -1271,8 +1317,9 @@ async def _run_section_gated_generation_pipeline(
     section_results: list[SectionGateResult] = []
     writing_duration_started = perf_counter()
 
-    for section_name in SECTION_ORDER:
+    for section_name in section_gate_order:
         section_started = perf_counter()
+        section_timeout_seconds = _section_gate_timeout_for_section(section_name, timeout_seconds)
         skeleton = structured_draft.sections[section_name]
         attempts: list[SectionGateAttempt] = []
         section_accepted = False
@@ -1294,8 +1341,8 @@ async def _run_section_gated_generation_pipeline(
             author_metadata=author_metadata,
             writing_style_preferences=writing_style_preferences,
             accepted_sections=accepted_sections,
-            candidate_count=writing_candidate_count,
-            timeout_seconds=timeout_seconds,
+            candidate_count=_section_gate_writing_candidate_count(section_name, writing_candidate_count),
+            timeout_seconds=section_timeout_seconds,
         )
         writing_candidate_map = {
             candidate_id: written_section.text
@@ -1392,7 +1439,8 @@ async def _run_section_gated_generation_pipeline(
                     strategy=strategy,
                     strategy_index=strategy_index,
                     settings=resolved_settings,
-                    timeout_seconds=timeout_seconds,
+                    timeout_seconds=section_timeout_seconds,
+                    candidate_count=_section_gate_humanizer_candidate_count(section_name),
                 )
                 if not humanized_text:
                     reasons = list(runtime_result.get("failure_reasons", [])) or ["humanizer_no_change"]
@@ -1486,7 +1534,7 @@ async def _run_section_gated_generation_pipeline(
         )
         workflow = SectionWorkflowReport(
             status="partial_manual_review",
-            section_order=list(SECTION_ORDER),
+            section_order=list(section_gate_order),
             accepted_sections=list(accepted_sections.keys()),
             failed_section=section_name,
             stop_reason=normalized_reasons[0],
@@ -1694,7 +1742,7 @@ async def _run_section_gated_generation_pipeline(
     total_duration_ms = (perf_counter() - start_time) * 1000
     workflow = SectionWorkflowReport(
         status="completed",
-        section_order=list(SECTION_ORDER),
+        section_order=list(section_gate_order),
         accepted_sections=list(accepted_sections.keys()),
         failed_section=None,
         stop_reason=None,

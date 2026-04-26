@@ -927,6 +927,7 @@ class HumanizerRewriter:
         style_persona: str,
         remediation_context: dict[str, Any] | None,
         strategy: str,
+        require_quality_improvement: bool,
     ) -> dict[str, Any]:
         failure_reasons: list[str] = []
         original_detection = _score_candidate_text(self.detector_scorer, section_text)
@@ -998,7 +999,7 @@ class HumanizerRewriter:
                 original_scores=ai_scores,
                 rewritten_scores=rewritten_scores,
             )
-            if self.detector_scorer is None and not quality_improved:
+            if self.detector_scorer is None and require_quality_improvement and not quality_improved:
                 _append_reason(failure_reasons, "quality_not_improved")
                 continue
 
@@ -1124,6 +1125,7 @@ class HumanizerRewriter:
                 style_persona=persona,
                 remediation_context=remediation_context,
                 strategy=strategy or _strategy_for_iteration(0, self.config.strategy_order),
+                require_quality_improvement=require_quality_improvement,
             )
 
         scored_paragraphs: list[tuple[int, dict[str, float], str]] = []

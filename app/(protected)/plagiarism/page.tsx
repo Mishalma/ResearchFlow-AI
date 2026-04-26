@@ -532,9 +532,13 @@ export default function PlagiarismReportPage() {
         <CardContent className="p-6">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <h2 className="text-xl font-semibold text-white">Flagged Sections</h2>
+              <h2 className="text-xl font-semibold text-white">
+                {isSectionGatePartial ? "Section Gate Diagnostics" : "Flagged Sections"}
+              </h2>
               <p className="mt-1 text-sm text-slate-400">
-                Section-level summaries from the final validation pass.
+                {isSectionGatePartial
+                  ? "The workflow stopped before final whole-paper validation, overlap review, figures, references, and IEEE formatting."
+                  : "Section-level summaries from the final validation pass."}
               </p>
             </div>
             <Badge
@@ -547,8 +551,16 @@ export default function PlagiarismReportPage() {
 
           <div className="mt-6 space-y-4">
             {flaggedSections.length === 0 ? (
-              <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">
-                No section-level issues remained above the final acceptance threshold.
+              <div
+                className={
+                  isSectionGatePartial
+                    ? "rounded-2xl border border-amber-300/20 bg-amber-500/10 p-4 text-sm text-amber-100"
+                    : "rounded-2xl border border-emerald-400/20 bg-emerald-500/10 p-4 text-sm text-emerald-100"
+                }
+              >
+                {isSectionGatePartial
+                  ? "No final validation sections are available because generation stopped at the section AI gate."
+                  : "No section-level issues remained above the final acceptance threshold."}
               </div>
             ) : (
               flaggedSections.map((section) => (

@@ -648,6 +648,105 @@ def test_desklib_candidate_scoring_ranks_candidates_ahead_of_local_score(
     assert "appears in the review record" in result["rewritten_text"]
 
 
+def test_full_section_targeted_rewrite_can_skip_local_quality_gate(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class CandidateBackend:
+        def rewrite_section_candidates(self, **kwargs):
+            return [
+                RewriteAttemptResult(
+                    text=f"{kwargs['section_text']} Revised for review.",
+                    rewriter_used="vertex",
+                    changed=True,
+                )
+            ]
+
+    monkeypatch.setattr(
+        "humanizer.rewriter.composite_ai_score",
+        lambda text: {
+            "composite_score": 0.8,
+            "burstiness": 0.1,
+            "transition_uniformity": 0.8,
+            "cadence_uniformity": 0.8,
+        },
+    )
+    monkeypatch.setattr(
+        "humanizer.rewriter.verify_rewrite_safety",
+        lambda **kwargs: type("SafetyResult", (), {"passed": True, "reasons": [], "similarity": 0.9})(),
+    )
+    monkeypatch.setattr(
+        "humanizer.rewriter.SemanticDriftChecker.drift",
+        lambda self, original, rewritten: 0.0,
+    )
+
+    rewriter = HumanizerRewriter(
+        HumanizerConfig(rewriter_backend="none", full_section_rewrite=True),
+    )
+    rewriter.backend = CandidateBackend()
+    original = "The study reports a 12% improvement [1] with \\cite{trace}."
+
+    result = rewriter.rewrite_section(
+        original,
+        composite_ai_score(original),
+        section_name="results",
+        force_rewrite=True,
+        require_quality_improvement=False,
+    )
+
+    assert result["changed"] is True
+    assert result["rewriter_used"] == "vertex"
+    assert "quality_not_improved" not in result["failure_reasons"]
+
+
+def test_full_section_quality_gate_still_applies_when_required(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class CandidateBackend:
+        def rewrite_section_candidates(self, **kwargs):
+            return [
+                RewriteAttemptResult(
+                    text=f"{kwargs['section_text']} Revised for review.",
+                    rewriter_used="vertex",
+                    changed=True,
+                )
+            ]
+
+    monkeypatch.setattr(
+        "humanizer.rewriter.composite_ai_score",
+        lambda text: {
+            "composite_score": 0.8,
+            "burstiness": 0.1,
+            "transition_uniformity": 0.8,
+            "cadence_uniformity": 0.8,
+        },
+    )
+    monkeypatch.setattr(
+        "humanizer.rewriter.verify_rewrite_safety",
+        lambda **kwargs: type("SafetyResult", (), {"passed": True, "reasons": [], "similarity": 0.9})(),
+    )
+    monkeypatch.setattr(
+        "humanizer.rewriter.SemanticDriftChecker.drift",
+        lambda self, original, rewritten: 0.0,
+    )
+
+    rewriter = HumanizerRewriter(
+        HumanizerConfig(rewriter_backend="none", full_section_rewrite=True),
+    )
+    rewriter.backend = CandidateBackend()
+    original = "The study reports a 12% improvement [1] with \\cite{trace}."
+
+    result = rewriter.rewrite_section(
+        original,
+        composite_ai_score(original),
+        section_name="results",
+        force_rewrite=True,
+        require_quality_improvement=True,
+    )
+
+    assert result["changed"] is False
+    assert "quality_not_improved" in result["failure_reasons"]
+
+
 def test_desklib_candidate_scoring_rejects_non_improving_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ):
